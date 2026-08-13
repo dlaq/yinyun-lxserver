@@ -9,6 +9,18 @@ services:
       - ./data:/server/data
       - ./logs:/server/logs
       - ./cache:/server/cache
-      - ./music:/server/music
+      # fileCache keeps per-user music under /server/music/<username>.
+      # Mount the shared host library at that user root so external copies,
+      # yinyun downloads, Songloft and Navidrome all see the same files.
+      - ./music:/server/music/${LX_MUSIC_USER:-admin}
     environment:
       NODE_ENV: production
+      # Optional Songloft playlist integration (keep credentials in .env or
+      # the deployment secret store, never commit them here).
+      # SONGLOFT_API_URL: http://songloft-host:58091/api/v1
+      # SONGLOFT_USERNAME: your-songloft-user
+      # SONGLOFT_PASSWORD: your-songloft-password
+      # SONGLOFT_SUBSONIC_URL: http://songloft-host:58091/api/v1/jsplugin/subsonic
+      # SONGLOFT_SUBSONIC_USERNAME: your-songloft-user
+      # SONGLOFT_SUBSONIC_PASSWORD: your-songloft-password
+      # SONGLOFT_SCAN_ON_DOWNLOAD: "true"

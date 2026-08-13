@@ -264,6 +264,7 @@ class App {
             dashboard: '仪表盘',
             users: '用户管理',
             data: '数据查看',
+            'library-integration': '曲库联动',
             config: '系统配置',
             logs: '系统日志',
             webdav: 'WebDAV同步',
@@ -285,6 +286,9 @@ class App {
                 break;
             case 'data':
                 this.loadUserData();
+                break;
+            case 'library-integration':
+                window.LibraryIntegration?.activate();
                 break;
             case 'config':
                 this.loadConfig();

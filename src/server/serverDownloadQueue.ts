@@ -51,6 +51,7 @@ interface ResolveResult {
 }
 
 type DownloadResolver = (task: ServerDownloadTask) => Promise<ResolveResult>
+type DownloadCompletionHandler = (task: ServerDownloadTask) => Promise<void> | void
 
 const DEFAULT_CONCURRENT = 3
 const MAX_CONCURRENT_PER_USER = 5
@@ -58,6 +59,7 @@ const tasks = new Map<string, ServerDownloadTask>()
 const controllers = new Map<string, AbortController>()
 const concurrencyByUser = new Map<string, number>()
 let resolver: DownloadResolver | null = null
+let completionHandler: DownloadCompletionHandler | null = null
 let initialized = false
 let processing = false
 let saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -248,6 +250,11 @@ const runTask = async (task: ServerDownloadTask) => {
     }
     task.speed = 0
   } finally {
+    if (completionHandler && ['finished', 'exists'].includes(task.status)) {
+      try { await completionHandler(task) } catch (error: any) {
+        console.warn('[ServerDownloadQueue] completion hook failed:', error?.message || error)
+      }
+    }
     controllers.delete(key)
     task.updatedAt = Date.now()
     scheduleSave()
@@ -294,6 +301,15 @@ export const initialize = (downloadResolver: DownloadResolver) => {
     saveNow()
   }
   void processQueue()
+}
+
+/**
+ * Register a side-effect hook for successfully materialized music.  The
+ * resolver remains the only download path; this hook is for post-download
+ * integrations such as debounced Navidrome/Songloft rescans.
+ */
+export const setCompletionHandler = (handler: DownloadCompletionHandler | null) => {
+  completionHandler = handler
 }
 
 export const enqueue = (username: string, inputs: QueueInput[]) => {

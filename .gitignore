@@ -89,4 +89,10 @@ dist-electron/
 
 .codegraph
 /cover_cache
+
+# Local deployment/build evidence
+.codex-build-*/
+.playwright-cli/
+runtime-*.tar.gz
+/output/
 build/

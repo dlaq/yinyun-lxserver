@@ -563,7 +563,20 @@ class SubsonicHandler {
     private toSyncedPlaylistMusic(music: LX.Music.MusicInfo): LX.Music.MusicInfo | null {
         const platformId = String((music as any)._platformId || music.id || '')
         const platformSource = platformId.match(/^(tx|wy|kw|kg|mg)_/)?.[1]
-        if (!platformSource) return null
+        if (!platformSource) {
+            // A playlist may be built from the shared local music tree (for
+            // example after Songloft -> yinyun pull sync).  Preserve the
+            // local identity and path metadata instead of dropping the item
+            // as "not mapped to an online platform".
+            if (platformId.startsWith('local_') && (music as any)._localFilename) {
+                const {
+                    _platformId,
+                    ...localMusic
+                } = music as any
+                return { ...localMusic, id: platformId, source: 'local' } as LX.Music.MusicInfo
+            }
+            return null
+        }
         const {
             _localFilename,
             _localFolder,

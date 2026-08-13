@@ -17,6 +17,8 @@ import * as fileCache from './fileCache'
 import * as serverDownloadQueue from './serverDownloadQueue'
 import * as remasterQueue from './remasterQueue'
 import { createApiV1Handler } from './apiV1'
+import { PlaylistImportStore, PlaylistSyncStore } from './playlistIntegration'
+import { SongloftClient, SubsonicClient } from './songloftClient'
 import { APP_VERSION, APP_VERSION_TAG } from '@/version'
 import { classifyApiNamespace } from './apiNamespace'
 import {
@@ -769,10 +771,55 @@ const getLeaderboardList = async (source: string, bangid: string, page: number, 
   return sdk.leaderboard.getList(bangid, page)
 }
 
+// Songloft is an optional integration.  Keep it disabled until credentials
+// are supplied, while still allowing the endpoint/status UI to show the
+// configured target.  No download, metadata, or archive operation is routed
+// through this client; it is only used for local-library matching and
+// playlist/scan coordination.
+const integrationConfig = global.lx.config as any
+const readIntegrationValue = (envName: string, configName: string) => String(
+  process.env[envName] ?? integrationConfig[configName] ?? '',
+).trim()
+const songloftApiBase = readIntegrationValue('SONGLOFT_API_URL', 'songloft.apiUrl')
+const songloftClient = new SongloftClient({
+  baseUrl: songloftApiBase,
+  username: readIntegrationValue('SONGLOFT_USERNAME', 'songloft.username') || undefined,
+  password: readIntegrationValue('SONGLOFT_PASSWORD', 'songloft.password') || undefined,
+  accessToken: readIntegrationValue('SONGLOFT_ACCESS_TOKEN', 'songloft.accessToken') || undefined,
+})
+const subsonicUsername = readIntegrationValue('SONGLOFT_SUBSONIC_USERNAME', 'songloft.subsonicUsername') || readIntegrationValue('SONGLOFT_USERNAME', 'songloft.username')
+const subsonicPassword = readIntegrationValue('SONGLOFT_SUBSONIC_PASSWORD', 'songloft.subsonicPassword') || readIntegrationValue('SONGLOFT_PASSWORD', 'songloft.password')
+const configuredSubsonicBase = readIntegrationValue('SONGLOFT_SUBSONIC_URL', 'songloft.subsonicUrl')
+const subsonicBase = !configuredSubsonicBase ? '' : /\/rest\/?$/i.test(configuredSubsonicBase) ? configuredSubsonicBase : `${configuredSubsonicBase.replace(/\/+$/, '')}/rest`
+const songloftSubsonicClient = subsonicBase && subsonicUsername && subsonicPassword
+  ? new SubsonicClient({ baseUrl: subsonicBase, username: subsonicUsername, password: subsonicPassword })
+  : null
+const playlistSyncStores = new Map<string, PlaylistSyncStore>()
+const playlistImportStores = new Map<string, PlaylistImportStore>()
+const getPlaylistSyncStore = (username: string) => {
+  const key = getUserDirname(username)
+  let store = playlistSyncStores.get(key)
+  if (!store) {
+    store = new PlaylistSyncStore(path.join(global.lx.dataPath, 'playlist-sync', `${key}.json`))
+    playlistSyncStores.set(key, store)
+  }
+  return store
+}
+const getPlaylistImportStore = (username: string) => {
+  const key = getUserDirname(username)
+  let store = playlistImportStores.get(key)
+  if (!store) {
+    store = new PlaylistImportStore(path.join(global.lx.dataPath, 'playlist-import', `${key}.json`))
+    playlistImportStores.set(key, store)
+  }
+  return store
+}
+
 const handleApiV1 = createApiV1Handler({
   serverVersion: APP_VERSION,
   getAuthSecret: () => `${getServerId()}:${global.lx.config['frontend.password']}`,
   getUsers: () => global.lx.config.users,
+  isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
   musicSdk,
   normalizeSongInfo,
   resolveSong: resolveServerSong,
@@ -782,6 +829,10 @@ const handleApiV1 = createApiV1Handler({
   saveLibrary: writeUserLibrary,
   getLeaderboardBoards,
   getLeaderboardList,
+  getSongloftClient: () => songloftClient,
+  getSongloftSubsonicClient: () => songloftSubsonicClient,
+  getPlaylistSyncStore,
+  getPlaylistImportStore,
 })
 
 const isPathInside = (child: string, parent: string): boolean => {
@@ -5680,6 +5731,19 @@ export const startServer = async (port: number, ip: string) => {
     console.error('[Server] Failed to initialize user APIs:', err.message)
   }
 
+  const scanAfterYinyunDownload = readIntegrationValue('SONGLOFT_SCAN_ON_DOWNLOAD', 'songloft.scanOnDownload').toLowerCase() !== 'false'
+  let songloftScanTimer: ReturnType<typeof setTimeout> | null = null
+  const scheduleSongloftScan = () => {
+    if (!scanAfterYinyunDownload || !songloftClient.configured) return
+    if (songloftScanTimer) clearTimeout(songloftScanTimer)
+    songloftScanTimer = setTimeout(() => {
+      songloftScanTimer = null
+      void songloftClient.startScan(false).catch(error => {
+        console.warn('[Songloft] post-download scan failed:', error?.message || error)
+      })
+    }, 5000)
+  }
+  serverDownloadQueue.setCompletionHandler(() => { scheduleSongloftScan() })
   serverDownloadQueue.initialize(async task => {
     const songInfo = normalizeSongInfo(task.songInfo)
     if (!isConfiguredUsername(task.username)) throw new Error('Download task user no longer exists')

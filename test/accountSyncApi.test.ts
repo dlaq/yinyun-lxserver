@@ -20,6 +20,7 @@ test('account sync API supports login, large restore, and conflict protection', 
       maxSnapshotNum: 10,
       'list.addMusicLocationType': 'bottom',
       'player.path': '/music',
+      'frontend.password': 'admin-secret',
       'subsonic.enable': true,
     } as LX.Config,
     saveConfig: () => {},
@@ -28,10 +29,12 @@ test('account sync API supports login, large restore, and conflict protection', 
   const { createApiV1Handler } = await import('../src/server/apiV1')
   const { releaseUserSpace } = await import('../src/user')
   const libraries: Record<'artists' | 'albums', any[]> = { artists: [], albums: [] }
+  let scanStarts = 0
   const handler = createApiV1Handler({
     serverVersion: 'test',
     getAuthSecret: () => 'test-secret',
     getUsers: () => global.lx.config.users,
+    isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
     musicSdk: {
       tx: {
         extendSearch: {
@@ -54,6 +57,10 @@ test('account sync API supports login, large restore, and conflict protection', 
     saveLibrary: async (_username, type, items) => { libraries[type] = items },
     getLeaderboardBoards: async () => ({ list: [{ id: 'tx__4', bangid: '4', name: 'Test board' }] }),
     getLeaderboardList: async () => ({ list: [{ songmid: 'song-1', name: 'Test song', singer: 'Test singer', source: 'tx' }] }),
+    getSongloftClient: () => ({
+      configured: true,
+      startScan: async () => { scanStarts++; return { message: 'started' } },
+    }) as any,
   })
   const server = http.createServer((req, res) => {
     void handler(req, res, new URL(req.url || '/', 'http://127.0.0.1')).then(handled => {
@@ -83,6 +90,17 @@ test('account sync API supports login, large restore, and conflict protection', 
       'Authorization': `Bearer ${login.data.accessToken}`,
       'Content-Type': 'application/json',
     }
+
+    const unauthorizedScan = await fetch(`${origin}/api/v1/integration/songloft/scan`, {
+      method: 'POST', headers, body: '{}',
+    })
+    assert.equal(unauthorizedScan.status, 403)
+    assert.equal(scanStarts, 0)
+    const authorizedScan = await fetch(`${origin}/api/v1/integration/songloft/scan`, {
+      method: 'POST', headers: { ...headers, 'X-Frontend-Auth': 'admin-secret' }, body: '{}',
+    })
+    assert.equal(authorizedScan.status, 202)
+    assert.equal(scanStarts, 1)
 
     const snapshotResponse = await fetch(`${origin}/api/v1/sync/snapshot`, { headers })
     assert.equal(snapshotResponse.status, 200)
