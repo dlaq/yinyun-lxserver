@@ -143,6 +143,10 @@ export interface CacheItem {
     audioContainer?: string
     metadataWritable?: boolean
     metadataError?: string
+    // [YINYUN-INTEGRATION] Records which metadata source won during indexing.
+    // This lets a later refresh repair legacy filename-only entries once, while
+    // avoiding a full embedded-tag read on every request.
+    metadataSource?: 'embedded' | 'filename'
     embedLyricError?: string
     lyricFormat?: LyricOutputFormat
     lyricRequestedFormat?: LyricOutputFormat
@@ -855,6 +859,20 @@ export const syncCacheIndex = async (
 
             let finalQuality = quality || 'unknown'
 
+            // Files copied from the shared Navidrome/Songloft directory often
+            // use an artist-first filename (for example `F.I.R. - 你的微笑.flac`).
+            // The filename parser above cannot know whether the first segment
+            // is the title or the artist.  Such files are indexed as
+            // `unknown_*`, so prefer the embedded tags during the next index
+            // refresh; otherwise Yinyun and Songloft will see the same file as
+            // different songs.
+            const needsEmbeddedMetadataCorrection = !!existing && (
+                existing.metadataSource !== 'embedded' && (
+                    existing.source === 'unknown' ||
+                    existing.id.startsWith('unknown_')
+                )
+            )
+
             const needsCoverCheck = !existing ||
                 existing.coverCheckedVersion !== COVER_CHECK_VERSION ||
                 existing.coverCheckedMtime !== stats.mtimeMs ||
@@ -865,7 +883,7 @@ export const syncCacheIndex = async (
             const qualityCorrectionNeeded = !!existing && needsQualityCorrection(existing.quality, currentAudioContainer)
 
             // Update or add to index if anything changed (size, mtime, lyric status, or cover status)
-            if (!existing || existing.size !== stats.size || existing.hasLyric !== hasLyricOnDisk || needsCoverCheck || !existing.interval || existing.quality === 'unknown' || !existing.bitrate || qualityCorrectionNeeded) {
+            if (!existing || existing.size !== stats.size || existing.hasLyric !== hasLyricOnDisk || needsCoverCheck || !existing.interval || existing.quality === 'unknown' || !existing.bitrate || qualityCorrectionNeeded || needsEmbeddedMetadataCorrection) {
                 if (existing) {
                     existing.size = stats.size
                     existing.mtime = stats.mtimeMs
@@ -897,11 +915,17 @@ export const syncCacheIndex = async (
                     }
 
                     // If interval or quality/bitrate is missing/unknown, or hasEmbedLyric not yet detected, try to extract it
-                    if (!existing.interval || existing.quality === 'unknown' || !existing.bitrate || existing.releaseDate === undefined || existing.hasEmbedLyric === undefined || existing.metadataWritable === undefined || qualityCorrectionNeeded) {
+                    if (!existing.interval || existing.quality === 'unknown' || !existing.bitrate || existing.releaseDate === undefined || existing.hasEmbedLyric === undefined || existing.metadataWritable === undefined || qualityCorrectionNeeded || needsEmbeddedMetadataCorrection) {
                         let tagger: any
                         try {
                             tagger = new MusicTagger()
                             tagger.loadPath(filePath)
+                            if (needsEmbeddedMetadataCorrection) {
+                                if (tagger.title) existing.name = tagger.title
+                                if (tagger.artist) existing.singer = tagger.artist
+                                if (tagger.album) existing.album = tagger.album
+                                existing.metadataSource = tagger.title || tagger.artist || tagger.album ? 'embedded' : 'filename'
+                            }
                             const dur = tagger.duration
                             if (dur && !existing.interval) existing.interval = formatPlayTime(dur / 1000)
                             existing.bitrate = tagger.bitRate
@@ -925,6 +949,7 @@ export const syncCacheIndex = async (
                             existing.metadataWritable = false
                             existing.metadataError = getMetadataUnsupportedMessage(existing.audioContainer)
                             existing.hasEmbedLyric = false
+                            if (needsEmbeddedMetadataCorrection) existing.metadataSource = 'filename'
                         } finally {
                             try { if (tagger) tagger.dispose() } catch (e) { }
                         }
@@ -942,14 +967,19 @@ export const syncCacheIndex = async (
                     let hasEmbedLyric = false
                     let metadataWritable = false
                     let metadataError: string | undefined
+                    let metadataSource: CacheItem['metadataSource'] = 'filename'
                     const audioContainer = detectAudioContainer(filePath)
 
                     try {
                         const tagger = new MusicTagger()
                         tagger.loadPath(filePath)
-                        if (tagger.title && !songName) songName = tagger.title
-                        if (tagger.artist && !singer) singer = tagger.artist
-                        if (tagger.album && !album) album = tagger.album
+                        // Embedded tags are authoritative for files copied from
+                        // the shared library.  This also corrects artist-first
+                        // filenames that would otherwise be parsed backwards.
+                         if (tagger.title) songName = tagger.title
+                         if (tagger.artist) singer = tagger.artist
+                         if (tagger.album) album = tagger.album
+                         if (tagger.title || tagger.artist || tagger.album) metadataSource = 'embedded'
                         if (hasValidEmbeddedCover(tagger.pictures)) hasCover = true
 
                         const dur = tagger.duration
@@ -1005,6 +1035,7 @@ export const syncCacheIndex = async (
                         audioContainer,
                         metadataWritable,
                         metadataError,
+                        metadataSource,
                         coverCheckedVersion: COVER_CHECK_VERSION,
                         coverCheckedMtime: stats.mtimeMs,
                         coverCheckedSize: stats.size,

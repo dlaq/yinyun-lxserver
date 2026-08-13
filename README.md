@@ -112,7 +112,7 @@
 
 ### 9. Subsonic 协议与全网检索
 
-适配 Subsonic 协议，可使用音流、LMP、Feishin 等客户端连接本地曲库和歌单。搜索支持 `wy:`、`kg:`、`tx:`、`kw:`、`mg:` 平台前缀，以及 `online:` / `local:` 范围前缀。
+适配 Subsonic 协议，可使用音流、LMP、Feishin 等客户端连接本地曲库和歌单。搜索支持 `wy:`、`kg:`、`tx:`、`kw:`、`mg:` 平台前缀，以及 `online:` / `local:` 范围前缀。`subsonic.onlineSearch` 只控制第三方 Subsonic 客户端的在线搜索结果，不会下载文件、写入补齐队列或改变本地曲库匹配；两端索引需要在管理后台使用“刷新双端索引”。
 
 ## 🔒 访问控制与安全
 
@@ -212,7 +212,7 @@ npm start
 ### 3. 访问说明
 
 - **Web 播放器**: `http://your-ip:9527/`
-- **管理后台**: `http://your-ip:9527/admin`（默认管理密码：`123456`）
+- **管理后台**: `http://your-ip:9527/admin`（首次部署请通过环境变量设置管理密码；不要使用示例密码）
 - **Subsonic**: `http://your-ip:9527/rest`
 
 ---
@@ -237,7 +237,7 @@ npm start
 | `BIND_IP`                             | `bindIP`                           | 绑定 IP                                                            | `0.0.0.0`        |
 | `SUBSONIC_ENABLE`                     | `subsonic.enable`                  | 是否启用 Subsonic 协议支持 (服务默认开启)                          | `true`           |
 | `SUBSONIC_PATH`                       | `subsonic.path`                    | Subsonic 访问路径 (默认为 `/rest`)                               | `/rest`          |
-| `FRONTEND_PASSWORD`                   | `frontend.password`                | Web 管理界面访问密码                                               | `123456`         |
+| `FRONTEND_PASSWORD`                   | `frontend.password`                | Web 管理界面访问密码                                               | 部署时设置         |
 | `SERVER_NAME`                         | `serverName`                       | 同步服务名称                                                       | `yinyun`        |
 | `MAX_SNAPSHOT_NUM`                    | `maxSnapshotNum`                   | 保留的最大快照数量                                                 | `10`             |
 | `CONFIG_PATH`                         | -                                    | 指定外部配置文件的绝对路径                                         | -                  |
@@ -269,7 +269,7 @@ npm start
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
 | `subsonic.enableDebug` | 是否开启 Subsonic 调试日志模式 | `true` |
-| `subsonic.onlineSearch` | 是否开启 Subsonic 在线全网搜索 | `true` |
+| `subsonic.onlineSearch` | 是否开启 Subsonic 在线全网搜索（仅影响第三方客户端搜索，不触发下载或本地索引） | `true` |
 | `subsonic.onlineSearchMode` | Subsonic 在线搜索模式 (`fallback` 回退模式 / `merge` 合并模式 / `local_only` 仅本地) | `"fallback"` |
 | `subsonic.onlineSearchSources` | Subsonic 在线搜索默认音源列表 | `"wy,tx,kw,kg,mg"` |
 | `subsonic.lyricTranslation` | Subsonic 歌词中是否包含翻译 | `true` |

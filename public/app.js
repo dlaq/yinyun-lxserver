@@ -65,7 +65,14 @@ class App {
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', (e) => {
                 const view = item.dataset.view;
-                if (view === 'music') return; // 播放器链接直接跳转，不拦截
+                if (view === 'music') {
+                    // [YINYUN-INTEGRATION] The admin shell is not the player.
+                    // Explicitly navigate to the fixed player entry instead of
+                    // allowing href="#" to leave the shell on the About view.
+                    e.preventDefault();
+                    window.location.assign('/');
+                    return;
+                }
                 e.preventDefault();
                 this.switchView(view);
             });

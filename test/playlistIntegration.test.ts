@@ -9,6 +9,7 @@ import {
   canonicalTrackId,
   matchTrack,
   mergePlaylistIds,
+  metadataAgreement,
   normalizeTitle,
   playlistSyncConflicts,
   preferExistingPlaylistCandidate,
@@ -39,6 +40,25 @@ test('playlist matching refuses low-confidence and tied candidates', () => {
     toIntegrationTrack({ id: 1, title: '同名歌曲', artist: '同一歌手', duration: 100 }),
     toIntegrationTrack({ id: 2, title: '同名歌曲', artist: '同一歌手', duration: 100 }),
   ]).status, 'ambiguous')
+})
+
+test('shared relative paths require metadata sanity and do not blindly raise a score', () => {
+  const source = toIntegrationTrack({ title: '五月雨', artist: '高梨康治', album: 'NARUTO soundtrack II', duration: 207, relativePath: 'neteasy/高梨康治 - 五月雨.flac' })
+  const sameFileDifferentTags = toIntegrationTrack({ title: '五月雨', artist: '刃-yaiba-', album: 'Yamagasumi (RUDE Remix)', duration: 207, relativePath: '/server/music/neteasy/高梨康治 - 五月雨.flac' })
+  const agreement = metadataAgreement(source, sameFileDifferentTags)
+  assert.equal(agreement.title, true)
+  assert.equal(agreement.duration, true)
+  assert.equal(agreement.strong, true)
+  const matched = matchTrack(source, [sameFileDifferentTags])
+  assert.equal(matched.status, 'matched')
+  assert.equal(matched.score, 1)
+  assert.equal(matched.method, 'relative_path_metadata')
+
+  const unrelated = toIntegrationTrack({ title: '另一首歌', artist: '另一位歌手', duration: 180, relativePath: 'neteasy/高梨康治 - 五月雨.flac' })
+  const rejected = matchTrack(source, [unrelated])
+  assert.equal(rejected.status, 'missing')
+  assert.equal(rejected.method, 'relative_path_conflict')
+  assert.ok(rejected.score < 0.76)
 })
 
 test('playlist matching can resolve exact duplicate library entities for playlist writes', () => {
@@ -129,6 +149,29 @@ test('playlist import ledger keeps source tracks for later completion', async ()
   assert.equal(loaded[0].importId, record.importId)
   assert.equal(loaded[0].tracks[0].source, 'qq')
   assert.equal(loaded[0].tracks[0].title, 'Song')
+})
+
+test('playlist import ledger lists detached history records', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'yinyun-playlist-history-'))
+  const filePath = path.join(root, 'imports.json')
+  const store = new PlaylistImportStore(filePath)
+  const record = {
+    importId: 'import_history',
+    username: 'admin',
+    source: 'wy',
+    sourcePlaylistId: '148402843',
+    name: '火影忍者超燃BGM',
+    yinyunPlaylistId: 'playlist-history',
+    tracks: [toIntegrationTrack({ id: 'song-1', source: 'wy', title: '五月雨', artist: '高梨康治' })],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+  await store.upsert(record)
+  const listed = store.list()
+  assert.equal(listed.length, 1)
+  assert.equal(listed[0].sourcePlaylistId, '148402843')
+  listed[0].tracks[0].title = 'changed'
+  assert.equal(store.get(record.importId)?.tracks[0].title, '五月雨')
 })
 
 test('playlist ledgers do not lose concurrent in-memory records on reload', async () => {

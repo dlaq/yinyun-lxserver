@@ -27,6 +27,22 @@ export type TrackMatch = {
   candidates: Array<{ track: IntegrationTrack; score: number; method: string }>
 }
 
+/**
+ * [YINYUN-INTEGRATION] One scoring policy is shared by the Yinyun index,
+ * Songloft native API, Songloft Subsonic fallback, and playlist imports.
+ * Candidate evidence is ordered in scoreCandidate/candidateLibraryFor:
+ * shared relative path with metadata sanity validation, ISRC, fingerprint,
+ * normalized metadata + duration, then fuzzy similarity. A close second
+ * candidate stays ambiguous on purpose. Embedded tags are read by the
+ * Yinyun file index before tracks enter this matcher; this module does not
+ * pretend that a filename alone is metadata.
+ */
+export const SHARED_LIBRARY_MATCH_OPTIONS = {
+  threshold: 0.76,
+  ambiguityMargin: 0.045,
+  resolveExactDuplicates: true,
+} as const
+
 export type PlaylistMergeResult = {
   ids: string[]
   conflicts: Array<'removed_on_one_side' | 'reordered_on_both_sides'>
@@ -62,6 +78,13 @@ const compact = (value: unknown) => text(value)
   .replace(/[\u0300-\u036f]/g, '')
   .toLocaleLowerCase()
   .replace(/[^\p{Letter}\p{Number}\u3400-\u9fff]+/gu, '')
+
+const normalizeRelativePath = (value: unknown) => {
+  const raw = text(value).replace(/\\/g, '/')
+  const marker = raw.toLocaleLowerCase().lastIndexOf('/music/')
+  if (marker >= 0) return raw.slice(marker + '/music/'.length).toLocaleLowerCase()
+  return raw.replace(/^\/?music\//i, '').replace(/^\/+/, '').toLocaleLowerCase()
+}
 
 const versionTags = (value: string): string[] => {
   const normalized = text(value).toLocaleLowerCase()
@@ -128,10 +151,51 @@ const trackFeatures = (track: IntegrationTrack) => ({
   album: compact(track.album),
   isrc: compact(track.isrc),
   fingerprint: text(track.fingerprint),
-  path: text(track.relativePath).replace(/\\/g, '/').replace(/^\/+/, '').toLocaleLowerCase(),
+  path: normalizeRelativePath(track.relativePath),
 })
 
 const sameValues = (left: string[], right: string[]) => left.length === right.length && left.every(value => right.includes(value))
+
+export type MetadataAgreement = {
+  title: boolean
+  artist: boolean
+  album: boolean
+  duration: boolean
+  externalId: boolean
+  strong: boolean
+}
+
+/**
+ * A relative path is a physical-file identity only when the metadata still
+ * provides a minimum sanity check.  Songloft and Yinyun can disagree about
+ * embedded artist/album tags for the same file, so requiring every field to
+ * be equal would reintroduce the 13/12 split.  Conversely, accepting a path
+ * with completely unrelated metadata would make a stale or colliding index
+ * entry look like a match.  The rule therefore accepts an exact ISRC/fingerprint,
+ * or an exact title plus one supporting field (artist, album, or duration).
+ */
+export const metadataAgreement = (source: IntegrationTrack, candidate: IntegrationTrack): MetadataAgreement => {
+  const left = trackFeatures(source)
+  const right = trackFeatures(candidate)
+  const title = Boolean(left.title.key && left.title.key === right.title.key)
+  const artist = Boolean(left.artists.length && right.artists.length && (
+    sameValues(left.artists, right.artists) || left.artists.some(value => right.artists.includes(value))
+  ))
+  const album = Boolean(left.album && right.album && left.album === right.album)
+  const duration = Boolean(source.duration && candidate.duration && Math.abs(source.duration - candidate.duration) <= 3)
+  const externalId = Boolean(
+    (left.isrc && right.isrc && left.isrc === right.isrc) ||
+    (left.fingerprint && right.fingerprint && left.fingerprint === right.fingerprint),
+  )
+  return {
+    title,
+    artist,
+    album,
+    duration,
+    externalId,
+    strong: externalId || (title && (artist || album || duration)),
+  }
+}
 
 const hasStrongMetadataIdentity = (source: IntegrationTrack, candidate: IntegrationTrack) => {
   const left = trackFeatures(source)
@@ -156,7 +220,14 @@ const artistScore = (left: string[], right: string[]) => {
 const scoreCandidate = (source: IntegrationTrack, candidate: IntegrationTrack) => {
   const left = trackFeatures(source)
   const right = trackFeatures(candidate)
-  if (left.path && right.path && left.path === right.path) return { score: 1, method: 'relative_path' }
+  if (left.path && right.path && left.path === right.path) {
+    // Same path is the strongest physical identity, but still validate it
+    // against metadata.  A conflict remains visible as a low-confidence
+    // candidate instead of being silently promoted to a match.
+    return metadataAgreement(source, candidate).strong
+      ? { score: 1, method: 'relative_path_metadata' }
+      : { score: 0.72, method: 'relative_path_conflict' }
+  }
   if (left.isrc && right.isrc && left.isrc === right.isrc) return { score: 1, method: 'isrc' }
   if (left.fingerprint && right.fingerprint && left.fingerprint === right.fingerprint) return { score: 1, method: 'fingerprint' }
 
@@ -344,6 +415,8 @@ export type PlaylistImportRecord = {
   name: string
   yinyunPlaylistId: string
   tracks: IntegrationTrack[]
+  /** User-confirmed provider for an ambiguous row, keyed by source index. */
+  resolutions?: Record<string, 'yinyun' | 'songloft'>
   createdAt: string
   updatedAt: string
 }
@@ -373,6 +446,16 @@ export class PlaylistImportStore {
   }
 
   get(importId: string) { return this.payload.records.find(record => record.importId === importId) }
+
+  /** Return a detached copy so callers can render history without mutating the ledger. */
+  list() {
+    if (!this.loaded) this.load()
+    return this.payload.records.map(record => ({
+      ...record,
+      tracks: record.tracks.map(track => ({ ...track })),
+      resolutions: record.resolutions ? { ...record.resolutions } : undefined,
+    }))
+  }
 
   upsert(record: PlaylistImportRecord) {
     if (!this.loaded) this.load()

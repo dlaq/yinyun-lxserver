@@ -66,7 +66,8 @@ document.addEventListener('DOMContentLoaded', () => {
 const DEFAULT_ENTRY_TABS = new Set(['search', 'songlist', 'leaderboard', 'favorites', 'localmusic', 'about']);
 const DEFAULT_SETTINGS = {
     itemsPerPage: 20, // Default 20 items per page, can be 'all'
-    defaultEntry: 'about', // 默认入口
+    defaultEntry: 'search', // 默认入口：播放器主界面
+    defaultEntryVersion: 2,
     preferredQuality: 'flac', // 默认音质偏好
     enableProxyPlayback: false, // 播放音乐代理
     enableProxyDownload: false, // 下载音乐代理
@@ -135,6 +136,12 @@ function normalizeDownloadConcurrency(value) {
 function normalizeStoredSettings(nextSettings) {
     if (!nextSettings || typeof nextSettings !== 'object') return nextSettings;
     delete nextSettings.remasterRetryManifest;
+    // Migrate installations that inherited the old implicit About entry.
+    // Once the user explicitly chooses a tab in v2, keep that choice.
+    if (nextSettings.defaultEntry === 'about' && !nextSettings.defaultEntryVersion) {
+        nextSettings.defaultEntry = DEFAULT_SETTINGS.defaultEntry;
+    }
+    nextSettings.defaultEntryVersion = 2;
     if (!DEFAULT_ENTRY_TABS.has(nextSettings.defaultEntry)) {
         nextSettings.defaultEntry = DEFAULT_SETTINGS.defaultEntry;
     }
@@ -8855,6 +8862,7 @@ function renderMyLists(data) {
             <i class="fas ${icon} w-5 t-text-muted group-hover:text-emerald-500 transition-colors flex-shrink-0"></i>
             ${displayName.length > 8 ? `<div class="ml-2 flex-1 overflow-hidden">${nameHtml}</div>` : nameHtml}
             <span class="text-xs text-gray-300 group-hover:t-text-muted mr-2 flex-shrink-0">${count}</span>
+            ${typeof listObj !== 'string' ? `<button type="button" class="text-gray-300 hover:text-emerald-500 flex-shrink-0 mr-2 transition-colors" title="同步到 Songloft" aria-label="同步到 Songloft" onclick="handleSongloftSyncList('${id}', event)"><i class="fas fa-arrows-rotate text-[10px]"></i></button>` : ''}
             ${typeof listObj !== 'string' ? `<button type="button" class="text-gray-300 hover:text-emerald-500 flex-shrink-0 mr-2 transition-colors" title="分享歌单" aria-label="分享歌单" onclick="handleSharePlaylist('${id}', event)"><i class="fas fa-share-alt text-[10px]"></i></button>` : ''}
             ${typeof listObj !== 'string' ? `<button type="button" class="text-gray-300 hover:text-emerald-500 flex-shrink-0 mr-2 transition-colors" title="重命名歌单" aria-label="重命名歌单" onclick="handleRenameList('${id}', event)"><i class="fas fa-pen text-[10px]"></i></button>` : ''}
             ${id !== 'default' && id !== 'love' ? `<i class="fas fa-trash text-gray-300 hover:text-red-500 hidden group-hover:block flex-shrink-0" onclick="handleRemoveList('${id}', event)"></i>` : ''}
@@ -9049,6 +9057,7 @@ async function handleCreateList() {
         // Sync
         try {
             await pushDataChange(activeListData);
+            scheduleSongloftPlaylistSync(newList.id);
             renderMyLists(currentListData);
             // Re-render the add modal grid if it is open (or just to keep it fresh)
             if (typeof renderPlaylistAddGrid === 'function') {
@@ -9061,6 +9070,54 @@ async function handleCreateList() {
         }
     }
 }
+
+const songloftSyncTimers = new Map();
+
+async function syncSongloftPlaylist(listId, silent = false) {
+    const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
+    if (!list || !isUserLoggedIn()) return null;
+    const tokenHeaders = getUserAuthHeaders();
+    if (!tokenHeaders['x-user-token']) return null;
+    const response = await fetch('/api/v1/integration/playlists/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...tokenHeaders },
+        body: JSON.stringify({ yinyunPlaylistId: list.id, direction: 'push', mode: 'merge' }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.error?.message || payload?.message || `Songloft 同步失败（${response.status}）`);
+    const result = payload.data || payload;
+    if (!silent && typeof showSuccess === 'function') {
+        showSuccess(`“${list.name || '歌单'}”已同步到 Songloft`);
+    }
+    return result;
+}
+
+function scheduleSongloftPlaylistSync(listId) {
+    if (!listId || !isUserLoggedIn()) return;
+    const previous = songloftSyncTimers.get(String(listId));
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+        songloftSyncTimers.delete(String(listId));
+        syncSongloftPlaylist(listId, true).catch(error => console.warn('[Songloft] 自动同步失败:', error.message || error));
+    }, 1500);
+    songloftSyncTimers.set(String(listId), timer);
+}
+
+async function handleSongloftSyncList(listId, event) {
+    if (event) event.stopPropagation();
+    const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
+    if (!list) return;
+    const confirmed = typeof showSelect !== 'function' || await showSelect('同步到 Songloft', `将“${list.name || '歌单'}”安全合并到 Songloft（只追加，不删除远端歌曲）。继续吗？`);
+    if (!confirmed) return;
+    try {
+        await syncSongloftPlaylist(listId, false);
+    } catch (error) {
+        console.error('[Songloft] 手动同步失败:', error);
+        if (typeof showError === 'function') showError(error.message || 'Songloft 同步失败');
+    }
+}
+
+window.handleSongloftSyncList = handleSongloftSyncList;
 
 async function handleRenameList(listId, event) {
     if (event) event.stopPropagation();
@@ -9088,6 +9145,7 @@ async function handleRenameList(listId, event) {
     list.name = nextName;
     try {
         await pushDataChange();
+        scheduleSongloftPlaylistSync(listId);
         renderMyLists(currentListData);
 
         if (typeof renderPlaylistAddGrid === 'function' && !document.getElementById('playlist-add-modal')?.classList.contains('hidden')) {
@@ -9519,6 +9577,7 @@ function _executeCollectSongList(activeListData, detail) {
     activeListData.userList.push(newList);
 
     pushDataChange(activeListData).then(() => {
+        scheduleSongloftPlaylistSync(newList.id);
         renderMyLists(currentListData);
         if (window.showToast) window.showToast('success', '歌单收藏成功！');
     }).catch(err => {
@@ -10985,6 +11044,7 @@ async function handleTogglePlaylist(listId, btnElement) {
                 })
             });
             if (!res.ok) throw new Error(await res.text());
+            scheduleSongloftPlaylistSync(listId);
             showSuccess(`批量收藏 ${addedSongs.length} 首歌曲成功`);
 
             // Cleanup selection
@@ -11042,6 +11102,7 @@ async function handleTogglePlaylist(listId, btnElement) {
 
         const synced = await pushDataChange(activeListData);
         if (synced === false) throw new Error('服务器未能保存歌单变更');
+        scheduleSongloftPlaylistSync(listId);
         showSuccess(willAdd ? '已收藏到歌单' : '已从歌单移除');
     } catch (e) {
         if (willAdd) {

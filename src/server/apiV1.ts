@@ -41,6 +41,7 @@ import {
   type IntegrationTrack,
   type PlaylistImportRecord,
   type PlaylistSyncRecord,
+  SHARED_LIBRARY_MATCH_OPTIONS,
 } from './playlistIntegration'
 import { SongloftClient, SongloftRequestError, SubsonicClient } from './songloftClient'
 
@@ -75,6 +76,7 @@ interface ApiV1Dependencies {
   getSongloftSubsonicClient?: () => SubsonicClient | null
   getPlaylistSyncStore?: (username: string) => PlaylistSyncStore
   getPlaylistImportStore?: (username: string) => PlaylistImportStore
+  getLegacyUser?: (req: IncomingMessage) => string | null
 }
 
 interface ApiErrorShape {
@@ -197,7 +199,7 @@ const requireUser = (req: IncomingMessage, deps: ApiV1Dependencies, url?: URL) =
     const trackId = url.pathname.match(/^\/api\/v1\/library\/tracks\/([^/]+)\/(?:stream|cover)$/)?.[1]
     if (mediaPayload && trackId && mediaPayload.trackId === decodeURIComponent(trackId)) payload = mediaPayload
   }
-  const username = payload ? tryNormalizeUsername(payload.sub) : null
+  const username = payload ? tryNormalizeUsername(payload.sub) : deps.getLegacyUser?.(req) || null
   if (!username || !deps.getUsers().some(user => user.name === username)) {
     throw new ApiError(401, 'unauthorized', '登录状态无效或已过期')
   }
@@ -430,6 +432,29 @@ const getPlaylist = async (username: string, playlistId: string) => {
   return playlist
 }
 
+const publicPlaylistImportRecord = (record: PlaylistImportRecord) => ({
+  importId: record.importId,
+  name: record.name,
+  source: record.source,
+  sourcePlaylistId: record.sourcePlaylistId || null,
+  sourcePlaylistName: record.sourcePlaylistName || record.name,
+  yinyunPlaylistId: record.yinyunPlaylistId,
+  trackCount: record.tracks.length,
+  createdAt: record.createdAt,
+  updatedAt: record.updatedAt,
+})
+
+const findExistingPlaylistImport = (
+  store: PlaylistImportStore,
+  source: string,
+  sourcePlaylistId: string | undefined,
+): PlaylistImportRecord | undefined => {
+  if (!sourcePlaylistId) return undefined
+  return store.list()
+    .filter(record => record.source === source && record.sourcePlaylistId === sourcePlaylistId)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0]
+}
+
 const requireSongloftClient = (deps: ApiV1Dependencies) => {
   const client = deps.getSongloftClient?.()
   if (!client || !client.configured) throw new ApiError(503, 'songloft_not_configured', 'Songloft 原生 API 尚未配置')
@@ -444,6 +469,17 @@ const requireSongloftSubsonicClient = (deps: ApiV1Dependencies) => {
 
 const requireIntegrationAdmin = (req: IncomingMessage, deps: ApiV1Dependencies) => {
   if (!deps.isAdminRequest?.(req)) throw new ApiError(403, 'integration_admin_required', '该操作需要音云管理后台权限')
+}
+
+const refreshYinyunLibraryIndex = async (username: string) => {
+  const locations = [
+    fileCache.getCacheLocation(),
+    fileCache.getCacheLocation() === fileCache.CACHE_ROOTS.DATA ? fileCache.CACHE_ROOTS.ROOT : fileCache.CACHE_ROOTS.DATA,
+  ]
+  const uniqueLocations = [...new Set(locations)]
+  await Promise.all(uniqueLocations.map(location => fileCache.syncCacheIndex(username, ['music'], location)))
+  const items = await fileCache.getDownloadedMusicItemsAcrossLocations(username)
+  return { locations: uniqueLocations, tracks: items.length }
 }
 
 const readSongloftPlaylists = async (deps: ApiV1Dependencies) => {
@@ -500,6 +536,36 @@ const getSongloftTracksForMatching = async (deps: ApiV1Dependencies, sourceTrack
     for (const candidate of await subsonic.searchSongs(query, 25)) lookup.set(String(candidate.id), candidate)
   }
   return [...lookup.values()]
+}
+
+// [YINYUN-INTEGRATION] The two index counters deliberately use the native
+// provider views, not a guessed file count.  Yinyun reads the shared music
+// tree through its own cache index; Songloft reads the same tree through its
+// own scan database.  Keeping both values visible makes an index drift
+// diagnosable instead of silently treating one provider as authoritative.
+const getLibraryIndexStatus = async (deps: ApiV1Dependencies, username: string) => {
+  const [yinyunItems, scan] = await Promise.all([
+    fileCache.getDownloadedMusicItemsAcrossLocations(username),
+    deps.getSongloftClient?.()?.configured
+      ? deps.getSongloftClient()!.scanProgress()
+      : Promise.resolve({ status: 'unavailable' }),
+  ])
+  const songloft = deps.getSongloftClient?.()
+  let songloftTracks = 0
+  if (songloft?.configured) {
+    const tracks = await getSongloftTracksForMatching(deps)
+    songloftTracks = tracks.length
+  } else if (deps.getSongloftSubsonicClient?.()) {
+    songloftTracks = Number((scan as any)?.local_song_count || 0)
+  }
+  return {
+    yinyunTracks: yinyunItems.length,
+    yinyunAudioTracks: yinyunItems.filter(item => Boolean(item.ext && ['mp3', 'flac', 'm4a', 'ogg', 'wav'].includes(String(item.ext).toLowerCase()))).length,
+    songloftTracks,
+    scan,
+    locations: [fileCache.getCacheLocation(), fileCache.getCacheLocation() === fileCache.CACHE_ROOTS.DATA ? fileCache.CACHE_ROOTS.ROOT : fileCache.CACHE_ROOTS.DATA],
+    algorithm: 'relative_path → ISRC → fingerprint → title/artist/album/duration → fuzzy (ambiguous when candidates are too close)',
+  }
 }
 
 const playlistTrackIds = (tracks: IntegrationTrack[]) => tracks.map(track => canonicalTrackId(track))
@@ -660,6 +726,15 @@ const choosePlaylistImportMatch = (
   return { ...yinyunMatch, matchedBy: undefined }
 }
 
+const anchorSongloftSources = (
+  tracks: IntegrationTrack[],
+  yinyunMatches: ReturnType<typeof matchTracks>,
+) => tracks.map((track, index) => {
+  const anchor = yinyunMatches[index]
+  const relativePath = anchor?.status === 'matched' ? anchor.candidate?.relativePath : undefined
+  return relativePath ? { ...track, relativePath: String(relativePath).replace(/^music\//i, '') } : track
+})
+
 const getPlaylistMatches = async (
   deps: ApiV1Dependencies,
   username: string,
@@ -667,8 +742,16 @@ const getPlaylistMatches = async (
 ): Promise<PlaylistImportMatch[]> => {
   const localTracks = await getUserLocalIntegrationTracks(username)
   const songloftTracks = await getSongloftTracksForMatching(deps, tracks)
-  const yinyunMatches = matchTracks(tracks, localTracks)
-  const songloftMatches = matchTracks(tracks, songloftTracks)
+  const yinyunMatches = matchTracks(tracks, localTracks, SHARED_LIBRARY_MATCH_OPTIONS)
+  // The two providers can expose different embedded tags for the same shared
+  // file (for example Songloft may identify a soundtrack file as a different
+  // artist). Once Yinyun has a confident local candidate, carry its relative
+  // path into the Songloft comparison. `matchTrack` still requires metadata
+  // agreement for a path hit; the path is a physical-file key, not a blanket
+  // score override. This keeps the shared file aligned while rejecting a
+  // stale index entry whose title/artist/album are unrelated.
+  const songloftSources = anchorSongloftSources(tracks, yinyunMatches)
+  const songloftMatches = matchTracks(songloftSources, songloftTracks, SHARED_LIBRARY_MATCH_OPTIONS)
   return tracks.map((_, index) => {
     const effective = choosePlaylistImportMatch(yinyunMatches[index], songloftMatches[index])
     return { ...effective, yinyun: yinyunMatches[index], songloft: songloftMatches[index] }
@@ -679,7 +762,19 @@ const getPlaylistImportMatches = async (
   deps: ApiV1Dependencies,
   username: string,
   record: PlaylistImportRecord,
-) => getPlaylistMatches(deps, username, record.tracks)
+) => {
+  const matches = await getPlaylistMatches(deps, username, record.tracks)
+  return matches.map((match, index) => {
+    const provider = record.resolutions?.[String(index)]
+    if (!provider) return match
+    const selected = match[provider]
+    if (!selected?.candidate) return match
+    // An ambiguous match still exposes its best candidate.  The explicit
+    // user choice turns that candidate into the effective matched result;
+    // without this conversion the confirmation button would have no effect.
+    return { ...selected, status: 'matched' as const, yinyun: match.yinyun, songloft: match.songloft, matchedBy: provider }
+  })
+}
 
 const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1Dependencies, username: string, source: string) => {
   return {
@@ -694,6 +789,79 @@ const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1
   },
   downloadable: match.status !== 'matched' && !isNonYinyunDownloadSource(match.source.source) && deps.isSourceSupported(String(match.source.source || source), username),
   }
+}
+
+// Count the effective decision and each provider independently.  The latter
+// is important when both indexes found the same file: showing Songloft as zero
+// merely because Yinyun won the tie made a healthy shared library look broken.
+const playlistImportCounts = (matches: PlaylistImportMatch[]) => ({
+  total: matches.length,
+  localMatched: matches.filter(item => item.status === 'matched').length,
+  yinyunMatched: matches.filter(item => item.yinyun?.status === 'matched').length,
+  songloftMatched: matches.filter(item => item.songloft?.status === 'matched').length,
+  missing: matches.filter(item => item.status === 'missing').length,
+  ambiguous: matches.filter(item => item.status === 'ambiguous').length,
+})
+
+// Replace the corresponding imported playlist entry after the user confirms
+// a local candidate.  Matching by canonical ID plus occurrence number keeps
+// repeated songs in their original order and avoids overwriting a later row
+// when a playlist contains the same song more than once.
+const replaceConfirmedPlaylistTrack = async (
+  deps: ApiV1Dependencies,
+  username: string,
+  record: PlaylistImportRecord,
+  index: number,
+  candidate: IntegrationTrack,
+) => {
+  const targetId = canonicalTrackId(record.tracks[index])
+  const occurrence = record.tracks.slice(0, index + 1).filter(track => canonicalTrackId(track) === targetId).length
+  if (!targetId || occurrence < 1) return false
+  const playlist = await getPlaylist(username, record.yinyunPlaylistId)
+  let seen = 0
+  let targetIndex = -1
+  const sourceId = String(record.tracks[index].sourceId ?? record.tracks[index].id ?? '').trim()
+  for (let itemIndex = 0; itemIndex < playlist.list.length; itemIndex++) {
+    try {
+      const itemId = canonicalTrackId(toIntegrationTrack(deps.normalizeSongInfo(playlist.list[itemIndex])))
+      const raw = playlist.list[itemIndex] && typeof playlist.list[itemIndex] === 'object' ? playlist.list[itemIndex] as any : {}
+      const itemSourceId = String(raw.sourceId ?? raw.songmid ?? raw.id ?? '').trim()
+      if (itemSourceId && sourceId && itemSourceId === sourceId) {
+        targetIndex = itemIndex
+        break
+      }
+      if (itemId === targetId) {
+        seen += 1
+        if (seen === occurrence) {
+          targetIndex = itemIndex
+          break
+        }
+      }
+    } catch {
+      // An unrelated malformed playlist row must not prevent confirmation.
+    }
+  }
+  const nextList = [...playlist.list]
+  const localSong = buildLocalSongInfo(candidate)
+  if (targetIndex >= 0) {
+    nextList[targetIndex] = localSong
+  } else {
+    const candidatePath = String(candidate.relativePath || '').replace(/\\/g, '/').toLocaleLowerCase()
+    const alreadyPresent = candidatePath && nextList.some(item => {
+      const raw = item && typeof item === 'object' ? item as any : {}
+      return String(raw._localFilename || raw.relativePath || '').replace(/\\/g, '/').toLocaleLowerCase() === candidatePath
+    })
+    if (alreadyPresent) return true
+    // Imported playlists dedupe repeated source rows, so a source index can
+    // legitimately have no one-to-one position in the stored list.  Append
+    // the explicitly confirmed local candidate instead of silently dropping
+    // the user's decision.
+    nextList.push(localSong)
+  }
+  const manage = getUserSpace(username).listManage
+  await manage.listDataManage.listMusicOverwrite(record.yinyunPlaylistId, nextList as any)
+  await manage.createSnapshot()
+  return true
 }
 
 const getImportSelection = (body: any, record: PlaylistImportRecord, matches: ReturnType<typeof matchTracks>) => {
@@ -806,10 +974,16 @@ export const apiV1OpenApi = {
     '/api/v1/integration/songloft/status': { get: { summary: '查询 Songloft 集成状态' } },
     '/api/v1/integration/songloft/playlists': { get: { summary: '查询 Songloft 歌单' } },
     '/api/v1/integration/songloft/scan': { get: { summary: '查询 Songloft 扫描进度' }, post: { summary: '触发 Songloft 曲库扫描' } },
+    '/api/v1/integration/library/status': { get: { summary: '查询音云与 Songloft 当前曲库索引数量' } },
+    '/api/v1/integration/library/refresh/yinyun': { post: { summary: '只刷新音云曲库索引' } },
+    '/api/v1/integration/library/refresh/songloft': { post: { summary: '只触发 Songloft 曲库扫描' } },
+    '/api/v1/integration/library/refresh': { post: { summary: '刷新音云与 Songloft 两端曲库索引' } },
     '/api/v1/integration/match': { post: { summary: '将歌曲与音云、Songloft 本地曲库匹配' } },
     '/api/v1/integration/playlist/resolve': { post: { summary: '解析网络歌单为统一歌曲列表' } },
     '/api/v1/integration/playlist/import': { post: { summary: '导入第三方网络歌单并标记本地缺失歌曲' } },
+    '/api/v1/integration/playlist/imports': { get: { summary: '查询当前用户以前导入的网络歌单' } },
     '/api/v1/integration/playlist/import/{importId}': { get: { summary: '查询已导入歌单的本地匹配状态' } },
+    '/api/v1/integration/playlist/resolve-item': { post: { summary: '确认一首歌使用音云或 Songloft 候选' } },
     '/api/v1/integration/playlist/complete': { post: { summary: '手工或一键补齐导入歌单的缺失歌曲' } },
     '/api/v1/integration/playlists/sync': { post: { summary: '双向同步音云与 Songloft 歌单' } },
     '/api/v1/downloads': { get: { summary: '查询服务端下载队列' }, post: { summary: '加入服务端下载队列' } },
@@ -954,6 +1128,39 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       return true
     }
 
+    if (pathname === `${API_PREFIX}/integration/library/status` && req.method === 'GET') {
+      success(res, await getLibraryIndexStatus(deps, username))
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/integration/library/refresh/yinyun` && req.method === 'POST') {
+      requireIntegrationAdmin(req, deps)
+      const yinyun = await refreshYinyunLibraryIndex(username)
+      invalidateSongloftMatchingCache()
+      success(res, { yinyun, message: '音云曲库索引已刷新；Songloft 索引未触发' }, 202)
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/integration/library/refresh/songloft` && req.method === 'POST') {
+      requireIntegrationAdmin(req, deps)
+      const client = requireSongloftClient(deps)
+      const body = await readJson(req)
+      invalidateSongloftMatchingCache()
+      success(res, { songloft: await client.startScan(body.reimport === true), message: 'Songloft 曲库扫描已提交；音云索引未触发' }, 202)
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/integration/library/refresh` && req.method === 'POST') {
+      requireIntegrationAdmin(req, deps)
+      const client = requireSongloftClient(deps)
+      const body = await readJson(req)
+      const yinyun = await refreshYinyunLibraryIndex(username)
+      invalidateSongloftMatchingCache()
+      const songloft = await client.startScan(body.reimport === true)
+      success(res, { yinyun, songloft, message: '音云索引已刷新，Songloft 扫描已提交；请等待扫描完成后再匹配' }, 202)
+      return true
+    }
+
     if (pathname === `${API_PREFIX}/integration/playlist/resolve` && req.method === 'POST') {
       const body = await readJson(req)
       const ref = parseExternalPlaylistRef(body)
@@ -1001,6 +1208,11 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (!source) source = String(sourceTracks[0]?.source || '').trim()
       if (!source) throw new ApiError(400, 'playlist_source_required', '导入歌单缺少音源')
 
+      const store = deps.getPlaylistImportStore?.(username)
+      if (!store) throw new ApiError(503, 'playlist_import_store_unavailable', '导入歌单存储尚未配置')
+      store.load()
+      const existing = body.reuseExisting !== false ? findExistingPlaylistImport(store, source, sourcePlaylistId) : undefined
+
       let localMatches: PlaylistImportMatch[]
       try {
         localMatches = await getPlaylistMatches(deps, username, sourceTracks)
@@ -1008,13 +1220,13 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         // A temporary Songloft outage must not prevent importing the source
         // playlist; the next open/refresh can retry shared-library matching.
         console.warn('[PlaylistImport] Songloft matching unavailable:', error?.message || error)
-        const fallback = matchTracks(sourceTracks, await getUserLocalIntegrationTracks(username))
+        const fallback = matchTracks(sourceTracks, await getUserLocalIntegrationTracks(username), SHARED_LIBRARY_MATCH_OPTIONS)
         localMatches = fallback.map(match => ({ ...match, matchedBy: match.status === 'matched' ? 'yinyun' : undefined }))
       }
       const name = String(body.name || sourcePlaylistName || `导入歌单 ${new Date().toLocaleDateString('zh-CN')}`).trim().slice(0, 100)
       if (!name) throw new ApiError(400, 'invalid_playlist_name', '导入歌单名称不能为空')
       const manage = getUserSpace(username).listManage
-      let yinyunPlaylistId = String(body.yinyunPlaylistId || '').trim()
+      let yinyunPlaylistId = String(body.yinyunPlaylistId || existing?.yinyunPlaylistId || '').trim()
       let created = false
       if (yinyunPlaylistId) {
         await getPlaylist(username, yinyunPlaylistId)
@@ -1030,12 +1242,15 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
           ? buildLocalSongInfo(match.candidate)
           : normalizeImportedSong(deps, track, source)
       }))
-      const replace = created || body.replace === true
+      // Reusing the same source playlist is an update of that imported list,
+      // not another append operation. This removes stale rows from older
+      // imports while preserving the stable Yinyun playlist identity.
+      const replace = created || body.replace === true || Boolean(existing && !body.createNew)
       if (replace) await manage.listDataManage.listMusicOverwrite(yinyunPlaylistId, playlistSongs as any)
       else await manage.listDataManage.listMusicAdd(yinyunPlaylistId, playlistSongs as any, 'bottom')
       await manage.createSnapshot()
 
-      const importId = `import_${crypto.randomUUID()}`
+      const importId = existing && !body.createNew ? existing.importId : `import_${crypto.randomUUID()}`
       const now = new Date().toISOString()
       const record: PlaylistImportRecord = {
         importId,
@@ -1046,12 +1261,9 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         name,
         yinyunPlaylistId,
         tracks: sourceTracks,
-        createdAt: now,
+        createdAt: existing && !body.createNew ? existing.createdAt : now,
         updatedAt: now,
       }
-      const store = deps.getPlaylistImportStore?.(username)
-      if (!store) throw new ApiError(503, 'playlist_import_store_unavailable', '导入歌单存储尚未配置')
-      store.load()
       await store.upsert(record)
 
       let download: ReturnType<typeof enqueuePlaylistImportDownloads> | null = null
@@ -1063,17 +1275,18 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         yinyunPlaylistId,
         name,
         created,
+        reused: Boolean(existing && !body.createNew),
         items: localMatches.map((match, index) => publicImportItem(match, index, deps, username, source)),
-        counts: {
-          total: sourceTracks.length,
-          localMatched: localMatches.filter(item => item.status === 'matched').length,
-          yinyunMatched: localMatches.filter(item => item.status === 'matched' && item.matchedBy === 'yinyun').length,
-          songloftMatched: localMatches.filter(item => item.status === 'matched' && item.matchedBy === 'songloft').length,
-          missing: localMatches.filter(item => item.status === 'missing').length,
-          ambiguous: localMatches.filter(item => item.status === 'ambiguous').length,
-        },
+        counts: playlistImportCounts(localMatches),
         download,
       }, 201)
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/integration/playlist/imports` && req.method === 'GET') {
+      const store = deps.getPlaylistImportStore?.(username)
+      if (!store) throw new ApiError(503, 'playlist_import_store_unavailable', '导入歌单存储尚未配置')
+      success(res, { records: store.load().map(publicPlaylistImportRecord) })
       return true
     }
 
@@ -1093,14 +1306,43 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         source: record.source,
         sourcePlaylistId: record.sourcePlaylistId || null,
         items: matches.map((match, index) => publicImportItem(match, index, deps, username, record.source)),
-        counts: {
-          total: matches.length,
-          localMatched: matches.filter(item => item.status === 'matched').length,
-          yinyunMatched: matches.filter(item => item.status === 'matched' && item.matchedBy === 'yinyun').length,
-          songloftMatched: matches.filter(item => item.status === 'matched' && item.matchedBy === 'songloft').length,
-          missing: matches.filter(item => item.status === 'missing').length,
-          ambiguous: matches.filter(item => item.status === 'ambiguous').length,
-        },
+        counts: playlistImportCounts(matches),
+      })
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/integration/playlist/resolve-item` && req.method === 'POST') {
+      const body = await readJson(req)
+      const importId = String(body.importId || '').trim()
+      const index = Number(body.index)
+      const provider: 'yinyun' | 'songloft' | '' = body.provider === 'songloft' ? 'songloft' : body.provider === 'yinyun' ? 'yinyun' : ''
+      if (!importId || !Number.isInteger(index) || index < 0 || !provider) {
+        throw new ApiError(400, 'invalid_playlist_resolution', '需要导入记录 ID、歌曲序号和候选来源（yinyun 或 songloft）')
+      }
+      const store = deps.getPlaylistImportStore?.(username)
+      if (!store) throw new ApiError(503, 'playlist_import_store_unavailable', '导入歌单存储尚未配置')
+      store.load()
+      const record = store.get(importId)
+      if (!record || record.username !== username) throw new ApiError(404, 'playlist_import_not_found', '导入歌单记录不存在')
+      if (!record.tracks[index]) throw new ApiError(404, 'playlist_track_not_found', '导入记录中不存在该歌曲序号')
+      const rawMatches = await getPlaylistMatches(deps, username, record.tracks)
+      const selected = rawMatches[index]?.[provider]
+      if (!selected?.candidate || !['matched', 'ambiguous'].includes(selected.status)) {
+        throw new ApiError(409, 'playlist_candidate_unavailable', '所选来源当前没有可确认的本地候选，请先刷新两个曲库索引')
+      }
+      const resolutions = { ...(record.resolutions || {}), [String(index)]: provider }
+      const updatedRecord: PlaylistImportRecord = { ...record, resolutions, updatedAt: new Date().toISOString() }
+      await store.upsert(updatedRecord)
+      const playlistUpdated = await replaceConfirmedPlaylistTrack(deps, username, updatedRecord, index, selected.candidate)
+      const matches = await getPlaylistImportMatches(deps, username, updatedRecord)
+      success(res, {
+        importId,
+        index,
+        provider,
+        playlistUpdated,
+        item: publicImportItem(matches[index], index, deps, username, record.source),
+        items: matches.map((match, itemIndex) => publicImportItem(match, itemIndex, deps, username, record.source)),
+        counts: playlistImportCounts(matches),
       })
       return true
     }
@@ -1153,10 +1395,10 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (sourceTracks.length > 10000) throw new ApiError(413, 'tracks_too_large', '歌曲数量超过限制')
       const hasSongloftSource = Boolean(deps.getSongloftClient?.()?.configured || deps.getSongloftSubsonicClient?.())
       if (!hasSongloftSource) throw new ApiError(503, 'songloft_not_configured', 'Songloft 原生或 Subsonic API 尚未配置')
-      const songloftTracks = await getSongloftTracksForMatching(deps, sourceTracks)
       const localTracks = await getUserLocalIntegrationTracks(username)
-      const localMatches = matchTracks(sourceTracks, localTracks)
-      const songloftMatches = matchTracks(sourceTracks, songloftTracks)
+      const localMatches = matchTracks(sourceTracks, localTracks, SHARED_LIBRARY_MATCH_OPTIONS)
+      const songloftTracks = await getSongloftTracksForMatching(deps, sourceTracks)
+      const songloftMatches = matchTracks(anchorSongloftSources(sourceTracks, localMatches), songloftTracks, SHARED_LIBRARY_MATCH_OPTIONS)
       const items = sourceTracks.map((track, index) => ({
         source: publicIntegrationTrack(track),
         yinyun: publicTrackMatch(localMatches[index]),
@@ -1179,7 +1421,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     }
 
     if (pathname === `${API_PREFIX}/integration/playlists/sync` && req.method === 'POST') {
-      requireIntegrationAdmin(req, deps)
+      const isAdmin = Boolean(deps.isAdminRequest?.(req))
       const body = await readJson(req)
       const yinyunPlaylistId = String(body.yinyunPlaylistId || '').trim()
       if (!yinyunPlaylistId) throw new ApiError(400, 'yinyun_playlist_required', '缺少音云歌单 ID')
@@ -1188,6 +1430,9 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (!['push', 'pull', 'merge'].includes(direction)) throw new ApiError(400, 'invalid_sync_direction', '同步方向必须是 push、pull 或 merge')
       if (!['merge', 'replace'].includes(mode)) throw new ApiError(400, 'invalid_sync_mode', '同步模式必须是 merge 或 replace')
       if (mode === 'replace' && direction === 'pull') throw new ApiError(400, 'invalid_sync_mode', 'pull 方向不支持 replace 模式')
+      if (!isAdmin && (direction !== 'push' || mode !== 'merge')) {
+        throw new ApiError(403, 'playlist_sync_mode_forbidden', '播放器用户只能使用“音云 → Songloft”的安全合并同步')
+      }
       const syncLockKey = `${username}:${yinyunPlaylistId}`
       if (activePlaylistSyncs.has(syncLockKey)) throw new ApiError(409, 'playlist_sync_in_progress', '该音云歌单正在同步，请等待当前任务完成')
       activePlaylistSyncs.add(syncLockKey)
@@ -1237,7 +1482,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         // instead of blocking the whole playlist as ambiguous.
         const currentIds = Array.from(new Set(remotePlaylistTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)))
         const currentIdSet = new Set(currentIds.map(String))
-        const matches = matchTracks(initialLocalTracks, library, { resolveExactDuplicates: true })
+        const matches = matchTracks(initialLocalTracks, library, SHARED_LIBRARY_MATCH_OPTIONS)
           .map(match => preferExistingPlaylistCandidate(match, currentIdSet))
         const unmatched = matches.filter(item => item.status !== 'matched')
         const desiredIds = Array.from(new Set(matches
@@ -1272,7 +1517,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 
       const pull = async () => {
         const localLibrary = await getUserLocalIntegrationTracks(username)
-        const matches = matchTracks(remotePlaylistTracks, localLibrary)
+        const matches = matchTracks(remotePlaylistTracks, localLibrary, SHARED_LIBRARY_MATCH_OPTIONS)
         const existingIds = new Set((await getPlaylist(username, yinyunPlaylistId)).list.map((item: any) => canonicalTrackId(toIntegrationTrack(deps.normalizeSongInfo(item)))))
         const toAdd: any[] = []
         for (const match of matches) {

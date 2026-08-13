@@ -833,6 +833,7 @@ const handleApiV1 = createApiV1Handler({
   getSongloftSubsonicClient: () => songloftSubsonicClient,
   getPlaylistSyncStore,
   getPlaylistImportStore,
+  getLegacyUser: verifyUserAuth,
 })
 
 const isPathInside = (child: string, parent: string): boolean => {

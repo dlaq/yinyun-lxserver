@@ -180,7 +180,7 @@
                     </svg>
                     <span>文件管理</span>
                 </a>
-                <a href="#" class="nav-item" id="nav-player-link" data-view="music">
+                <a href="/" class="nav-item" id="nav-player-link" data-view="music">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M9 18V5l12-2v13"></path>
                         <circle cx="6" cy="18" r="3"></circle>
@@ -540,8 +540,9 @@
                                 <p>导入网络歌单，先比对共享曲库，再由音云洛雪下载补齐，最后同步到 Songloft。</p>
                             </div>
                             <div class="integration-hero-actions">
-                                <button class="btn-secondary" type="button" onclick="LibraryIntegration.refreshAll()"><i class="fas fa-rotate"></i> 刷新</button>
-                                <button class="btn-secondary" type="button" onclick="LibraryIntegration.triggerScan()"><i class="fas fa-satellite-dish"></i> 扫描曲库</button>
+                                <button class="btn-secondary" type="button" onclick="LibraryIntegration.refreshAll()" title="刷新状态、队列与歌单"><i class="fas fa-rotate"></i> 刷新状态</button>
+                                <button id="integration-refresh-yinyun-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshYinyunIndex()" title="只刷新音云索引"><i class="fas fa-arrows-rotate"></i> 刷新音云索引</button>
+                                <button id="integration-refresh-songloft-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshSongloftIndex()" title="只触发 Songloft 扫描"><i class="fas fa-arrows-rotate"></i> 刷新 Songloft 索引</button>
                             </div>
                         </section>
 
@@ -559,9 +560,11 @@
                         </section>
 
                         <div class="integration-status-grid">
+                            <article class="integration-status-card glass integration-index-card"><span>音云索引</span><strong id="integration-yinyun-index-count">—</strong><small id="integration-yinyun-index-detail">共享音乐目录 · 尚未读取</small></article>
+                            <article class="integration-status-card glass integration-index-card"><span>SONGLOFT 索引</span><strong id="integration-songloft-index-count">—</strong><small id="integration-songloft-index-detail">共享音乐目录 · 尚未读取</small></article>
                             <article class="integration-status-card glass"><span>SONGLOFT API</span><strong id="integration-native-status">待检测</strong><small id="integration-native-detail">原生 API · 写入与扫描</small></article>
                             <article class="integration-status-card glass"><span>OPEN SUBSONIC</span><strong id="integration-subsonic-status">待检测</strong><small id="integration-subsonic-detail">只读搜索与回退</small></article>
-                            <article class="integration-status-card glass"><span>LIBRARY SCAN</span><strong id="integration-scan-status">待检测</strong><small id="integration-scan-detail">Songloft 扫描状态</small></article>
+                            <article class="integration-status-card glass"><span>LIBRARY SCAN</span><strong id="integration-scan-status">待检测</strong><small id="integration-scan-detail">Songloft 扫描状态；计数与索引分开显示</small></article>
                             <article class="integration-status-card glass"><span>DOWNLOAD QUEUE</span><strong id="integration-queue-status">0</strong><small id="integration-queue-detail">等待连接用户</small></article>
                         </div>
 
@@ -570,22 +573,31 @@
                             <div class="integration-import-row">
                                 <label class="integration-grow"><span>歌单分享地址</span><input id="integration-playlist-url" class="form-input" placeholder="粘贴歌单分享链接"></label>
                                 <label><span>补齐音质</span><select id="integration-quality" class="form-input"><option value="flac">FLAC</option><option value="320k">320K</option><option value="128k">128K</option><option value="flac24bit">24bit FLAC</option><option value="hires">Hi-Res</option></select></label>
-                                <button id="integration-import-btn" class="btn-primary integration-submit integration-import-submit" type="button" onclick="LibraryIntegration.importPlaylist()"><i class="fas fa-link"></i> 导入匹配</button>
+                                <button id="integration-import-btn" class="btn-primary integration-submit integration-import-submit" type="button" onclick="LibraryIntegration.importPlaylist()" title="导入并匹配网络歌单" aria-label="导入并匹配网络歌单"><i class="fas fa-link"></i><span class="integration-import-button-label">导入</span></button>
                             </div>
-                            <div class="integration-record-row">
-                                <label class="integration-grow"><span>已有导入记录 ID</span><input id="integration-import-id" class="form-input" placeholder="import_xxx"><small class="integration-field-help">导入成功后生成的记录编号。打开它会重新扫描共享曲库，恢复上次的匹配和补齐状态，不需要再次粘贴歌单链接。</small></label>
-                                <button id="integration-open-import-btn" class="btn-secondary integration-submit" type="button" onclick="LibraryIntegration.openImport()"><i class="fas fa-folder-open"></i> 打开记录</button>
+                            <div class="integration-history-row">
+                                <label class="integration-grow"><span>以前导入的歌单</span><select id="integration-import-history" class="form-input" onchange="LibraryIntegration.onHistoryChange()" aria-describedby="integration-import-history-help"><option value="">导入成功后会显示在这里</option></select><small id="integration-import-history-help" class="integration-field-help">按歌单名称选择即可，不需要记住 ID；相同来源和歌单会自动复用最近一次记录。</small></label>
+                                <div class="integration-history-actions"><button id="integration-open-history-btn" class="btn-primary integration-submit" type="button" onclick="LibraryIntegration.openSelectedImport()" disabled><i class="fas fa-folder-open"></i><span>打开歌单</span></button></div>
                             </div>
+                            <details class="integration-advanced-record">
+                                <summary>高级：按导入记录 ID 打开（用于排查或分享）</summary>
+                                <div class="integration-record-row">
+                                    <label class="integration-grow"><span>导入记录 ID <em class="integration-label-note">普通使用不需要填写</em></span><div class="integration-id-input-wrap"><input id="integration-import-id" class="form-input" placeholder="例如 import_xxx" aria-describedby="integration-import-id-help"><button id="integration-copy-import-id-btn" class="btn-secondary integration-copy-btn" type="button" onclick="LibraryIntegration.copyImportId()" title="复制导入记录 ID" aria-label="复制导入记录 ID" disabled><i class="fas fa-copy"></i><span>复制 ID</span></button></div><small id="integration-import-id-help" class="integration-field-help">导入成功后会自动填入；也可以从“匹配结果”卡片复制。输入 ID 后点击“打开记录”可直接恢复该次记录。</small></label>
+                                    <div class="integration-record-actions"><button id="integration-open-import-btn" class="btn-secondary integration-submit" type="button" onclick="LibraryIntegration.openImport()"><i class="fas fa-folder-open"></i><span>打开记录</span></button></div>
+                                </div>
+                            </details>
+                            <div class="integration-record-tip"><i class="fas fa-circle-info"></i><span><strong>重复导入不会再创建同名副本。</strong>同一平台、同一歌单 ID 会复用最近的音云歌单；如果确实要创建新副本，可在接口调用时显式选择“新建导入记录”。</span></div>
                         </section>
 
                         <section id="integration-result-panel" class="integration-panel glass hidden">
-                            <div class="integration-section-heading"><div><span class="step-badge">02</span><h2 id="integration-result-title">匹配结果</h2></div><span id="integration-import-meta" class="integration-caption"></span></div>
+                            <div class="integration-section-heading"><div><span class="step-badge">02</span><h2 id="integration-result-title">匹配结果</h2></div><div class="integration-result-heading-meta"><span id="integration-import-meta" class="integration-caption"></span><span id="integration-record-id-display" class="integration-record-id-display hidden"><span>导入记录 ID</span><code id="integration-record-id-value"></code><button id="integration-copy-result-id-btn" class="btn-secondary integration-copy-btn" type="button" onclick="LibraryIntegration.copyImportId()" title="复制导入记录 ID" aria-label="复制导入记录 ID" disabled><i class="fas fa-copy"></i><span>复制</span></button></span></div></div>
                             <div class="integration-count-grid">
                                 <button class="count-card is-all active" data-integration-filter="all" onclick="LibraryIntegration.setFilter('all')"><strong id="integration-count-total">0</strong><span>歌单歌曲</span></button>
                                 <button class="count-card is-matched" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')"><strong id="integration-count-matched">0</strong><span>任一共享库已找到</span></button>
                                 <button class="count-card is-missing" data-integration-filter="missing" onclick="LibraryIntegration.setFilter('missing')"><strong id="integration-count-missing">0</strong><span>等待补齐</span></button>
-                                <button class="count-card is-ambiguous" data-integration-filter="ambiguous" onclick="LibraryIntegration.setFilter('ambiguous')"><strong id="integration-count-ambiguous">0</strong><span>需要确认</span></button>
+                                <button class="count-card is-ambiguous" data-integration-filter="ambiguous" onclick="LibraryIntegration.setFilter('ambiguous')" title="两端都有候选但分数接近，需手工选择采用哪一端"><strong id="integration-count-ambiguous">0</strong><span>需要确认</span></button>
                             </div>
+                            <div class="integration-confirm-help"><i class="fas fa-circle-info"></i><span><strong>“需要确认”是什么？</strong>两个本地候选的匹配分数很接近，系统不会擅自选择不同版本、翻唱或同名歌曲。筛选后，在对应行点击“采用音云”或“采用 Songloft”；确认只记录匹配选择，不会下载或删除文件。</span></div>
                             <div class="integration-source-summary"><span>音云索引已匹配 <strong id="integration-count-yinyun">0</strong> 首</span><span>Songloft 共享曲库已匹配 <strong id="integration-count-songloft">0</strong> 首</span></div>
                             <div class="integration-result-toolbar">
                                 <label class="integration-check"><input id="integration-select-visible" type="checkbox" onchange="LibraryIntegration.toggleVisible(this.checked)"><span>选择当前缺失项</span></label>
@@ -596,7 +608,7 @@
 
                         <section class="integration-two-column">
                             <div class="integration-panel glass">
-                                <div class="integration-section-heading"><div><span class="step-badge">03</span><h2>补齐队列</h2></div><button class="btn-icon" title="刷新队列" onclick="LibraryIntegration.loadQueue()"><i class="fas fa-rotate"></i></button></div>
+                                <div class="integration-section-heading"><div><span class="step-badge">03</span><h2>补齐队列</h2></div><div class="integration-queue-heading-actions"><span id="integration-queue-updated" class="integration-caption">尚未刷新</span><button class="btn-icon" title="立即刷新队列" onclick="LibraryIntegration.loadQueue()"><i class="fas fa-rotate"></i></button></div></div>
                                 <div id="integration-queue-summary" class="queue-summary"><div class="integration-empty">连接后显示下载任务</div></div><div id="integration-queue-list" class="queue-list"></div>
                             </div>
                             <div class="integration-panel glass">
@@ -919,7 +931,7 @@
                                 <div class="config-toggle-row">
                                     <div class="config-toggle-info">
                                         <span class="config-toggle-label">开启全网在线搜索</span>
-                                        <span class="config-toggle-desc">允许 Subsonic 客户端在搜索歌曲时检索全网音乐 API</span>
+                                        <span class="config-toggle-desc">只影响 Subsonic 客户端的搜索结果：本地曲库不足时从网易云、QQ、酷我、酷狗、咪咕查询；不会下载文件，也不会改变本地曲库匹配。</span>
                                     </div>
                                     <label class="toggle-switch">
                                         <input type="checkbox" name="subsonic.onlineSearch" />
@@ -938,7 +950,7 @@
                                     <label class="config-label">默认在线搜索平台</label>
                                     <input type="text" name="subsonic.onlineSearchSources" class="form-input config-input"
                                         placeholder="tx,wy,kw,kg,mg" />
-                                    <small class="config-hint">可选 tx,wy,kw,kg,mg，用英文逗号分隔</small>
+                                    <small class="config-hint">可选 tx,wy,kw,kg,mg，用英文逗号分隔。播放器/歌单联动仍以音云和 Songloft 本地索引为准。</small>
                                 </div>
                                 <div class="config-toggle-row">
                                     <div class="config-toggle-info">
