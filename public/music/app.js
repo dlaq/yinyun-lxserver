@@ -357,6 +357,10 @@ window.getUserAuthHeaders = getUserAuthHeaders;
 // the stable playlist API can enrich each row with a signed local cover and a
 // Songloft artwork fallback.  Hydrate covers after login without changing the
 // user's playlist data or playback IDs.
+function isSignedLocalArtwork(value) {
+    return /\/api\/v1\/library\/tracks\/[^/]+\/cover(?:\?|$)/i.test(String(value || ''));
+}
+
 async function hydratePersonalPlaylistArtwork(data) {
     if (!data) return data;
     const lists = [
@@ -378,10 +382,19 @@ async function hydratePersonalPlaylistArtwork(data) {
                 const original = list.list[index];
                 if (!original || !enriched?.artworkUrl) return;
                 const current = getImgUrl(original);
-                const hasUsableArtwork = current && !/logo\.svg(?:[?#]|$)/i.test(String(current));
-                original.img = hasUsableArtwork ? original.img : enriched.artworkUrl;
-                original.picUrl = hasUsableArtwork ? original.picUrl : enriched.artworkUrl;
-                original.meta = { ...(original.meta || {}), picUrl: hasUsableArtwork ? (original.meta?.picUrl || current) : enriched.artworkUrl };
+                // The native snapshot may contain a previously signed local
+                // cover URL.  It is deliberately short-lived, so treating it
+                // as permanently usable leaves the detail page with a 401
+                // after the next login/reload.  Always replace local proxy
+                // artwork with the freshly signed URL returned by the stable
+                // playlist API; keep a valid remote artwork URL untouched.
+                const hasUsableRemoteArtwork = current &&
+                    !/logo\.svg(?:[?#]|$)/i.test(String(current)) &&
+                    !isSignedLocalArtwork(current);
+                const artwork = String(enriched.artworkUrl);
+                original.img = hasUsableRemoteArtwork ? original.img : artwork;
+                original.picUrl = hasUsableRemoteArtwork ? original.picUrl : artwork;
+                original.meta = { ...(original.meta || {}), picUrl: hasUsableRemoteArtwork ? (original.meta?.picUrl || current) : artwork };
                 original._artworkUrl = enriched.artworkUrl;
             });
         } catch (error) {
