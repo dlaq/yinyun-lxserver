@@ -20,6 +20,7 @@
         candidateQuery: '',
         candidateContext: 'import',
         candidateResults: [],
+        previewBound: false,
         queueLoading: false,
         panelActive: false,
         timer: null,
@@ -391,7 +392,6 @@
         el('integration-import-meta').textContent = data.source ? `${data.source.toUpperCase()} · ${data.items?.length || 0} 首` : '';
         const counts = data.counts || {};
         el('integration-count-total').textContent = counts.total || 0;
-        el('integration-count-matched').textContent = counts.localMatched || 0;
         el('integration-count-missing').textContent = counts.missing || 0;
         el('integration-count-ambiguous').textContent = counts.ambiguous || 0;
         el('integration-count-yinyun').textContent = counts.yinyunMatched ?? counts.localMatched ?? 0;
@@ -421,11 +421,97 @@
         };
     }
 
+    function formatPreviewTime(value) {
+        const seconds = Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+        const minutes = Math.floor(seconds / 60);
+        const remainder = Math.floor(seconds % 60);
+        return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
+    }
+
+    function updatePreviewProgress() {
+        const audio = el('integration-preview-audio');
+        const seek = el('integration-preview-seek');
+        const bar = el('integration-preview-progress-bar');
+        const time = el('integration-preview-time');
+        if (!audio) return;
+        const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+        const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        const percent = duration ? Math.max(0, Math.min(100, current / duration * 100)) : 0;
+        if (seek) seek.value = String(percent);
+        if (bar) bar.style.width = `${percent}%`;
+        if (time) time.textContent = `${formatPreviewTime(current)} / ${formatPreviewTime(duration)}`;
+    }
+
+    function setPreviewState(label, className = '') {
+        const stateEl = el('integration-preview-state');
+        if (!stateEl) return;
+        stateEl.textContent = label;
+        stateEl.className = `integration-preview-state${className ? ` ${className}` : ''}`;
+    }
+
+    function bindPreviewPlayer() {
+        if (state.previewBound) return;
+        const audio = el('integration-preview-audio');
+        const toggle = el('integration-preview-toggle');
+        const seek = el('integration-preview-seek');
+        if (!audio || !toggle || !seek) return;
+        const setToggle = playing => {
+            toggle.innerHTML = playing ? '<i class="fas fa-pause"></i><span>暂停</span>' : '<i class="fas fa-play"></i><span>播放</span>';
+            toggle.setAttribute('aria-label', playing ? '暂停试听' : '播放试听');
+        };
+        toggle.addEventListener('click', async () => {
+            if (!audio.src) return;
+            try {
+                if (audio.paused) await audio.play();
+                else audio.pause();
+            } catch (error) {
+                setPreviewState('点击播放', 'is-ready');
+                if (typeof showError === 'function') showError('浏览器阻止了自动播放，请再次点击播放');
+            }
+        });
+        seek.addEventListener('input', () => {
+            if (Number.isFinite(audio.duration) && audio.duration > 0) audio.currentTime = audio.duration * Number(seek.value) / 100;
+            updatePreviewProgress();
+        });
+        audio.addEventListener('loadstart', () => setPreviewState('加载中', 'is-loading'));
+        audio.addEventListener('progress', () => setPreviewState('缓冲中', 'is-loading'));
+        audio.addEventListener('waiting', () => setPreviewState('缓冲中', 'is-loading'));
+        audio.addEventListener('loadedmetadata', updatePreviewProgress);
+        audio.addEventListener('durationchange', updatePreviewProgress);
+        audio.addEventListener('timeupdate', updatePreviewProgress);
+        audio.addEventListener('canplay', () => setPreviewState('可播放', 'is-ready'));
+        audio.addEventListener('playing', () => { setPreviewState('播放中', 'is-playing'); setToggle(true); });
+        audio.addEventListener('pause', () => { if (!audio.ended) setPreviewState('已暂停', 'is-ready'); setToggle(false); });
+        audio.addEventListener('ended', () => { setPreviewState('播放结束', ''); setToggle(false); updatePreviewProgress(); });
+        audio.addEventListener('error', () => setPreviewState('加载失败', 'is-error'));
+        state.previewBound = true;
+    }
+
+    function showPreviewPlayer(candidate) {
+        bindPreviewPlayer();
+        const modal = el('integration-candidate-modal');
+        const wasHidden = Boolean(modal?.classList.contains('hidden'));
+        if (modal && wasHidden) {
+            modal.classList.remove('hidden');
+            el('integration-candidate-title').textContent = '试听歌曲';
+            el('integration-candidate-query').textContent = '正在准备本地或在线试听地址';
+        }
+        const player = el('integration-preview-player');
+        if (player) player.classList.remove('hidden');
+        const title = el('integration-preview-title');
+        const meta = el('integration-preview-meta');
+        if (title) title.textContent = candidate?.title || candidate?.name || '试听歌曲';
+        if (meta) meta.textContent = [candidate?.artist || candidate?.singer, candidate?.album || candidate?.albumName, sourceLabel(candidate?.source)].filter(Boolean).join(' · ');
+        updatePreviewProgress();
+        setPreviewState('准备中', 'is-loading');
+    }
+
     async function previewCandidate(track) {
         const candidate = compactCandidate(track, state.importData?.source || '');
         if (!candidate.source) return notifyError(new Error('候选歌曲缺少音源'));
         const audio = el('integration-preview-audio');
         if (!audio) return;
+        showPreviewPlayer(candidate);
         audio.removeAttribute('src');
         audio.load();
         try {
@@ -438,6 +524,7 @@
                     if (direct?.path) {
                         audio.src = direct.path;
                         audio.load();
+                        setPreviewState('点击播放', 'is-ready');
                         await audio.play().catch(() => {});
                         return;
                     }
@@ -461,6 +548,7 @@
                 if (!stream?.path) throw new Error('本地试听地址生成失败');
                 audio.src = stream.path;
                 audio.load();
+                setPreviewState('点击播放', 'is-ready');
                 await audio.play().catch(() => {});
                 return;
             }
@@ -480,8 +568,12 @@
             if (!data?.url) throw new Error('服务器没有返回试听地址');
             audio.src = data.url;
             audio.load();
+            setPreviewState('点击播放', 'is-ready');
             await audio.play().catch(() => {});
-        } catch (error) { notifyError(error); }
+        } catch (error) {
+            setPreviewState('加载失败', 'is-error');
+            notifyError(error);
+        }
     }
 
     function closeCandidatePicker() {
@@ -489,6 +581,13 @@
         if (modal) modal.classList.add('hidden');
         const audio = el('integration-preview-audio');
         if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); }
+        el('integration-preview-player')?.classList.add('hidden');
+        el('integration-preview-title') && (el('integration-preview-title').textContent = '未选择试听');
+        el('integration-preview-meta') && (el('integration-preview-meta').textContent = '点击任一“试听”加载播放地址');
+        el('integration-preview-seek') && (el('integration-preview-seek').value = '0');
+        el('integration-preview-progress-bar') && (el('integration-preview-progress-bar').style.width = '0%');
+        el('integration-preview-time') && (el('integration-preview-time').textContent = '00:00 / 00:00');
+        setPreviewState('未加载');
         state.candidateIndex = -1;
         state.candidateQueueId = '';
         state.candidateContext = 'import';
@@ -767,6 +866,19 @@
         if (state.importId) await openImport().catch(console.error);
     }
 
+    async function refreshStatus() {
+        if (!state.token) return notifyError(new Error('请先连接音云用户'));
+        setBusy('integration-refresh-status-btn', true, '刷新中');
+        try {
+            await refreshAll();
+            if (typeof showSuccess === 'function') showSuccess('曲库状态、补齐队列和歌单已刷新');
+        } catch (error) {
+            notifyError(error);
+        } finally {
+            setBusy('integration-refresh-status-btn', false);
+        }
+    }
+
     function startPolling() {
         if (state.timer) clearInterval(state.timer);
         state.timer = null;
@@ -811,7 +923,7 @@
     }
 
     window.LibraryIntegration = {
-        activate, login, refreshAll, loadQueue, importPlaylist, openSelectedImport,
+        activate, login, refreshAll, refreshStatus, loadQueue, importPlaylist, openSelectedImport,
         onHistoryChange, retryQueueItem, removeQueueItem,
         setFilter, toggleItem, toggleVisible, completeSelected, completeAll,
         triggerScan, refreshBothIndexes, refreshYinyunIndex, refreshSongloftIndex, resolveItem, updateSyncMode, syncPlaylist,

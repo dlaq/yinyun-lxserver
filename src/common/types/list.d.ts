@@ -6,6 +6,10 @@ declare namespace LX {
       // list: LX.Music.MusicInfo[]
       source?: LX.OnlineSource
       sourceListId?: string
+      /** Optional user-selected playlist artwork. Kept as metadata so the
+       * web player can pick a stable song cover without modifying Songloft. */
+      coverSongId?: string
+      coverUrl?: string
       // position?: number
       locationUpdateTime: number | null
     }

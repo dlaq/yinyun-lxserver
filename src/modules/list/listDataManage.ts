@@ -63,6 +63,8 @@ export class ListDataManage {
     id,
     source,
     sourceListId,
+    coverSongId,
+    coverUrl,
     locationUpdateTime,
   }: LX.List.UserListInfo, position: number) => {
     if (position < 0 || position >= this.userLists.length) {
@@ -71,6 +73,8 @@ export class ListDataManage {
         id,
         source,
         sourceListId,
+        coverSongId,
+        coverUrl,
         locationUpdateTime,
       })
     } else {
@@ -79,6 +83,8 @@ export class ListDataManage {
         id,
         source,
         sourceListId,
+        coverSongId,
+        coverUrl,
         locationUpdateTime,
       })
     }
@@ -89,6 +95,8 @@ export class ListDataManage {
     id,
     source,
     sourceListId,
+    coverSongId,
+    coverUrl,
     // meta,
     locationUpdateTime,
   }: LX.List.UserListInfo & { meta?: { id?: string } }) => {
@@ -106,6 +114,8 @@ export class ListDataManage {
         targetList.name = name
         targetList.source = source
         targetList.sourceListId = sourceListId
+        if (coverSongId !== undefined) targetList.coverSongId = coverSongId
+        if (coverUrl !== undefined) targetList.coverUrl = coverUrl
         targetList.locationUpdateTime = locationUpdateTime
         break
     }
@@ -348,4 +358,3 @@ export class ListDataManage {
     return changedIds
   }
 }
-

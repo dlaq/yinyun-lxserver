@@ -43,6 +43,9 @@ environment:
 | POST | `/api/v1/integration/playlists/sync` | `push` 音云→Songloft、`pull` Songloft→音云、`merge` 双向合并；`replace` 只允许 push |
 | POST | `/api/v1/integration/songloft/scan` | 显式触发 Songloft 共享目录扫描 |
 | GET | `/api/v1/integration/songloft/scan` | 读取扫描进度 |
+| GET | `/api/v1/integration/library/status` | 读取音云与 Songloft 当前索引数量和扫描状态；不分页读取 Songloft 全曲库 |
+| POST | `/api/v1/integration/library/refresh/yinyun` | 只刷新音云下载索引，不触发 Songloft 扫描 |
+| POST | `/api/v1/integration/library/refresh/songloft` | 只触发 Songloft 扫描，不重建音云索引 |
 | POST | `/api/v1/integration/library/refresh` | 同时刷新音云下载索引并提交 Songloft 扫描；匹配前建议执行一次 |
 
 匹配优先级为共享相对路径、ISRC、指纹，再按标题/艺术家/专辑/时长和版本标记进行保守模糊匹配。低于阈值或候选过于接近的歌曲不会自动写入歌单。
@@ -55,7 +58,7 @@ environment:
 4. 下载完成后，若配置了 Songloft，音云会对连续完成的任务做防抖扫描触发；也可显式调用 `/integration/songloft/scan`，再刷新导入状态。
 5. 已匹配项和下载后的本地歌曲可用 `/integration/playlists/sync` 的 `push` 写入 Songloft 歌单；Songloft 中共享目录已有但音云歌单没有的本地歌曲，可用 `pull` 写回音云歌单。音云会保留 `local_...` 标识和文件路径。
 
-管理后台的“刷新双端索引”会先重建当前音云用户在两个存储位置的下载索引，再提交 Songloft 扫描，并清空匹配缓存。Songloft 扫描是异步任务，返回“已提交”不代表扫描已完成；应等待扫描状态为“已完成”后再打开导入记录或重新匹配。两套软件共用物理目录，但索引更新时间、挂载路径、元数据读取和扫描完成时间仍可能不同，所以“音云 2 首、Songloft 64 首”并不矛盾；执行此动作可以缩小差异，但无法把元数据缺失或标题差异强行变成可靠匹配。
+管理后台提供三个独立按钮：“刷新音云索引”只重建当前音云用户在两个存储位置的下载索引；“刷新 Songloft 索引”只提交 Songloft 扫描；“刷新状态”只读取两端计数、扫描状态、补齐队列和歌单，不会再次分页读取 Songloft 全曲库。联合刷新接口则依次执行前两项并清空匹配缓存。Songloft 扫描是异步任务，返回“已提交”不代表扫描已完成；应等待扫描状态为“已完成”后再打开导入记录或重新匹配。两套软件共用物理目录，但索引更新时间、挂载路径、元数据读取和扫描完成时间仍可能不同，所以“音云 2 首、Songloft 64 首”并不矛盾；执行刷新可以缩小差异，但无法把元数据缺失或标题差异强行变成可靠匹配。
 
 播放器中创建、重命名、收藏歌曲到歌单或收藏外部歌单后，会自动延迟同步到 Songloft；侧边栏歌单的旋转箭头提供手动“同步到 Songloft”。播放器使用当前用户令牌，默认采用 `push + merge`：同名 Songloft 歌单复用，不存在则创建，只追加，不删除远端歌曲。管理后台仍可选择 `pull`、`merge` 或明确的 `replace`。
 
@@ -76,6 +79,8 @@ environment:
 - “移除”只删除队列中的待处理记录，不删除已经存在的音乐文件。
 
 一键补齐默认使用“聚合”搜索结果，从已启用的音云音源中选择可下载版本；手工补齐才使用用户在候选对话框中明确采用的版本。失败任务置顶显示，保证历史较早的失败项仍能直接操作。
+
+播放器的“我的歌单”与原有“歌单”使用同一套卡片网格、详情页和歌曲行渲染；个人歌单额外提供搜索、封面选择和 Songloft 同步入口。歌单封面元数据由音云保存：用户可以选择歌单中的任意一首歌，未选择时自动使用第一张可用歌曲封面；读取歌单详情时，如果音云原始歌曲没有封面，会只读回退到 Songloft 的歌曲 artwork。当前 Songloft/OpenSubsonic 部署的标准 `getPlaylist` 响应没有可写的跨实现歌单封面字段，因此封面选择不会写入 Songloft，也不会修改 Songloft 源码；两个播放器仍共享同一首歌曲的封面资源。
 
 ## 共享曲库匹配范围
 

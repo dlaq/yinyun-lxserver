@@ -30,6 +30,7 @@ window.SongListManager = (function () {
         returnTab: 'songlist',
         hostParentId: 'view-songlist',
         isLocal: false,
+        playlist: null,
     };
 
     function ensureDetailHost(parentId) {
@@ -38,6 +39,34 @@ window.SongListManager = (function () {
         if (detailView && parent && detailView.parentElement !== parent) parent.appendChild(detailView);
         detailState.hostParentId = parentId;
         return detailView;
+    }
+
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, char => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        })[char]);
+    }
+
+    function imageForSong(song) {
+        const value = window.getImgUrl ? window.getImgUrl(song) : (song?.img || song?.picUrl || song?.meta?.picUrl || '');
+        return value || '/_player/assets/logo.svg';
+    }
+
+    function isRealArtwork(value) {
+        return Boolean(value && !/logo\.svg(?:[?#]|$)/i.test(String(value)));
+    }
+
+    function playlistArtwork(list, songs = list?.list || []) {
+        const explicit = list?.coverUrl || list?.artworkUrl || list?.cover;
+        if (isRealArtwork(explicit)) return explicit;
+        const selectedId = String(list?.coverSongId || '').trim();
+        if (selectedId) {
+            const selected = songs.find(song => [song?.id, song?.songmid, song?.songId, song?.hash, song?.copyrightId].filter(Boolean).some(id => String(id) === selectedId));
+            const selectedArtwork = imageForSong(selected);
+            if (isRealArtwork(selectedArtwork)) return selectedArtwork;
+        }
+        const fallback = songs.map(imageForSong).find(isRealArtwork);
+        return fallback || '/_player/assets/logo.svg';
     }
 
     // Initialize
@@ -305,6 +334,7 @@ window.SongListManager = (function () {
         detailState.source = 'local';
         detailState.returnTab = 'my-playlists';
         detailState.isLocal = true;
+        detailState.playlist = list;
         detailState.page = 1;
         detailState.total = songs.length;
         detailState.list = songs;
@@ -312,7 +342,7 @@ window.SongListManager = (function () {
             name: list.name || '未命名歌单',
             author: '音云 · 我的歌单',
             total: songs.length,
-            img: (window.getImgUrl && songs[0]) ? window.getImgUrl(songs[0]) : (songs[0]?.img || songs[0]?.albumImg || '/_player/assets/logo.svg'),
+            img: playlistArtwork(list, songs),
             desc: list.sourceListId ? '网络歌单导入的本地歌单，可继续在曲库联动中补齐。' : '音云用户歌单。',
         };
         if (window.ListSearch) window.ListSearch.resetState();
@@ -450,6 +480,12 @@ window.SongListManager = (function () {
 
         if (window.setImg) window.setImg('sl-detail-cover', info.img || info.cover || '/_player/assets/logo.svg');
         else document.getElementById('sl-detail-cover').src = info.img || info.cover || '/_player/assets/logo.svg';
+
+        const coverButton = document.getElementById('sl-detail-cover-btn');
+        if (coverButton) {
+            coverButton.classList.toggle('hidden', !detailState.isLocal);
+            coverButton.classList.toggle('flex', detailState.isLocal);
+        }
 
         const authorEl = document.getElementById('sl-detail-author');
         if (authorEl) {
@@ -640,7 +676,34 @@ window.SongListManager = (function () {
             loadDetail(id, source);
         },
         openLocalDetail,
+        openCoverPicker: function () {
+            if (!detailState.isLocal || !detailState.playlist) {
+                window.showToast?.('info', '只有我的歌单可以设置封面');
+                return;
+            }
+            const modal = document.getElementById('playlist-cover-modal');
+            const options = document.getElementById('playlist-cover-options');
+            if (!modal || !options) return;
+            const selectedId = String(detailState.playlist.coverSongId || '');
+            const songs = detailState.list || [];
+            options.innerHTML = `<button type="button" data-cover-song-id="" class="playlist-cover-option ${selectedId ? '' : 'is-selected'}"><span class="playlist-cover-option-image"><img src="/_player/assets/logo.svg" alt="自动选择"></span><strong>自动选择</strong><small>第一张可用封面</small></button>${songs.map(song => {
+                const id = String(song.id || song.songmid || song.songId || song.hash || '');
+                const title = song.name || song.title || '未知歌曲';
+                const subtitle = [song.singer || song.artist, song.albumName || song.album].filter(Boolean).join(' · ');
+                return `<button type="button" data-cover-song-id="${escapeHtml(id)}" class="playlist-cover-option ${selectedId === id ? 'is-selected' : ''}"><span class="playlist-cover-option-image"><img src="${escapeHtml(imageForSong(song))}" alt="${escapeHtml(title)}" loading="lazy" onerror="this.src='/_player/assets/logo.svg'"></span><strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong><small title="${escapeHtml(subtitle)}">${escapeHtml(subtitle || '无专辑信息')}</small></button>`;
+            }).join('')}`;
+            options.querySelectorAll('[data-cover-song-id]').forEach(button => button.addEventListener('click', () => savePlaylistCover(button.dataset.coverSongId || '')));
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        },
+        closeCoverPicker: function () {
+            const modal = document.getElementById('playlist-cover-modal');
+            if (!modal) return;
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        },
         closeDetail: function () {
+            this.closeCoverPicker();
             const detailView = document.getElementById('songlist-detail-view');
             if (!detailView) return;
             detailView.classList.add('translate-x-full');
@@ -817,6 +880,36 @@ window.SongListManager = (function () {
             toggleUserPlaylistModal(false);
         }
     };
+
+    async function savePlaylistCover(coverSongId) {
+        if (!detailState.isLocal || !detailState.playlist || !detailState.id) return;
+        const headers = { 'Content-Type': 'application/json', ...(window.getUserAuthHeaders ? window.getUserAuthHeaders() : {}) };
+        try {
+            const response = await fetch(`/api/v1/playlists/${encodeURIComponent(detailState.id)}`, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({ coverSongId: coverSongId || null }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload?.error?.message || '保存歌单封面失败');
+            detailState.playlist.coverSongId = coverSongId || undefined;
+            if (window.currentListData?.userList) {
+                const target = window.currentListData.userList.find(item => String(item.id) === String(detailState.id));
+                if (target) {
+                    if (coverSongId) target.coverSongId = coverSongId;
+                    else delete target.coverSongId;
+                    target.artworkUrl = playlistArtwork(target, target.list || detailState.list);
+                }
+            }
+            detailState.info.img = playlistArtwork(detailState.playlist, detailState.list);
+            renderDetail();
+            window.SongListManager.closeCoverPicker();
+            window.showToast?.('success', coverSongId ? '歌单封面已更新' : '已恢复自动选择歌单封面');
+            if (typeof window.renderMyPlaylists === 'function') window.renderMyPlaylists(window.currentListData);
+        } catch (error) {
+            window.showToast?.('error', error.message || '保存歌单封面失败');
+        }
+    }
 })();
 
 // Global proxies for HTML onclick attributes
@@ -835,6 +928,8 @@ function openQQInputModal() { window.SongListManager.openQQInputModal(); }
 function closeQQInputModal() { window.SongListManager.closeQQInputModal(); }
 function handleQQSubmit() { window.SongListManager.handleQQSubmit(); }
 function closeUserPlaylistModal() { window.SongListManager.closeUserPlaylistModal(); }
+function openPlaylistCoverPicker() { window.SongListManager.openCoverPicker(); }
+function closePlaylistCoverPicker() { window.SongListManager.closeCoverPicker(); }
 
 function toggleSongListDesc() {
     const descEl = document.getElementById('sl-detail-desc');

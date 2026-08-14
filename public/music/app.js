@@ -371,12 +371,17 @@ async function hydratePersonalPlaylistArtwork(data) {
             if (!response.ok) return;
             const payload = await response.json();
             const items = payload?.data?.items || payload?.items || [];
+            if (payload?.artworkUrl) list.artworkUrl = payload.artworkUrl;
+            if (payload?.coverSongId) list.coverSongId = payload.coverSongId;
+            if (payload?.coverUrl) list.coverUrl = payload.coverUrl;
             items.forEach((enriched, index) => {
                 const original = list.list[index];
                 if (!original || !enriched?.artworkUrl) return;
-                original.img = original.img || enriched.artworkUrl;
-                original.picUrl = original.picUrl || enriched.artworkUrl;
-                original.meta = { ...(original.meta || {}), picUrl: original.meta?.picUrl || enriched.artworkUrl };
+                const current = getImgUrl(original);
+                const hasUsableArtwork = current && !/logo\.svg(?:[?#]|$)/i.test(String(current));
+                original.img = hasUsableArtwork ? original.img : enriched.artworkUrl;
+                original.picUrl = hasUsableArtwork ? original.picUrl : enriched.artworkUrl;
+                original.meta = { ...(original.meta || {}), picUrl: hasUsableArtwork ? (original.meta?.picUrl || current) : enriched.artworkUrl };
                 original._artworkUrl = enriched.artworkUrl;
             });
         } catch (error) {
@@ -8975,13 +8980,34 @@ function renderMyLists(data) {
     }
 }
 
-// 与网络“歌单”页面分开呈现用户自己的歌单。这里仅使用 userList，
-// 不把“默认列表/我的收藏”混入导入歌单下拉和卡片列表。
+function getMyPlaylistArtwork(list) {
+    const songs = Array.isArray(list?.list) ? list.list : [];
+    const explicit = list?.coverUrl || list?.artworkUrl || list?.cover;
+    if (explicit && !/logo\.svg(?:[?#]|$)/i.test(String(explicit))) return explicit;
+    const selectedId = String(list?.coverSongId || '');
+    if (selectedId) {
+        const selected = songs.find(song => [song?.id, song?.songmid, song?.songId, song?.hash, song?.copyrightId].filter(Boolean).some(id => String(id) === selectedId));
+        const selectedCover = getImgUrl(selected);
+        if (selectedCover && !/logo\.svg(?:[?#]|$)/i.test(String(selectedCover))) return selectedCover;
+    }
+    return songs.map(getImgUrl).find(url => url && !/logo\.svg(?:[?#]|$)/i.test(String(url))) || '/_player/assets/logo.svg';
+}
+
+let myPlaylistFilterText = '';
+
+function filterMyPlaylists(value) {
+    myPlaylistFilterText = String(value || '').trim().toLowerCase();
+    renderMyPlaylists(window.currentListData || currentListData);
+}
+
+// 与网络“歌单”页面分开呈现用户自己的歌单。卡片采用同一套结构，
+// 点击后继续复用上面的 songlist-detail-view，保证列表详情 UI 完全一致。
 function renderMyPlaylists(data) {
     const grid = document.getElementById('my-playlists-grid');
     const countEl = document.getElementById('my-playlists-count');
-    const lists = Array.isArray(data?.userList) ? data.userList : [];
-    if (countEl) countEl.textContent = String(lists.length);
+    const allLists = Array.isArray(data?.userList) ? data.userList : [];
+    const lists = myPlaylistFilterText ? allLists.filter(item => String(item?.name || '').toLowerCase().includes(myPlaylistFilterText)) : allLists;
+    if (countEl) countEl.textContent = String(allLists.length);
     if (!grid) return;
     if (!data) {
         grid.innerHTML = '<div class="col-span-full py-20 text-center t-text-muted">请先在设置中登录音云账号</div>';
@@ -8995,17 +9021,25 @@ function renderMyPlaylists(data) {
         const id = String(list?.id || '');
         const name = String(list?.name || '未命名歌单');
         const songs = Array.isArray(list?.list) ? list.list : [];
-        const cover = getImgUrl(songs[0]);
+        const cover = getMyPlaylistArtwork(list);
         const source = list?.sourceListId ? '网络歌单导入' : '音云歌单';
-        return `<button type="button" class="group text-left rounded-2xl overflow-hidden t-bg-panel border t-border-main shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all" onclick="handleMyPlaylistCardClick('${escapeHtmlText(id)}')">
-            <div class="aspect-square overflow-hidden t-bg-main relative">
-                <img src="${escapeHtmlText(cover)}" alt="${escapeHtmlText(name)}" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" onerror="this.src='/_player/assets/logo.svg';this.classList.add('p-10','opacity-60');">
-                <span class="absolute bottom-2 right-2 px-2 py-1 rounded-full bg-black/55 text-white text-[11px]">${songs.length} 首</span>
+        const author = String(list?.author || list?.creator?.name || source);
+        const updatedAt = list?.updatedAt || list?.locationUpdateTime || list?.createdAt;
+        const parsedTime = updatedAt ? new Date(typeof updatedAt === 'number' ? updatedAt : String(updatedAt)) : null;
+        const time = parsedTime && Number.isFinite(parsedTime.getTime()) ? parsedTime.toISOString().slice(0, 10) : '—';
+        return `<div class="group cursor-pointer" role="button" tabindex="0" aria-label="打开歌单 ${escapeHtmlText(name)}" onclick="handleMyPlaylistCardClick('${escapeHtmlText(id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();handleMyPlaylistCardClick('${escapeHtmlText(id)}')}">
+            <div class="relative aspect-square overflow-hidden rounded-2xl shadow-md transition-all group-hover:shadow-xl group-hover:-translate-y-1">
+                <img data-src="${escapeHtmlText(cover)}" src="/_player/assets/logo.svg" alt="${escapeHtmlText(name)}" loading="lazy" class="lazy-image w-full h-full object-cover dynamic-logo is-placeholder" onerror="this.src='/_player/assets/logo.svg'; this.classList.add('is-placeholder');">
+                <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"><div class="w-12 h-12 bg-emerald-500 rounded-full flex items-center justify-center text-white shadow-lg transform scale-50 group-hover:scale-100 transition-transform duration-300"><i class="fas fa-play ml-1"></i></div></div>
             </div>
-            <div class="p-3"><div class="font-semibold t-text-main truncate" title="${escapeHtmlText(name)}">${escapeHtmlText(name)}</div><div class="text-xs t-text-muted mt-1 truncate">${escapeHtmlText(source)}</div></div>
-        </button>`;
+            <div class="mt-3"><h3 class="text-sm font-bold t-text-main line-clamp-2 leading-snug group-hover:text-emerald-500 transition-colors" title="${escapeHtmlText(name)}">${escapeHtmlText(name)}</h3><p class="text-xs t-text-muted mt-1.5 truncate">${escapeHtmlText(author)}</p><p class="text-[11px] text-gray-400 mt-0.5 truncate">${escapeHtmlText(time)}</p><div class="flex items-center gap-3 mt-1.5 text-[11px] text-gray-400 font-medium"><span><i class="fas fa-music text-[10px] mr-1"></i>${songs.length}</span></div></div>
+        </div>`;
     }).join('');
+    if (typeof window.lazyLoadImages === 'function') window.lazyLoadImages();
 }
+
+window.renderMyPlaylists = renderMyPlaylists;
+window.filterMyPlaylists = filterMyPlaylists;
 
 function handleMyPlaylistCardClick(listId) {
     const list = Array.isArray(currentListData?.userList)

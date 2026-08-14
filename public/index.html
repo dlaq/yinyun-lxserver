@@ -540,7 +540,7 @@
                                 <p>导入网络歌单，先比对共享曲库，再由音云洛雪下载补齐，最后同步到 Songloft。</p>
                             </div>
                             <div class="integration-hero-actions">
-                                <button class="btn-secondary" type="button" onclick="LibraryIntegration.refreshAll()" title="刷新状态、队列与歌单"><i class="fas fa-rotate"></i> 刷新状态</button>
+                                <button id="integration-refresh-status-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshStatus()" title="刷新曲库状态、补齐队列与歌单"><i class="fas fa-rotate"></i> 刷新状态</button>
                                 <button id="integration-refresh-yinyun-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshYinyunIndex()" title="只刷新音云索引"><i class="fas fa-arrows-rotate"></i> 刷新音云索引</button>
                                 <button id="integration-refresh-songloft-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshSongloftIndex()" title="只触发 Songloft 扫描"><i class="fas fa-arrows-rotate"></i> 刷新 Songloft 索引</button>
                             </div>
@@ -586,14 +586,15 @@
                             <div class="integration-section-heading"><div><span class="step-badge">02</span><h2 id="integration-result-title">匹配结果</h2></div><div class="integration-result-heading-meta"><span id="integration-import-meta" class="integration-caption"></span></div></div>
                             <div class="integration-count-grid">
                                 <button class="count-card is-all active" data-integration-filter="all" onclick="LibraryIntegration.setFilter('all')"><strong id="integration-count-total">0</strong><span>歌单歌曲</span></button>
-                                <button class="count-card is-matched" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')"><div class="count-card-total"><strong id="integration-count-matched">0</strong><span>任一共享库已找到</span></div><div class="count-card-breakdown"><span>音云 <b id="integration-count-yinyun">0</b></span><span>Songloft <b id="integration-count-songloft">0</b></span></div></button>
+                                <button class="count-card is-matched count-card-provider" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')" title="筛选至少在一端曲库中找到的歌曲"><strong id="integration-count-yinyun">0</strong><span>音云找到</span></button>
+                                <button class="count-card is-matched count-card-provider" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')" title="筛选至少在一端曲库中找到的歌曲"><strong id="integration-count-songloft">0</strong><span>Songloft找到</span></button>
                                 <button class="count-card is-missing" data-integration-filter="missing" onclick="LibraryIntegration.setFilter('missing')"><strong id="integration-count-missing">0</strong><span>等待补齐</span></button>
                                 <button class="count-card is-ambiguous" data-integration-filter="ambiguous" onclick="LibraryIntegration.setFilter('ambiguous')" title="两端都有候选但分数接近，需手工选择采用哪一端"><strong id="integration-count-ambiguous">0</strong><span>需要确认</span></button>
                             </div>
                             <div class="integration-confirm-help"><i class="fas fa-circle-info"></i><span><strong>“需要确认”是什么？</strong>两个本地候选的匹配分数很接近，系统不会擅自选择不同版本、翻唱或同名歌曲。筛选后，在对应行点击“采用音云”或“采用 Songloft”；确认只记录匹配选择，不会下载或删除文件。</span></div>
                             <div class="integration-result-toolbar">
                                 <label class="integration-check"><input id="integration-select-visible" type="checkbox" onchange="LibraryIntegration.toggleVisible(this.checked)"><span>选择当前缺失项</span></label>
-                                <div class="integration-toolbar-actions"><span id="integration-selected-count" class="integration-caption">已选 0 首</span><button id="integration-complete-selected" class="btn-secondary" type="button" onclick="LibraryIntegration.completeSelected()">手工补齐</button><button id="integration-complete-all" class="btn-primary" type="button" onclick="LibraryIntegration.completeAll()"><i class="fas fa-bolt"></i> 一键补齐全部缺失</button></div>
+                                <div class="integration-toolbar-actions"><span id="integration-selected-count" class="integration-caption">已选 0 首</span><div class="integration-complete-actions"><button id="integration-complete-selected" class="btn-secondary" type="button" onclick="LibraryIntegration.completeSelected()">手工补齐</button><button id="integration-complete-all" class="btn-primary" type="button" onclick="LibraryIntegration.completeAll()"><i class="fas fa-bolt"></i> 一键补齐全部缺失</button></div></div>
                             </div>
                             <div class="integration-table-wrap"><table class="integration-table"><thead><tr><th></th><th>歌曲</th><th>专辑</th><th>音云索引</th><th>Songloft 索引</th><th>处理结果</th></tr></thead><tbody id="integration-result-body"><tr><td colspan="6" class="integration-empty">暂无匹配结果</td></tr></tbody></table></div>
                         </section>
@@ -604,7 +605,12 @@
                                 <p id="integration-candidate-query" class="integration-caption"></p>
                                 <div class="integration-candidate-toolbar"><label for="integration-candidate-source">搜索音源</label><select id="integration-candidate-source" class="form-input"></select><span id="integration-candidate-source-status" class="integration-caption"></span></div>
                                 <div id="integration-candidate-list" class="integration-candidate-list"><div class="integration-empty">正在搜索候选版本…</div></div>
-                                <audio id="integration-preview-audio" class="integration-preview-audio" controls preload="none"></audio>
+                                <div id="integration-preview-player" class="integration-preview-player hidden" aria-live="polite">
+                                    <div class="integration-preview-heading"><span class="integration-preview-icon"><i class="fas fa-headphones"></i></span><div class="integration-preview-copy"><strong id="integration-preview-title">未选择试听</strong><small id="integration-preview-meta">点击任一“试听”加载播放地址</small></div><span id="integration-preview-state" class="integration-preview-state">未加载</span></div>
+                                    <div class="integration-preview-controls"><button id="integration-preview-toggle" type="button" class="btn-secondary btn-xs" aria-label="播放试听"><i class="fas fa-play"></i><span>播放</span></button><input id="integration-preview-seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="试听进度"><span id="integration-preview-time" class="integration-preview-time">00:00 / 00:00</span></div>
+                                    <div class="integration-preview-progress" aria-hidden="true"><span id="integration-preview-progress-bar"></span></div>
+                                    <audio id="integration-preview-audio" class="integration-preview-audio" controls preload="none"></audio>
+                                </div>
                             </div>
                         </div>
 

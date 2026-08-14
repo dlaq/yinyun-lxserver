@@ -432,6 +432,40 @@ const getPlaylist = async (username: string, playlistId: string) => {
   return playlist
 }
 
+const safePlaylistArtwork = (value: unknown) => {
+  const artwork = String(value || '').trim()
+  if (!artwork) return null
+  // Covers are rendered as an image URL by both the admin page and the web
+  // player.  Keep the whitelist deliberately small so a playlist edit cannot
+  // persist a javascript: or other executable URL in a user snapshot.
+  if (/^https?:\/\//i.test(artwork) || artwork.startsWith('/') || /^data:image\//i.test(artwork)) return artwork
+  return null
+}
+
+const songArtwork = (song: any) => safePlaylistArtwork(
+  song?.artworkUrl || song?.coverUrl || song?.cover_url || song?.albumArt || song?.album_art ||
+  song?.albumCover || song?.album_cover || song?.img || song?.picUrl || song?.pic_url ||
+  song?.meta?.picUrl || song?.meta?.img || song?.album?.picUrl || song?.al?.picUrl,
+)
+
+const playlistSongMatchesId = (song: any, coverSongId: string) => {
+  if (!coverSongId) return false
+  const target = String(coverSongId)
+  return [...collectTrackIds(song)].some(id => id === target)
+}
+
+const playlistArtwork = (playlist: any, items: any[] = playlist?.list || []) => {
+  const explicit = safePlaylistArtwork(playlist?.coverUrl || playlist?.artworkUrl || playlist?.cover)
+  if (explicit) return explicit
+  const selected = String(playlist?.coverSongId || '').trim()
+  if (selected) {
+    const selectedSong = items.find(song => playlistSongMatchesId(song, selected))
+    const selectedArtwork = songArtwork(selectedSong)
+    if (selectedArtwork) return selectedArtwork
+  }
+  return items.map(songArtwork).find(Boolean) || null
+}
+
 const publicPlaylistImportRecord = (record: PlaylistImportRecord) => ({
   importId: record.importId,
   name: record.name,
@@ -551,13 +585,15 @@ const getLibraryIndexStatus = async (deps: ApiV1Dependencies, username: string) 
       : Promise.resolve({ status: 'unavailable' }),
   ])
   const songloft = deps.getSongloftClient?.()
-  let songloftTracks = 0
-  if (songloft?.configured) {
-    const tracks = await getSongloftTracksForMatching(deps)
-    songloftTracks = tracks.length
-  } else if (deps.getSongloftSubsonicClient?.()) {
-    songloftTracks = Number((scan as any)?.local_song_count || 0)
-  }
+  // The scan endpoint already reports Songloft's authoritative indexed-file
+  // count.  Do not call listAllSongs() here: that paginates the whole catalog
+  // and made a simple status refresh wait tens of seconds (or look like a
+  // no-op) on a few-thousand-track library.  Full song metadata remains
+  // available to the matching path, which is cached independently.
+  const reportedSongloftTracks = Number((scan as any)?.local_song_count ?? (scan as any)?.song_count ?? (scan as any)?.total_files)
+  const songloftTracks = songloft?.configured || deps.getSongloftSubsonicClient?.()
+    ? (Number.isFinite(reportedSongloftTracks) ? reportedSongloftTracks : 0)
+    : 0
   return {
     yinyunTracks: yinyunItems.length,
     yinyunAudioTracks: yinyunItems.filter(item => Boolean(item.ext && ['mp3', 'flac', 'm4a', 'ogg', 'wav'].includes(String(item.ext).toLowerCase()))).length,
@@ -1982,9 +2018,15 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     if (pathname === `${API_PREFIX}/playlists` && req.method === 'GET') {
       const data = await getUserSpace(username).listManage.getListData()
       success(res, [
-        { id: 'default', name: '试听列表', trackCount: data.defaultList.length },
-        { id: 'love', name: '我的收藏', trackCount: data.loveList.length },
-        ...data.userList.map(item => ({ id: item.id, name: item.name, trackCount: item.list.length })),
+        { id: 'default', name: '试听列表', trackCount: data.defaultList.length, artworkUrl: playlistArtwork({ list: data.defaultList }) },
+        { id: 'love', name: '我的收藏', trackCount: data.loveList.length, artworkUrl: playlistArtwork({ list: data.loveList }) },
+        ...data.userList.map(item => ({
+          id: item.id,
+          name: item.name,
+          trackCount: item.list.length,
+          coverSongId: item.coverSongId || null,
+          artworkUrl: playlistArtwork(item),
+        })),
       ])
       return true
     }
@@ -2029,18 +2071,38 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
             findLocalPlaylistTrack(normalizedSong, localIndex),
           ), username, deps.getAuthSecret())
         })
-        success(res, { id: playlist.id, name: playlist.name, items })
+        const artworkUrl = playlistArtwork(playlist, items)
+        success(res, {
+          id: playlist.id,
+          name: playlist.name,
+          coverSongId: (playlist as any).coverSongId || null,
+          artworkUrl,
+          items,
+        })
         return true
       }
       if (req.method === 'PATCH' && !pathname.includes('/tracks')) {
-        if (['default', 'love'].includes(playlistId)) throw new ApiError(400, 'playlist_readonly', '系统歌单不能重命名')
+        if (['default', 'love'].includes(playlistId)) throw new ApiError(400, 'playlist_readonly', '系统歌单不能修改')
         const body = await readJson(req)
         const playlist = await getPlaylist(username, playlistId)
-        const name = String(body.name || '').trim()
+        const name = body.name === undefined ? String(playlist.name || '').trim() : String(body.name || '').trim()
         if (!name || name.length > 100) throw new ApiError(400, 'invalid_playlist_name', '歌单名称无效')
-        await manage.listDataManage.userListsUpdate([{ ...playlist, name, locationUpdateTime: Date.now() }])
+        const next: any = { ...playlist, name, locationUpdateTime: Date.now() }
+        if (Object.prototype.hasOwnProperty.call(body, 'coverSongId')) {
+          const coverSongId = String(body.coverSongId || '').trim()
+          if (coverSongId.length > 300) throw new ApiError(400, 'invalid_playlist_cover', '歌单封面歌曲编号无效')
+          if (coverSongId) next.coverSongId = coverSongId
+          else delete next.coverSongId
+        }
+        if (Object.prototype.hasOwnProperty.call(body, 'coverUrl')) {
+          const coverUrl = safePlaylistArtwork(body.coverUrl)
+          if (body.coverUrl && !coverUrl) throw new ApiError(400, 'invalid_playlist_cover', '歌单封面地址无效')
+          if (coverUrl) next.coverUrl = coverUrl
+          else delete next.coverUrl
+        }
+        await manage.listDataManage.userListsUpdate([next])
         await manage.createSnapshot()
-        success(res, { id: playlistId, name })
+        success(res, { id: playlistId, name, coverSongId: next.coverSongId || null, coverUrl: next.coverUrl || null })
         return true
       }
       if (req.method === 'DELETE' && !pathname.includes('/tracks')) {
