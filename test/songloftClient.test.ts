@@ -19,6 +19,40 @@ test('Songloft client logs in once and sends bearer auth to library calls', asyn
   assert.equal(requests.find(item => item.url.includes('/songs?'))?.authorization, 'Bearer token-1')
 })
 
+test('Songloft client deletes a playlist through the native API', async () => {
+  let deletedUrl = ''
+  const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/auth/login')) return new Response(JSON.stringify({ access_token: 'token-delete' }), { status: 200 })
+    if (url.includes('/playlists?')) return new Response(JSON.stringify({ playlists: [{ id: 42, name: '测试歌单' }] }), { status: 200 })
+    if (url.endsWith('/playlists/42') && init?.method === 'DELETE') {
+      deletedUrl = url
+      return new Response('{}', { status: 200 })
+    }
+    return new Response('{}', { status: 200 })
+  }) as typeof fetch
+  const client = new SongloftClient({ baseUrl: 'http://songloft/api/v1', username: 'u', password: 'p', fetchImpl })
+  assert.deepEqual(await client.listPlaylists(), [{ id: 42, name: '测试歌单' }])
+  await client.deletePlaylist(42)
+  assert.equal(deletedUrl, 'http://songloft/api/v1/playlists/42')
+})
+
+test('Songloft client renames a playlist through the native PUT API', async () => {
+  let renamed: { url: string; method?: string; body?: string } | null = null
+  const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/auth/login')) return new Response(JSON.stringify({ access_token: 'token-rename' }), { status: 200 })
+    if (url.endsWith('/playlists/42') && init?.method === 'PUT') {
+      renamed = { url, method: init.method, body: String(init.body || '') }
+      return new Response(JSON.stringify({ id: 42, name: '新歌单名' }), { status: 200 })
+    }
+    return new Response('{}', { status: 200 })
+  }) as typeof fetch
+  const client = new SongloftClient({ baseUrl: 'http://songloft/api/v1', username: 'u', password: 'p', fetchImpl })
+  await client.renamePlaylist(42, '新歌单名')
+  assert.deepEqual(renamed, { url: 'http://songloft/api/v1/playlists/42', method: 'PUT', body: JSON.stringify({ name: '新歌单名' }) })
+})
+
 test('Subsonic client emits token authentication and maps playlist entries', async () => {
   let requestUrl = ''
   const fetchImpl = (async (input: string | URL) => {

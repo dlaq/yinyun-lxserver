@@ -64,6 +64,16 @@
                             <i class="fas fa-list-ul w-6 text-center"></i>
                             <span class="ml-3 font-medium">歌单</span>
                         </a>
+                        <ul id="my-playlists-children" class="t-bg-main/50 overflow-hidden transition-all duration-300">
+                            <li>
+                                <a href="#" onclick="switchTab('my-playlists')" id="tab-my-playlists"
+                                    class="flex items-center px-10 py-2 text-sm t-text-muted hover:t-bg-main transition-colors duration-200">
+                                    <i class="fas fa-user-music w-5 text-center"></i>
+                                    <span class="ml-2 font-medium">我的歌单</span>
+                                    <span id="my-playlists-count" class="ml-auto text-xs opacity-60">0</span>
+                                </a>
+                            </li>
+                        </ul>
                     </li>
                     <li>
                         <a href="#" onclick="switchTab('leaderboard')" id="tab-leaderboard"
@@ -919,6 +929,25 @@
                                 </button>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- My Playlists View: the user's imported/created playlists, separate from network playlists. -->
+                <div id="view-my-playlists"
+                    class="absolute inset-0 flex flex-col px-4 pt-4 md:px-8 md:pt-8 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 overflow-hidden">
+                    <div class="flex items-center justify-between gap-3 mb-5">
+                        <div>
+                            <h2 class="text-2xl font-bold t-text-main">我的歌单</h2>
+                            <p class="text-sm t-text-muted mt-1">导入、收藏和在音云中创建的歌单</p>
+                        </div>
+                        <button type="button" onclick="handleCreateList()"
+                            class="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold shadow-sm flex items-center gap-2">
+                            <i class="fas fa-plus"></i><span>新建歌单</span>
+                        </button>
+                    </div>
+                    <div id="my-playlists-grid"
+                        class="flex-1 overflow-y-auto grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 content-start custom-scrollbar">
+                        <div class="col-span-full py-20 text-center t-text-muted">请先在设置中登录音云账号</div>
                     </div>
                 </div>
 

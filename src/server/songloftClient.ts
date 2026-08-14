@@ -51,6 +51,7 @@ const mapSong = (song: any): IntegrationTrack => ({
   artist: String(song?.artist || song?.singer || ''),
   album: String(song?.album || song?.album_name || ''),
   duration: Number(song?.duration || 0) || undefined,
+  artworkUrl: song?.artworkUrl || song?.coverUrl || song?.cover_url || song?.albumArt || song?.album_art || song?.albumCover || song?.album_cover || song?.albumArtUrl || song?.cover || song?.image || song?.picUrl || song?.pic_url || song?.img || undefined,
   relativePath: relativeMusicPath(song?.file_path || song?.filePath || song?.path || ''),
   isrc: song?.isrc || '',
   fingerprint: song?.fingerprint || '',
@@ -156,6 +157,18 @@ export class SongloftClient {
       body: JSON.stringify({ name, type: 'normal', description }),
     })
     return (body?.playlist || body?.data || body) as SongloftPlaylist
+  }
+
+  async renamePlaylist(playlistId: number, name: string) {
+    const body = await this.requestJson(`/playlists/${encodeURIComponent(String(playlistId))}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    })
+    return (body?.playlist || body?.data || body) as SongloftPlaylist
+  }
+
+  async deletePlaylist(playlistId: number) {
+    return this.requestJson(`/playlists/${encodeURIComponent(String(playlistId))}`, { method: 'DELETE' })
   }
 
   async getPlaylistSongs(playlistId: number) {

@@ -8,8 +8,13 @@
         importId: '',
         importData: null,
         importRecords: [],
+        localPlaylists: [],
+        remotePlaylists: [],
         filter: 'all',
         selected: new Set(),
+        downloadSelections: new Map(),
+        queueSongs: new Map(),
+        candidateIndex: -1,
         timer: null,
     };
 
@@ -48,12 +53,16 @@
         button.disabled = busy;
     }
 
-    function importRecordLabel(record) {
-        const name = String(record?.name || record?.sourcePlaylistName || '未命名歌单').trim()
+    function importRecordLabel(record, playlist) {
+        const name = String(playlist?.name || record?.name || record?.sourcePlaylistName || '未命名歌单').trim()
         const source = String(record?.source || '').toUpperCase()
-        const count = Number(record?.trackCount || 0)
+        const count = Number(playlist?.trackCount ?? record?.trackCount ?? 0)
         const date = record?.updatedAt ? new Date(record.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''
         return `${name} · ${source || '网络'} · ${count} 首${date ? ` · ${date}` : ''}`
+    }
+
+    function recordForPlaylistId(playlistId) {
+        return state.importRecords.find(record => String(record?.yinyunPlaylistId) === String(playlistId)) || null
     }
 
     function renderImportHistory(records = state.importRecords) {
@@ -61,106 +70,40 @@
         const open = el('integration-open-history-btn')
         if (!select) return
         const sorted = [...(records || [])].sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''))
-        state.importRecords = sorted
-        const seenSourcePlaylists = new Set()
-        const latestImportIds = new Set()
-        for (const record of sorted) {
-            const key = `${record?.source || ''}:${record?.sourcePlaylistId || ''}`
-            if (record?.sourcePlaylistId && !seenSourcePlaylists.has(key)) {
-                latestImportIds.add(record.importId)
-                seenSourcePlaylists.add(key)
-            }
+        const playlists = new Map((state.localPlaylists || []).map(item => [String(item.id), item]))
+        const active = playlists.size
+            ? sorted.filter(record => playlists.has(String(record?.yinyunPlaylistId)))
+            : sorted
+        const seenYinyunPlaylists = new Set()
+        const visible = active.filter(record => {
+            const id = String(record?.yinyunPlaylistId || '')
+            if (!id || seenYinyunPlaylists.has(id)) return false
+            seenYinyunPlaylists.add(id)
+            return true
+        })
+        state.importRecords = visible
+        if (state.importId && !visible.some(record => record.importId === state.importId) && playlists.size) {
+            state.importId = ''
+            state.importData = null
+            el('integration-result-panel')?.classList.add('hidden')
         }
-        select.innerHTML = sorted.length
-            ? `<option value="">选择以前导入的歌单</option>${sorted.map(record => {
-                const duplicateNote = record?.sourcePlaylistId && !latestImportIds.has(record.importId) ? ' · 历史副本' : ''
-                return `<option value="${escapeHtml(record.importId)}">${escapeHtml(importRecordLabel(record) + duplicateNote)}</option>`
+        select.innerHTML = visible.length
+            ? `<option value="">选择当前音云歌单</option>${visible.map(record => {
+                const playlist = playlists.get(String(record?.yinyunPlaylistId))
+                return `<option value="${escapeHtml(record.yinyunPlaylistId)}">${escapeHtml(importRecordLabel(record, playlist))}</option>`
             }).join('')}`
-            : '<option value="">导入成功后会显示在这里</option>'
-        if (state.importId && sorted.some(record => record.importId === state.importId)) select.value = state.importId
+            : '<option value="">暂无当前音云导入歌单</option>'
+        const currentRecord = visible.find(record => record.importId === state.importId)
+        if (currentRecord) select.value = currentRecord.yinyunPlaylistId
         if (open) open.disabled = !select.value
     }
 
     function onHistoryChange() {
-        const id = el('integration-import-history')?.value || ''
+        const playlistId = el('integration-import-history')?.value || ''
+        const record = recordForPlaylistId(playlistId)
         const open = el('integration-open-history-btn')
-        if (open) open.disabled = !id
-        if (id) persistImportId(id)
-    }
-
-    const importStorageKey = username => `yinyun.integration.import.${String(username || '').trim()}`;
-
-    function syncImportIdDisplay(value = state.importId) {
-        const id = String(value || '').trim();
-        const input = el('integration-import-id');
-        if (input && input.value !== id && id) input.value = id;
-        const resultDisplay = el('integration-record-id-display');
-        const resultValue = el('integration-record-id-value');
-        if (resultValue) resultValue.textContent = id;
-        if (resultDisplay) resultDisplay.classList.toggle('hidden', !id);
-        ['integration-copy-import-id-btn', 'integration-copy-result-id-btn'].forEach(buttonId => {
-            const button = el(buttonId);
-            if (button) button.disabled = !id;
-        });
-        const history = el('integration-import-history')
-        const openHistory = el('integration-open-history-btn')
-        if (history && id && [...history.options].some(option => option.value === id)) history.value = id
-        if (openHistory) openHistory.disabled = !history?.value
-    }
-
-    function persistImportId(value) {
-        const id = String(value || '').trim();
-        if (!id) return;
-        state.importId = id;
-        const input = el('integration-import-id');
-        if (input) input.value = id;
-        const key = importStorageKey(state.username);
-        try {
-            if (key !== 'yinyun.integration.import.') localStorage.setItem(key, id);
-        } catch (error) { console.warn('[LibraryIntegration] 无法写入本地导入记录 ID', error); }
-        try {
-            if (key !== 'yinyun.integration.import.') sessionStorage.setItem(key, id);
-        } catch (error) { console.warn('[LibraryIntegration] 无法写入会话导入记录 ID', error); }
-        syncImportIdDisplay(id);
-    }
-
-    function restoreImportId(username) {
-        const key = importStorageKey(username);
-        if (key === 'yinyun.integration.import.') return '';
-        let id = '';
-        try { id = localStorage.getItem(key) || ''; } catch (error) { console.warn('[LibraryIntegration] 无法读取本地导入记录 ID', error); }
-        if (!id) {
-            try { id = sessionStorage.getItem(key) || ''; } catch (error) { console.warn('[LibraryIntegration] 无法读取会话导入记录 ID', error); }
-        }
-        if (id) {
-            state.importId = id.trim();
-            syncImportIdDisplay(state.importId);
-        } else {
-            state.importId = '';
-            state.importData = null;
-            const input = el('integration-import-id');
-            if (input) input.value = '';
-            syncImportIdDisplay('');
-        }
-        return state.importId;
-    }
-
-    async function copyImportId() {
-        const id = String(el('integration-import-id')?.value || state.importId || '').trim();
-        if (!id) return notifyError(new Error('还没有导入记录 ID，请先点击“导入匹配”'));
-        persistImportId(id);
-        try {
-            if (navigator.clipboard?.writeText) {
-                await navigator.clipboard.writeText(id);
-            } else {
-                const input = el('integration-import-id');
-                input.focus();
-                input.select();
-                if (!document.execCommand('copy')) throw new Error('浏览器不允许访问剪贴板');
-                input.setSelectionRange(input.value.length, input.value.length);
-            }
-            if (typeof showSuccess === 'function') showSuccess(`已复制导入记录 ID：${id}`);
-        } catch (error) { notifyError(new Error(`复制失败，请手动选中 ID：${id}`)); }
+        if (open) open.disabled = !record
+        if (record) state.importId = String(record.importId || '')
     }
 
     function notifyError(error) {
@@ -193,7 +136,8 @@
             if (!state.token) throw new Error('服务器未返回用户令牌');
             state.username = username;
             el('integration-password').value = '';
-            restoreImportId(username);
+            state.importId = '';
+            state.importData = null;
             updateAuth(true);
             sessionStorage.setItem('yinyun.integration.username', username);
             if (typeof showSuccess === 'function') showSuccess(`已连接用户 ${username}`);
@@ -235,6 +179,7 @@
 
     async function loadImportRecords() {
         const data = await api('/api/v1/integration/playlist/imports')
+        if (Array.isArray(data.playlists)) state.localPlaylists = data.playlists
         renderImportHistory(data.records || [])
     }
 
@@ -243,6 +188,8 @@
             api('/api/v1/playlists'),
             api('/api/v1/integration/songloft/playlists'),
         ]);
+        state.localPlaylists = Array.isArray(local) ? local : []
+        state.remotePlaylists = Array.isArray(remote.playlists) ? remote.playlists : []
         const localSelect = el('integration-yinyun-playlist');
         const remoteSelect = el('integration-songloft-playlist');
         localSelect.innerHTML = '<option value="">选择音云歌单</option>' + local.map(item =>
@@ -250,31 +197,104 @@
         remoteSelect.innerHTML = '<option value="">按同名自动创建/匹配</option>' + (remote.playlists || []).map(item =>
             `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${Number(item.song_count || item.songCount || 0)} 首</option>`).join('');
         if (state.importData?.yinyunPlaylistId) localSelect.value = state.importData.yinyunPlaylistId;
+        localSelect.onchange = updatePlaylistDeleteButtons;
+        remoteSelect.onchange = updatePlaylistDeleteButtons;
+        updatePlaylistDeleteButtons();
+        renderImportHistory(state.importRecords)
     }
 
     function queueLabel(status) {
         return ({ waiting: '等待', downloading: '下载中', tagging: '写入元数据', finished: '完成', exists: '已存在', error: '失败', paused: '暂停' })[status] || status;
     }
 
+    function normalizeQueueStatus(value) {
+        const raw = String(value || '').toLowerCase();
+        return raw === 'queued' || raw === 'pending' ? 'waiting'
+            : raw === 'processing' || raw === 'downloading' ? 'downloading'
+                : raw === 'success' || raw === 'completed' ? 'finished'
+                    : raw === 'failed' ? 'error' : raw || 'waiting';
+    }
+
     async function loadQueue() {
         if (!state.token) return;
         const data = await api('/api/v1/downloads');
-        const items = data.items || [];
+        const items = (Array.isArray(data?.items) ? data.items : []).map(item => ({
+            ...item,
+            status: normalizeQueueStatus(item?.status),
+            errorMsg: item?.errorMsg || item?.error || item?.message || '',
+        }));
         const updated = el('integration-queue-updated');
         if (updated) updated.textContent = `刚刚刷新 · ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-        const counts = items.reduce((map, item) => ((map[item.status] = (map[item.status] || 0) + 1), map), {});
+        const counts = items.reduce((map, item) => {
+            const status = item.status;
+            map[status] = (map[status] || 0) + 1;
+            return map;
+        }, {});
         const active = (counts.waiting || 0) + (counts.downloading || 0) + (counts.tagging || 0);
         el('integration-queue-status').textContent = String(active);
         el('integration-queue-detail').textContent = `总计 ${items.length} · 并发 ${data.concurrency || 0}`;
-        el('integration-queue-summary').innerHTML = ['downloading', 'waiting', 'finished', 'exists', 'error'].map(status =>
-            `<div class="queue-chip status-${status}"><strong>${counts[status] || 0}</strong><span>${queueLabel(status)}</span></div>`).join('');
+        ['downloading', 'waiting', 'finished', 'exists', 'error'].forEach(status => {
+            const count = el(`integration-queue-${status}`)
+            if (count) count.textContent = String(counts[status] || 0)
+        })
         const visible = [...items].reverse().slice(0, 8);
+        state.queueSongs.clear();
+        visible.forEach(item => state.queueSongs.set(String(item.id), item.songInfo || {}));
         el('integration-queue-list').innerHTML = visible.length ? visible.map(item => {
             const song = item.songInfo || {};
             const retry = item.status === 'error' ? `<button type="button" class="btn-secondary btn-xs queue-retry-btn" onclick="LibraryIntegration.retryQueueItem('${escapeHtml(item.id)}')">重试</button>` : '';
             const remove = item.status === 'error' ? `<button type="button" class="btn-secondary btn-xs queue-remove-btn" onclick="LibraryIntegration.removeQueueItem('${escapeHtml(item.id)}')">移除</button>` : '';
-            return `<div class="queue-row"><div><strong>${escapeHtml(song.name || song.title || '未知歌曲')}</strong><span>${escapeHtml(song.singer || song.artist || '')}</span>${item.status === 'error' && item.errorMsg ? `<small class="queue-error-message">${escapeHtml(item.errorMsg)}</small>` : ''}</div><div class="queue-progress"><span style="width:${Math.max(0, Math.min(100, Number(item.progress || 0)))}%"></span></div><em class="status-${escapeHtml(item.status)}">${escapeHtml(queueLabel(item.status))}</em><div class="queue-actions">${retry}${remove}</div></div>`;
+            const preview = song.name || song.title ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewQueueItem('${escapeHtml(item.id)}')" title="试听此任务"><i class="fas fa-headphones"></i> 试听</button>` : '';
+            return `<div class="queue-row"><div><strong>${escapeHtml(song.name || song.title || '未知歌曲')}</strong><span>${escapeHtml(song.singer || song.artist || '')}</span>${item.status === 'error' && item.errorMsg ? `<small class="queue-error-message">${escapeHtml(item.errorMsg)}</small>` : ''}</div><div class="queue-progress"><span style="width:${Math.max(0, Math.min(100, Number(item.progress || 0)))}%"></span></div><em class="status-${escapeHtml(item.status)}">${escapeHtml(queueLabel(item.status))}</em><div class="queue-actions">${preview}${retry}${remove}</div></div>`;
         }).join('') : '<div class="integration-empty">暂无下载任务</div>';
+    }
+
+    function updatePlaylistDeleteButtons() {
+        const yinyunId = el('integration-yinyun-playlist')?.value || ''
+        const songloftId = el('integration-songloft-playlist')?.value || ''
+        const yinyunButton = el('integration-delete-yinyun-btn')
+        const songloftButton = el('integration-delete-songloft-btn')
+        if (yinyunButton) yinyunButton.disabled = !yinyunId || ['default', 'love'].includes(yinyunId)
+        const remote = state.remotePlaylists.find(item => String(item.id) === String(songloftId))
+        const readonly = remote?.type === 'radio' || Number(songloftId) <= 2 || (Array.isArray(remote?.labels) && remote.labels.includes('built_in'))
+        if (songloftButton) songloftButton.disabled = !songloftId || readonly
+    }
+
+    async function deleteYinyunPlaylist() {
+        const playlistId = el('integration-yinyun-playlist')?.value || ''
+        if (!playlistId || ['default', 'love'].includes(playlistId)) return notifyError(new Error('系统歌单不能删除'))
+        const playlist = state.localPlaylists.find(item => String(item.id) === String(playlistId))
+        const confirmed = typeof showSelect === 'function'
+            ? await showSelect('确认删除音云歌单', `将删除“${playlist?.name || playlistId}”，只删除歌单，不删除音乐文件。继续吗？`)
+            : window.confirm(`确认删除音云歌单“${playlist?.name || playlistId}”？只删除歌单，不删除音乐文件。`)
+        if (!confirmed) return
+        try {
+            await api(`/api/v1/playlists/${encodeURIComponent(playlistId)}`, { method: 'DELETE' })
+            if (String(state.importData?.yinyunPlaylistId || '') === String(playlistId)) {
+                state.importId = ''
+                state.importData = null
+                state.selected.clear()
+                state.downloadSelections.clear()
+                el('integration-result-panel')?.classList.add('hidden')
+            }
+            await refreshAll()
+            if (typeof showSuccess === 'function') showSuccess(`已删除音云歌单“${playlist?.name || playlistId}”；音乐文件未删除`)
+        } catch (error) { notifyError(error) }
+    }
+
+    async function deleteSongloftPlaylist() {
+        const playlistId = el('integration-songloft-playlist')?.value || ''
+        if (!playlistId) return notifyError(new Error('请选择要删除的 Songloft 歌单'))
+        const selected = [...el('integration-songloft-playlist').selectedOptions][0]
+        const confirmed = typeof showSelect === 'function'
+            ? await showSelect('确认删除 Songloft 歌单', `将删除“${selected?.textContent || playlistId}”，只删除 Songloft 歌单，不删除音乐文件。继续吗？`)
+            : window.confirm(`确认删除 Songloft 歌单“${selected?.textContent || playlistId}”？`)
+        if (!confirmed) return
+        try {
+            await api(`/api/v1/integration/songloft/playlists/${encodeURIComponent(playlistId)}`, { method: 'DELETE' })
+            await loadPlaylists()
+            if (typeof showSuccess === 'function') showSuccess('已删除 Songloft 歌单；音乐文件未删除')
+        } catch (error) { notifyError(error) }
     }
 
     async function retryQueueItem(id) {
@@ -289,6 +309,12 @@
         catch (error) { notifyError(error) }
     }
 
+    function previewQueueItem(id) {
+        const song = state.queueSongs.get(String(id));
+        if (!song) return notifyError(new Error('队列歌曲已刷新，请重新点击试听'));
+        return previewCandidate(song);
+    }
+
     async function importPlaylist() {
         const url = el('integration-playlist-url').value.trim();
         if (!url) return notifyError(new Error('请粘贴网络歌单地址'));
@@ -297,7 +323,7 @@
             const data = await api('/api/v1/integration/playlist/import', {
                 method: 'POST', body: JSON.stringify({ url, autoDownload: false, reuseExisting: true }),
             });
-            persistImportId(data.importId);
+            state.importId = String(data.importId || '');
             renderImport(data);
             await loadImportRecords();
             await loadPlaylists();
@@ -306,35 +332,38 @@
         finally { setBusy('integration-import-btn', false); }
     }
 
-    async function openImport() {
-        const importId = el('integration-import-id').value.trim();
-        if (!importId) return notifyError(new Error('请输入导入记录 ID'));
-        setBusy('integration-open-import-btn', true, '读取中');
+    async function openImportById(importId, showMessage = true) {
+        importId = String(importId || '').trim();
+        if (!importId) return notifyError(new Error('请先从歌单列表选择要打开的歌单'));
         try {
             const data = await api(`/api/v1/integration/playlist/import/${encodeURIComponent(importId)}`);
-            persistImportId(importId);
+            state.importId = importId;
             renderImport(data);
             await loadImportRecords();
             await loadPlaylists();
-            if (typeof showSuccess === 'function') showSuccess(`已打开记录，重新匹配 ${data.counts?.total || 0} 首歌曲`);
+            if (showMessage && typeof showSuccess === 'function') showSuccess(`已打开“${data.name || '导入歌单'}”，重新匹配 ${data.counts?.total || 0} 首歌曲`);
         } catch (error) { notifyError(error); }
-        finally { setBusy('integration-open-import-btn', false); }
+    }
+
+    async function openImport() {
+        return openImportById(state.importId, false);
     }
 
     async function openSelectedImport() {
-        const id = el('integration-import-history')?.value || ''
-        if (!id) return notifyError(new Error('请先从下拉列表选择以前导入的歌单'))
-        persistImportId(id)
-        return openImport()
+        const playlistId = el('integration-import-history')?.value || ''
+        const record = recordForPlaylistId(playlistId)
+        if (!record) return notifyError(new Error('请先从下拉列表选择当前音云导入歌单'))
+        return openImportById(record.importId)
     }
 
     function renderImport(data) {
         state.importData = data;
         state.selected.clear();
-        syncImportIdDisplay(data.importId || state.importId);
+        state.downloadSelections.clear();
+        state.importId = String(data.importId || state.importId || '');
         el('integration-result-panel').classList.remove('hidden');
         el('integration-result-title').textContent = data.name || '匹配结果';
-        el('integration-import-meta').textContent = data.importId || state.importId;
+        el('integration-import-meta').textContent = data.source ? `${data.source.toUpperCase()} · ${data.items?.length || 0} 首` : '';
         const counts = data.counts || {};
         el('integration-count-total').textContent = counts.total || 0;
         el('integration-count-matched').textContent = counts.localMatched || 0;
@@ -346,19 +375,128 @@
         el('integration-result-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
+    function compactCandidate(value, fallbackSource = '') {
+        const raw = value || {};
+        return {
+            id: raw.id ?? raw.songmid ?? raw.songId ?? raw.hash,
+            sourceId: raw.sourceId ?? raw.songmid ?? raw.songId ?? raw.hash ?? raw.id,
+            source: raw.source || fallbackSource,
+            title: raw.title || raw.name || '',
+            artist: raw.artist || raw.singer || '',
+            album: raw.album || raw.albumName || '',
+            duration: raw.duration || raw.interval || 0,
+            artworkUrl: raw.artworkUrl || raw.img || raw.picUrl || raw.pic || '',
+        };
+    }
+
+    async function previewCandidate(track) {
+        const candidate = compactCandidate(track, state.importData?.source || '');
+        if (!candidate.source || !candidate.sourceId) return notifyError(new Error('候选歌曲缺少音源或歌曲编号'));
+        const audio = el('integration-preview-audio');
+        if (!audio) return;
+        audio.removeAttribute('src');
+        audio.load();
+        try {
+            if (['local', 'songloft', 'subsonic', 'navidrome', 'musichub'].includes(String(candidate.source).toLowerCase())) {
+                const local = await api(`/api/v1/library/tracks?query=${encodeURIComponent(`${candidate.title} ${candidate.artist}`)}&limit=50`);
+                const rows = Array.isArray(local?.items) ? local.items : [];
+                const relativePath = String(candidate.relativePath || '').replace(/\\/g, '/').toLowerCase();
+                const hit = rows.find(row => relativePath && String(row.filename || row.relativePath || '').replace(/\\/g, '/').toLowerCase() === relativePath)
+                    || rows.find(row => String(row.title || '').trim() === String(candidate.title || '').trim())
+                    || rows[0];
+                if (!hit?.id) throw new Error('未找到对应的本地音频文件');
+                const stream = await api(`/api/v1/library/tracks/${encodeURIComponent(hit.id)}/stream-token`, { method: 'POST' });
+                if (!stream?.path) throw new Error('本地试听地址生成失败');
+                audio.src = stream.path;
+                audio.load();
+                await audio.play().catch(() => {});
+                return;
+            }
+            const data = await api('/api/v1/tracks/resolve', {
+                method: 'POST',
+                body: JSON.stringify({ track: {
+                    id: candidate.id,
+                    songmid: candidate.sourceId,
+                    source: candidate.source,
+                    name: candidate.title,
+                    singer: candidate.artist,
+                    albumName: candidate.album,
+                    interval: candidate.duration,
+                }, quality: el('integration-quality')?.value || '128k' }),
+            });
+            if (!data?.url) throw new Error('服务器没有返回试听地址');
+            audio.src = data.url;
+            audio.load();
+            await audio.play().catch(() => {});
+        } catch (error) { notifyError(error); }
+    }
+
+    function closeCandidatePicker() {
+        const modal = el('integration-candidate-modal');
+        if (modal) modal.classList.add('hidden');
+        const audio = el('integration-preview-audio');
+        if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); }
+    }
+
+    function selectDownloadCandidate(index, track) {
+        state.downloadSelections.set(Number(index), compactCandidate(track));
+        state.selected.add(Number(index));
+        closeCandidatePicker();
+        renderRows();
+        if (typeof showSuccess === 'function') showSuccess(`第 ${Number(index) + 1} 首已选择下载版本，可点击手工补齐加入队列`);
+    }
+
+    async function openCandidatePicker(index) {
+        const item = (state.importData?.items || []).find(row => Number(row.index) === Number(index));
+        if (!item) return;
+        const modal = el('integration-candidate-modal');
+        const list = el('integration-candidate-list');
+        const query = `${item.source?.title || ''} ${item.source?.artist || ''}`.trim();
+        const source = item.source?.source || state.importData?.source || 'kw';
+        if (!modal || !list) return;
+        modal.classList.remove('hidden');
+        el('integration-candidate-title').textContent = `选择第 ${Number(index) + 1} 首下载版本`;
+        el('integration-candidate-query').textContent = `搜索：${query} · 音源：${source.toUpperCase()}`;
+        list.innerHTML = '<div class="integration-empty"><i class="fas fa-circle-notch fa-spin"></i> 正在搜索候选版本…</div>';
+        try {
+            const response = await fetch(`/api/v1/player/music/search?name=${encodeURIComponent(query)}&source=${encodeURIComponent(source)}&type=song&limit=20&page=1`, {
+                headers: state.token ? { Authorization: `Bearer ${state.token}` } : {},
+            });
+            const payload = await response.json().catch(() => []);
+            if (!response.ok) throw new Error(payload?.error || `搜索失败（${response.status}）`);
+            const results = Array.isArray(payload) ? payload : (payload?.list || payload?.items || []);
+            if (!results.length) {
+                list.innerHTML = '<div class="integration-empty">没有搜索到可用版本，请修改音源设置或稍后重试。</div>';
+                return;
+            }
+            list.innerHTML = results.slice(0, 20).map((raw, candidateIndex) => {
+                const candidate = compactCandidate(raw, source);
+                const safe = escapeHtml;
+                return `<div class="integration-candidate-item"><div><strong>${safe(candidate.title || '未知歌曲')}</strong><small>${safe(candidate.artist)} · ${safe(candidate.album || '未知专辑')} · ${safe(String(candidate.duration || ''))}</small></div><div class="integration-candidate-actions"><button type="button" class="btn-secondary btn-xs" data-candidate-index="${candidateIndex}">试听</button><button type="button" class="btn-primary btn-xs" data-select-index="${candidateIndex}">采用</button></div></div>`;
+            }).join('');
+            [...list.querySelectorAll('[data-candidate-index]')].forEach(button => button.addEventListener('click', () => previewCandidate(compactCandidate(results[Number(button.dataset.candidateIndex)], source))));
+            [...list.querySelectorAll('[data-select-index]')].forEach(button => button.addEventListener('click', () => selectDownloadCandidate(index, compactCandidate(results[Number(button.dataset.selectIndex)], source))));
+        } catch (error) {
+            list.innerHTML = `<div class="integration-empty">${escapeHtml(error.message || String(error))}</div>`;
+        }
+    }
+
     function renderRows() {
         const items = state.importData?.items || [];
         const visible = state.filter === 'all' ? items : items.filter(item => item.status === state.filter);
         const body = el('integration-result-body');
         const statusLabel = status => status === 'matched' ? '已找到' : status === 'missing' ? '未找到' : '需确认';
-        const statusCell = (match, label) => `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(match?.status || 'missing')}">${label}: ${statusLabel(match?.status)}</span>${match?.candidate ? `<small>${escapeHtml(match.candidate.title || '')} · ${escapeHtml(match.candidate.artist || '')}</small>` : ''}</div>`;
+        const statusCell = (match, label, index, provider) => `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(match?.status || 'missing')}">${label}: ${statusLabel(match?.status)}</span>${match?.candidate ? `<small>${escapeHtml(match.candidate.title || '')} · ${escapeHtml(match.candidate.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
         body.innerHTML = visible.length ? visible.map(item => {
             const source = item.source || {};
             const checked = state.selected.has(Number(item.index));
-            const canSelect = item.status === 'missing' && item.downloadable !== false;
+            const selected = state.downloadSelections.get(Number(item.index));
+            const canSelect = item.downloadable !== false && (item.status === 'missing' || (item.status === 'ambiguous' && Boolean(selected)));
             const decision = item.status === 'matched' ? (item.matchedBy === 'songloft' ? '共享文件已存在，等待音云索引' : '音云已收录') : item.status === 'ambiguous' ? '需要人工确认' : '可加入音云下载';
             const confirmButtons = item.status === 'ambiguous' ? `<div class="integration-confirm-actions">${item.yinyun?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'yinyun')" title="使用音云候选">采用音云</button>` : ''}${item.songloft?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'songloft')" title="使用 Songloft 候选">采用 Songloft</button>` : ''}</div>` : '';
-            return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云')}</td><td>${statusCell(item.songloft, 'Songloft')}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${confirmButtons}</td></tr>`;
+            const manualButton = item.status !== 'matched' ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.openCandidatePicker(${Number(item.index)})"><i class="fas fa-headphones"></i> ${selected ? '更换版本' : '选择版本'}</button>` : '';
+            const selectionText = selected ? `<small class="integration-match-source">已选：${escapeHtml(selected.title)} · ${escapeHtml(selected.artist)}</small>` : '';
+            return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun')}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft')}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${selectionText}${manualButton}${confirmButtons}</td></tr>`;
         }).join('') : '<tr><td colspan="6" class="integration-empty">当前筛选没有歌曲</td></tr>';
         document.querySelectorAll('[data-integration-filter]').forEach(button => button.classList.toggle('active', button.dataset.integrationFilter === state.filter));
         el('integration-selected-count').textContent = `已选 ${state.selected.size} 首`;
@@ -387,7 +525,7 @@
         try {
             const data = await api('/api/v1/integration/playlist/complete', {
                 method: 'POST',
-                body: JSON.stringify({ importId: state.importId, mode, indexes, quality: el('integration-quality').value }),
+                body: JSON.stringify({ importId: state.importId, mode, indexes, quality: el('integration-quality').value, selections: Object.fromEntries(state.downloadSelections) }),
             });
             const queued = data.download?.queued?.length || 0;
             const skipped = data.download?.skipped?.length || 0;
@@ -414,6 +552,14 @@
             renderImport(state.importData);
             if (typeof showSuccess === 'function') showSuccess(`已确认第 ${Number(index) + 1} 首采用${label}候选；未触发下载`);
         } catch (error) { notifyError(error); }
+    }
+
+    function previewLocalCandidate(index, provider, candidateIndex = 0) {
+        const item = (state.importData?.items || []).find(row => Number(row.index) === Number(index));
+        const match = item?.[provider];
+        const candidate = match?.candidates?.[Number(candidateIndex)]?.track || match?.candidate;
+        if (!candidate) return notifyError(new Error('当前来源没有可试听的候选'));
+        return previewCandidate(candidate);
     }
 
     async function triggerScan() {
@@ -493,16 +639,21 @@
     function startPolling() {
         if (state.timer) clearInterval(state.timer);
         state.timer = setInterval(() => {
-            if (state.token && document.getElementById('view-library-integration')?.classList.contains('active')) {
-                Promise.allSettled([loadQueue(), loadImportRecords()]).catch(console.error);
-            }
+            // 管理台视图切换不会始终保留 .active（旧版曾因此停止刷新），
+            // 队列是用户正在下载的全局状态，只要用户已连接就持续拉取。
+            if (state.token) Promise.allSettled([loadQueue(), loadPlaylists(), loadImportRecords()]).catch(console.error);
         }, 2500);
     }
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && state.token) {
+            loadQueue().catch(notifyError);
+        }
+    });
 
     function activate() {
         const savedUser = sessionStorage.getItem('yinyun.integration.username');
         if (savedUser) el('integration-username').value = savedUser;
-        if (savedUser) restoreImportId(savedUser);
         if (state.token) {
             refreshAll().catch(notifyError);
             startPolling();
@@ -510,9 +661,11 @@
     }
 
     window.LibraryIntegration = {
-        activate, login, refreshAll, loadQueue, importPlaylist, openImport,
-        openSelectedImport, copyImportId, onHistoryChange, retryQueueItem, removeQueueItem,
+        activate, login, refreshAll, loadQueue, importPlaylist, openSelectedImport,
+        onHistoryChange, retryQueueItem, removeQueueItem,
         setFilter, toggleItem, toggleVisible, completeSelected, completeAll,
         triggerScan, refreshBothIndexes, refreshYinyunIndex, refreshSongloftIndex, resolveItem, updateSyncMode, syncPlaylist,
+        deleteYinyunPlaylist, deleteSongloftPlaylist, openCandidatePicker, closeCandidatePicker,
+        previewCandidate, previewLocalCandidate, previewQueueItem,
     };
 })();

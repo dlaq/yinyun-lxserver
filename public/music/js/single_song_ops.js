@@ -212,6 +212,7 @@ async function deleteSingleSong(songId) {
             if (oldUsername) currentListData.username = oldUsername; // Preserve username
             await window.ListStore.set(data).catch(e => console.error('[IDBStore] 保存失败:', e));
             renderMyLists(data);
+            if (typeof scheduleSongloftPlaylistSync === 'function') scheduleSongloftPlaylistSync(activeListId);
 
             // Refresh current view
             handleListClick(activeListId);
@@ -250,6 +251,7 @@ async function deleteSingleSong(songId) {
 
             // Update UI
             renderMyLists(currentListData);
+            if (typeof scheduleSongloftPlaylistSync === 'function') scheduleSongloftPlaylistSync(activeListId);
             handleListClick(activeListId);
 
         } catch (e) {

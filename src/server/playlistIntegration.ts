@@ -13,6 +13,7 @@ export type IntegrationTrack = {
   relativePath?: string
   isrc?: string
   fingerprint?: string
+  artworkUrl?: string
   raw?: unknown
 }
 
@@ -513,6 +514,21 @@ export class PlaylistSyncStore {
     return this.writeChain
   }
 
+  remove(syncId: string) {
+    if (!this.loaded) this.load()
+    const index = this.payload.records.findIndex(record => record.syncId === syncId)
+    if (index < 0) return Promise.resolve()
+    this.payload.records.splice(index, 1)
+    const write = async () => {
+      await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true })
+      const temporary = `${this.filePath}.${process.pid}.${Date.now()}.tmp`
+      await fs.promises.writeFile(temporary, `${JSON.stringify(this.payload, null, 2)}\n`, 'utf8')
+      await fs.promises.rename(temporary, this.filePath)
+    }
+    this.writeChain = this.writeChain.then(write, write)
+    return this.writeChain
+  }
+
   static hashIds(ids: string[]) { return hashIds(ids) }
 }
 
@@ -527,5 +543,6 @@ export const toIntegrationTrack = (value: any): IntegrationTrack => ({
   relativePath: value?.relativePath || value?._localFilename || value?.file_path,
   isrc: value?.isrc,
   fingerprint: value?.fingerprint,
+  artworkUrl: value?.artworkUrl || value?.coverUrl || value?.cover_url || value?.picUrl || value?.pic_url || value?.img || value?.raw?.artworkUrl || value?.raw?.coverUrl || value?.raw?.cover_url || undefined,
   raw: value,
 })

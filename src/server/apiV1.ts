@@ -289,7 +289,7 @@ const normalizeOnlineTrack = (song: any, source: string) => ({
   album: song.albumName || song.album || song.meta?.albumName || '',
   source: song.source || source,
   duration: song.interval || song.duration || null,
-  artworkUrl: song.img || song.picUrl || song.meta?.picUrl || null,
+  artworkUrl: song.artworkUrl || song.coverUrl || song.cover_url || song.albumArt || song.album_art || song.albumCover || song.album_cover || song.img || song.picUrl || song.pic_url || song.meta?.picUrl || null,
   raw: song,
 })
 
@@ -600,6 +600,7 @@ const publicIntegrationTrack = (track?: IntegrationTrack) => track ? ({
   artist: track.artist,
   album: track.album || '',
   duration: track.duration || null,
+  artworkUrl: track.artworkUrl || null,
   relativePath: track.relativePath || null,
   isrc: track.isrc || null,
   hasFingerprint: Boolean(track.fingerprint),
@@ -886,15 +887,29 @@ const enqueuePlaylistImportDownloads = (
 ) => {
   const selected = getImportSelection(body, record, matches)
   const quality = QUALITY_ORDER.includes(body.quality) ? body.quality : 'flac'
+  const overrides = body.selections && typeof body.selections === 'object' ? body.selections : {}
   const skipped: Array<{ index: number; reason: string }> = []
   const inputs = selected.flatMap(({ match, index, track }) => {
-    const source = String(track.source || record.source || '')
+    const override = overrides[String(index)] && typeof overrides[String(index)] === 'object' ? overrides[String(index)] : null
+    // Manual completion may select a different online version.  Only accept a
+    // compact public track object; raw/provider-private fields never become a
+    // download source without passing through normalizeImportedSong.
+    const selectedTrack = override ? toIntegrationTrack({
+      id: override.id ?? override.sourceId,
+      sourceId: override.sourceId ?? override.id,
+      source: override.source,
+      title: override.title || override.name,
+      artist: override.artist || override.singer,
+      album: override.album || override.albumName,
+      duration: override.duration || override.interval,
+    }) : track
+    const source = String(selectedTrack.source || record.source || '')
     if (isNonYinyunDownloadSource(source) || !deps.isSourceSupported(source, username)) {
       skipped.push({ index, reason: 'source_unavailable' })
       return []
     }
     try {
-      const songInfo = normalizeImportedSong(deps, track, record.source)
+      const songInfo = normalizeImportedSong(deps, selectedTrack, record.source)
       return [{
         id: `import_${record.importId}_${index}`,
         songInfo,
@@ -981,11 +996,13 @@ export const apiV1OpenApi = {
     '/api/v1/integration/match': { post: { summary: '将歌曲与音云、Songloft 本地曲库匹配' } },
     '/api/v1/integration/playlist/resolve': { post: { summary: '解析网络歌单为统一歌曲列表' } },
     '/api/v1/integration/playlist/import': { post: { summary: '导入第三方网络歌单并标记本地缺失歌曲' } },
-    '/api/v1/integration/playlist/imports': { get: { summary: '查询当前用户以前导入的网络歌单' } },
+    '/api/v1/integration/playlist/imports': { get: { summary: '查询当前用户现有音云导入歌单' } },
     '/api/v1/integration/playlist/import/{importId}': { get: { summary: '查询已导入歌单的本地匹配状态' } },
     '/api/v1/integration/playlist/resolve-item': { post: { summary: '确认一首歌使用音云或 Songloft 候选' } },
     '/api/v1/integration/playlist/complete': { post: { summary: '手工或一键补齐导入歌单的缺失歌曲' } },
     '/api/v1/integration/playlists/sync': { post: { summary: '双向同步音云与 Songloft 歌单' } },
+    '/api/v1/integration/playlists/sync/{yinyunPlaylistId}': { delete: { summary: '删除音云歌单对应的 Songloft 映射歌单' } },
+    '/api/v1/integration/songloft/playlists/{playlistId}': { delete: { summary: '删除指定 Songloft 歌单' } },
     '/api/v1/downloads': { get: { summary: '查询服务端下载队列' }, post: { summary: '加入服务端下载队列' } },
     '/api/v1/replacement': { get: { summary: '查询洗版任务' }, post: { summary: '启动洗版任务' } },
     '/api/v1/sources': { get: { summary: '查询可用音源及平台开关' } },
@@ -1110,6 +1127,22 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 
     if (pathname === `${API_PREFIX}/integration/songloft/playlists` && req.method === 'GET') {
       success(res, await readSongloftPlaylists(deps))
+      return true
+    }
+
+    const songloftPlaylistDeleteMatch = pathname.match(/^\/api\/v1\/integration\/songloft\/playlists\/([^/]+)$/)
+    if (songloftPlaylistDeleteMatch && req.method === 'DELETE') {
+      const playlistId = Number(decodeURIComponent(songloftPlaylistDeleteMatch[1]))
+      if (!Number.isInteger(playlistId) || playlistId <= 0) throw new ApiError(400, 'invalid_songloft_playlist', 'Songloft 歌单 ID 无效')
+      const client = requireSongloftClient(deps)
+      const playlists = await client.listPlaylists()
+      const playlist = playlists.find(item => Number(item.id) === playlistId)
+      if (!playlist) throw new ApiError(404, 'songloft_playlist_not_found', 'Songloft 歌单不存在')
+      if (playlist.type === 'radio' || playlistId <= 2 || (Array.isArray((playlist as any).labels) && (playlist as any).labels.includes('built_in'))) {
+        throw new ApiError(400, 'songloft_playlist_readonly', 'Songloft 系统歌单不能删除')
+      }
+      await client.deletePlaylist(playlistId)
+      success(res, { deleted: true, playlistId })
       return true
     }
 
@@ -1286,7 +1319,17 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     if (pathname === `${API_PREFIX}/integration/playlist/imports` && req.method === 'GET') {
       const store = deps.getPlaylistImportStore?.(username)
       if (!store) throw new ApiError(503, 'playlist_import_store_unavailable', '导入歌单存储尚未配置')
-      success(res, { records: store.load().map(publicPlaylistImportRecord) })
+      const playlistData = await getUserSpace(username).listManage.getListData()
+      const playlists = [
+        { id: 'default', name: '试听列表', trackCount: playlistData.defaultList.length },
+        { id: 'love', name: '我的收藏', trackCount: playlistData.loveList.length },
+        ...playlistData.userList.map(item => ({ id: item.id, name: item.name, trackCount: item.list.length })),
+      ]
+      const playlistIds = new Set(playlists.map(item => String(item.id)))
+      const records = store.load()
+        .filter(record => playlistIds.has(String(record.yinyunPlaylistId)))
+        .map(publicPlaylistImportRecord)
+      success(res, { records, playlists })
       return true
     }
 
@@ -1430,8 +1473,8 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (!['push', 'pull', 'merge'].includes(direction)) throw new ApiError(400, 'invalid_sync_direction', '同步方向必须是 push、pull 或 merge')
       if (!['merge', 'replace'].includes(mode)) throw new ApiError(400, 'invalid_sync_mode', '同步模式必须是 merge 或 replace')
       if (mode === 'replace' && direction === 'pull') throw new ApiError(400, 'invalid_sync_mode', 'pull 方向不支持 replace 模式')
-      if (!isAdmin && (direction !== 'push' || mode !== 'merge')) {
-        throw new ApiError(403, 'playlist_sync_mode_forbidden', '播放器用户只能使用“音云 → Songloft”的安全合并同步')
+      if (!isAdmin && (direction !== 'push' || !['merge', 'replace'].includes(mode))) {
+        throw new ApiError(403, 'playlist_sync_mode_forbidden', '播放器用户只能使用“音云 → Songloft”的推送同步')
       }
       const syncLockKey = `${username}:${yinyunPlaylistId}`
       if (activePlaylistSyncs.has(syncLockKey)) throw new ApiError(409, 'playlist_sync_in_progress', '该音云歌单正在同步，请等待当前任务完成')
@@ -1440,8 +1483,12 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       const client = requireSongloftClient(deps)
       const yinyunPlaylist = await getPlaylist(username, yinyunPlaylistId)
       const playlists = await client.listPlaylists()
+      const store = deps.getPlaylistSyncStore?.(username)
+      store?.load()
+      const syncId = `${username}:${yinyunPlaylistId}`
+      const previous = store?.get(syncId)
       let songloftPlaylist: any
-      let playlistResolution: 'explicit' | 'existing_name' | 'created'
+      let playlistResolution: 'explicit' | 'mapped' | 'existing_name' | 'created' = 'existing_name'
       if (body.songloftPlaylistId !== undefined && body.songloftPlaylistId !== null && String(body.songloftPlaylistId).trim()) {
         const id = Number(body.songloftPlaylistId)
         if (!Number.isFinite(id) || id <= 0) throw new ApiError(400, 'invalid_songloft_playlist', 'Songloft 歌单 ID 无效')
@@ -1449,24 +1496,35 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         if (!songloftPlaylist) throw new ApiError(404, 'songloft_playlist_not_found', 'Songloft 歌单不存在')
         playlistResolution = 'explicit'
       } else {
+        const mapped = previous?.songloftPlaylistId
+          ? playlists.find(item => Number(item.id) === Number(previous.songloftPlaylistId))
+          : undefined
+        if (mapped) {
+          songloftPlaylist = mapped
+          playlistResolution = 'mapped'
+        }
         const sameName = playlists.filter(item => normalizePlaylistName(item.name) === normalizePlaylistName(yinyunPlaylist.name))
-        if (sameName.length > 1) throw new ApiError(409, 'songloft_playlist_name_ambiguous', 'Songloft 中存在多个同名歌单，请明确选择目标歌单')
-        songloftPlaylist = sameName[0]
+        if (!songloftPlaylist && sameName.length > 1) throw new ApiError(409, 'songloft_playlist_name_ambiguous', 'Songloft 中存在多个同名歌单，请明确选择目标歌单')
+        if (!songloftPlaylist) songloftPlaylist = sameName[0]
         if (!songloftPlaylist) {
           songloftPlaylist = await client.createPlaylist(yinyunPlaylist.name)
           if (!songloftPlaylist?.id) throw new ApiError(502, 'songloft_playlist_create_failed', 'Songloft 歌单创建未返回 ID')
           playlistResolution = 'created'
-        } else {
+        } else if (playlistResolution !== 'mapped') {
           playlistResolution = 'existing_name'
         }
       }
 
       const remotePlaylistId = Number(songloftPlaylist.id)
       if (!Number.isFinite(remotePlaylistId) || remotePlaylistId <= 0) throw new ApiError(502, 'invalid_songloft_playlist', 'Songloft 歌单 ID 无效')
-      const store = deps.getPlaylistSyncStore?.(username)
-      store?.load()
-      const syncId = `${username}:${yinyunPlaylistId}`
-      const previous = store?.get(syncId)
+      if (['mapped', 'explicit'].includes(playlistResolution) && normalizePlaylistName(songloftPlaylist.name) !== normalizePlaylistName(yinyunPlaylist.name)) {
+        try {
+          await client.renamePlaylist(remotePlaylistId, yinyunPlaylist.name)
+          songloftPlaylist.name = yinyunPlaylist.name
+        } catch (error: any) {
+          console.warn('[PlaylistSync] Songloft 歌单重命名失败，保留映射:', error?.message || error)
+        }
+      }
       const initialLocalTracks = yinyunPlaylist.list.map((item: any) => toIntegrationTrack(deps.normalizeSongInfo(item)))
       let remotePlaylistTracks = await client.getPlaylistSongs(remotePlaylistId)
       const initialRemoteIds = remotePlaylistTracks.map(canonicalTrackId)
@@ -1581,6 +1639,26 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       } finally {
         activePlaylistSyncs.delete(syncLockKey)
       }
+      return true
+    }
+
+    const syncDeleteMatch = pathname.match(/^\/api\/v1\/integration\/playlists\/sync\/([^/]+)$/)
+    if (syncDeleteMatch && req.method === 'DELETE') {
+      const yinyunPlaylistId = decodeURIComponent(syncDeleteMatch[1])
+      if (['default', 'love'].includes(yinyunPlaylistId)) throw new ApiError(400, 'playlist_readonly', '系统歌单不能删除')
+      const store = deps.getPlaylistSyncStore?.(username)
+      store?.load()
+      const record = store?.get(`${username}:${yinyunPlaylistId}`)
+      if (!store || !record) { success(res, { deleted: false, mapped: false }); return true }
+      const client = deps.getSongloftClient?.()
+      if (client?.configured) {
+        const remote = (await client.listPlaylists()).find(item => Number(item.id) === Number(record.songloftPlaylistId))
+        if (remote && remote.type !== 'radio' && Number(remote.id) > 2 && !(Array.isArray((remote as any).labels) && (remote as any).labels.includes('built_in'))) {
+          await client.deletePlaylist(Number(remote.id))
+        }
+      }
+      await store.remove(record.syncId)
+      success(res, { deleted: true, mapped: true, songloftPlaylistId: record.songloftPlaylistId })
       return true
     }
 
@@ -1841,10 +1919,22 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         const playlist = await getPlaylist(username, playlistId)
         const localItems = await fileCache.getCacheList(username)
         const localIndex = createLocalTrackIndex(localItems)
+        // Some original Yinyun entries have no artwork even though Songloft's
+        // index has it.  Use Songloft metadata as a read-only artwork fallback;
+        // the shared audio file and the playlist source remain authoritative.
+        let songloftTracks: IntegrationTrack[] = []
+        if (deps.getSongloftClient?.()?.configured || deps.getSongloftSubsonicClient?.()) {
+          try { songloftTracks = await getSongloftTracksForMatching(deps, playlist.list.map(song => toIntegrationTrack(deps.normalizeSongInfo({ ...song })))) } catch { songloftTracks = [] }
+        }
         const items = playlist.list.map(song => {
           const normalizedSong = deps.normalizeSongInfo({ ...song })
+          const onlineTrack: any = normalizeOnlineTrack(normalizedSong, song.source || 'unknown')
+          if (!onlineTrack.artworkUrl && songloftTracks.length) {
+            const fallback = matchTracks([toIntegrationTrack(normalizedSong)], songloftTracks, { ...SHARED_LIBRARY_MATCH_OPTIONS, threshold: 0.82 })[0]
+            if (fallback?.candidate && fallback.score >= 0.82 && fallback.candidate.artworkUrl) onlineTrack.artworkUrl = fallback.candidate.artworkUrl
+          }
           return withSignedArtwork(mergeLocalTrackMetadata(
-            normalizeOnlineTrack(normalizedSong, song.source || 'unknown'),
+            onlineTrack,
             findLocalPlaylistTrack(normalizedSong, localIndex),
           ), username, deps.getAuthSecret())
         })
@@ -1867,6 +1957,23 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         await getPlaylist(username, playlistId)
         await manage.listDataManage.userListsRemove([playlistId])
         await manage.createSnapshot()
+        // 删除音云用户歌单后，按已保存的映射删除对应 Songloft 歌单。
+        // 只删除歌单实体，不触碰共享音乐文件；系统歌单仍受保护。
+        const syncStore = deps.getPlaylistSyncStore?.(username)
+        syncStore?.load()
+        const syncRecord = syncStore?.get(`${username}:${playlistId}`)
+        const songloft = deps.getSongloftClient?.()
+        if (syncStore && syncRecord && songloft?.configured) {
+          try {
+            const remote = (await songloft.listPlaylists()).find(item => Number(item.id) === Number(syncRecord.songloftPlaylistId))
+            if (remote && remote.type !== 'radio' && Number(remote.id) > 2 && !(Array.isArray((remote as any).labels) && (remote as any).labels.includes('built_in'))) {
+              await songloft.deletePlaylist(Number(remote.id))
+            }
+            await syncStore.remove(`${username}:${playlistId}`)
+          } catch (error: any) {
+            console.warn('[PlaylistSync] 音云歌单已删除，但 Songloft 映射清理失败:', error?.message || error)
+          }
+        }
         res.writeHead(204); res.end()
         return true
       }

@@ -67,7 +67,7 @@ const DEFAULT_ENTRY_TABS = new Set(['search', 'songlist', 'leaderboard', 'favori
 const DEFAULT_SETTINGS = {
     itemsPerPage: 20, // Default 20 items per page, can be 'all'
     defaultEntry: 'search', // 默认入口：播放器主界面
-    defaultEntryVersion: 2,
+    defaultEntryVersion: 3,
     preferredQuality: 'flac', // 默认音质偏好
     enableProxyPlayback: false, // 播放音乐代理
     enableProxyDownload: false, // 下载音乐代理
@@ -136,12 +136,12 @@ function normalizeDownloadConcurrency(value) {
 function normalizeStoredSettings(nextSettings) {
     if (!nextSettings || typeof nextSettings !== 'object') return nextSettings;
     delete nextSettings.remasterRetryManifest;
-    // Migrate installations that inherited the old implicit About entry.
-    // Once the user explicitly chooses a tab in v2, keep that choice.
-    if (nextSettings.defaultEntry === 'about' && !nextSettings.defaultEntryVersion) {
-        nextSettings.defaultEntry = DEFAULT_SETTINGS.defaultEntry;
-    }
-    nextSettings.defaultEntryVersion = 2;
+    // v2 accidentally persisted About as the entry tab.  It makes the player
+    // appear to jump to the agreement/about page on every fresh navigation.
+    // Keep About available as a manually opened page, but always migrate the
+    // persisted default back to the actual Web Player search view.
+    if (nextSettings.defaultEntry === 'about') nextSettings.defaultEntry = DEFAULT_SETTINGS.defaultEntry;
+    nextSettings.defaultEntryVersion = 3;
     if (!DEFAULT_ENTRY_TABS.has(nextSettings.defaultEntry)) {
         nextSettings.defaultEntry = DEFAULT_SETTINGS.defaultEntry;
     }
@@ -353,6 +353,39 @@ function getUserAuthHeaders() {
 }
 window.getUserAuthHeaders = getUserAuthHeaders;
 
+// Native user-list snapshots contain the original online song objects, while
+// the stable playlist API can enrich each row with a signed local cover and a
+// Songloft artwork fallback.  Hydrate covers after login without changing the
+// user's playlist data or playback IDs.
+async function hydratePersonalPlaylistArtwork(data) {
+    if (!data) return data;
+    const lists = [
+        { id: 'default', list: data.defaultList },
+        { id: 'love', list: data.loveList },
+        ...(Array.isArray(data.userList) ? data.userList : []),
+    ].filter(item => Array.isArray(item.list) && item.list.length);
+    const headers = getUserAuthHeaders();
+    await Promise.all(lists.map(async list => {
+        try {
+            const response = await fetch(`/api/v1/playlists/${encodeURIComponent(list.id)}`, { headers, cache: 'no-store' });
+            if (!response.ok) return;
+            const payload = await response.json();
+            const items = payload?.data?.items || payload?.items || [];
+            items.forEach((enriched, index) => {
+                const original = list.list[index];
+                if (!original || !enriched?.artworkUrl) return;
+                original.img = original.img || enriched.artworkUrl;
+                original.picUrl = original.picUrl || enriched.artworkUrl;
+                original.meta = { ...(original.meta || {}), picUrl: original.meta?.picUrl || enriched.artworkUrl };
+                original._artworkUrl = enriched.artworkUrl;
+            });
+        } catch (error) {
+            console.debug('[Artwork] 歌单封面补全失败:', list.id, error?.message || error);
+        }
+    }));
+    return data;
+}
+
 function addUserTokenToUrl(url) {
     if (!url || /(?:\?|&)token=/.test(url)) return url;
     const token = getUserAuthHeaders()['x-user-token'] || localStorage.getItem('lx_user_token') || '';
@@ -405,6 +438,7 @@ async function reloadUserFavorites() {
                 currentListData = listData;
                 window.currentListData = listData;
                 window.myPersonalListData = listData;
+                await hydratePersonalPlaylistArtwork(listData);
                 renderMyLists(listData);
                 await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
                 if (typeof loadLibraryData === 'function') {
@@ -1001,6 +1035,11 @@ function switchTab(tabId) {
 
     if (tabId === 'songlist') {
         document.getElementById('page-title').innerText = "歌单";
+    }
+
+    if (tabId === 'my-playlists') {
+        document.getElementById('page-title').innerText = "我的歌单";
+        renderMyPlaylists(currentListData);
     }
 
     if (tabId === 'leaderboard') {
@@ -5732,6 +5771,7 @@ function loadSettings() {
         if (saved) {
             const loaded = JSON.parse(saved);
             settings = normalizeStoredSettings({ ...settings, ...loaded });
+            window.settings = settings;
             console.log('[Settings] 加载设置成功:', settings);
         }
     } catch (e) {
@@ -8464,7 +8504,7 @@ async function fetchSettingsFromServer() {
             let localDefaultEntry = null;
             try {
                 const localSettings = JSON.parse(localStorage.getItem('lx_settings') || '{}');
-                if (DEFAULT_ENTRY_TABS.has(localSettings.defaultEntry)) {
+                if (DEFAULT_ENTRY_TABS.has(localSettings.defaultEntry) && localSettings.defaultEntry !== 'about') {
                     localDefaultEntry = localSettings.defaultEntry;
                 }
             } catch (e) {
@@ -8692,6 +8732,7 @@ async function handleLocalLogin() {
             currentListData = listData;
             if (currentListData) currentListData.username = user; // Attach username
             window.myPersonalListData = currentListData; // [个人数据缓存]
+            await hydratePersonalPlaylistArtwork(listData);
             renderMyLists(listData);
 
             // [Library] 登录后加载收藏歌手/专辑
@@ -8728,6 +8769,13 @@ async function handleRemoveList(listId, event) {
             currentListData.userList.splice(index, 1);
             try {
                 await pushDataChange();
+                // 删除本地用户歌单后同步删除已经映射的 Songloft 歌单。
+                const syncResponse = await fetch(`/api/v1/integration/playlists/sync/${encodeURIComponent(listId)}`, {
+                    method: 'DELETE', headers: getUserAuthHeaders()
+                });
+                if (!syncResponse.ok && syncResponse.status !== 404) {
+                    console.warn('[Songloft] 歌单映射删除失败:', await syncResponse.text());
+                }
                 renderMyLists(currentListData);
             } catch (e) {
                 showError('删除同步失败');
@@ -8813,6 +8861,7 @@ function initFavoriteSidebarSortable(container) {
 
 function renderMyLists(data) {
     const container = document.getElementById('my-lists-container');
+    renderMyPlaylists(data);
     container.innerHTML = '';
 
     if (!data) {
@@ -8922,6 +8971,43 @@ function renderMyLists(data) {
     }
 }
 
+// 与网络“歌单”页面分开呈现用户自己的歌单。这里仅使用 userList，
+// 不把“默认列表/我的收藏”混入导入歌单下拉和卡片列表。
+function renderMyPlaylists(data) {
+    const grid = document.getElementById('my-playlists-grid');
+    const countEl = document.getElementById('my-playlists-count');
+    const lists = Array.isArray(data?.userList) ? data.userList : [];
+    if (countEl) countEl.textContent = String(lists.length);
+    if (!grid) return;
+    if (!data) {
+        grid.innerHTML = '<div class="col-span-full py-20 text-center t-text-muted">请先在设置中登录音云账号</div>';
+        return;
+    }
+    if (!lists.length) {
+        grid.innerHTML = '<div class="col-span-full py-20 text-center t-text-muted"><i class="fas fa-music text-3xl mb-3 opacity-40"></i><p>还没有我的歌单</p><button type="button" onclick="handleCreateList()" class="mt-4 px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm">新建歌单</button></div>';
+        return;
+    }
+    grid.innerHTML = lists.map(list => {
+        const id = String(list?.id || '');
+        const name = String(list?.name || '未命名歌单');
+        const songs = Array.isArray(list?.list) ? list.list : [];
+        const cover = getImgUrl(songs[0]);
+        const source = list?.sourceListId ? '网络歌单导入' : '音云歌单';
+        return `<button type="button" class="group text-left rounded-2xl overflow-hidden t-bg-panel border t-border-main shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all" onclick="handleMyPlaylistCardClick('${escapeHtmlText(id)}')">
+            <div class="aspect-square overflow-hidden t-bg-main relative">
+                <img src="${escapeHtmlText(cover)}" alt="${escapeHtmlText(name)}" loading="lazy" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" onerror="this.src='/_player/assets/logo.svg';this.classList.add('p-10','opacity-60');">
+                <span class="absolute bottom-2 right-2 px-2 py-1 rounded-full bg-black/55 text-white text-[11px]">${songs.length} 首</span>
+            </div>
+            <div class="p-3"><div class="font-semibold t-text-main truncate" title="${escapeHtmlText(name)}">${escapeHtmlText(name)}</div><div class="text-xs t-text-muted mt-1 truncate">${escapeHtmlText(source)}</div></div>
+        </button>`;
+    }).join('');
+}
+
+function handleMyPlaylistCardClick(listId) {
+    window._myPlaylistView = true;
+    handleListClick(listId);
+}
+
 function handleListClick(listId, skipAutoUpdate = false) {
     exitListSecondaryModes();
 
@@ -8994,11 +9080,12 @@ function handleListClick(listId, skipAutoUpdate = false) {
         el.classList.remove('active-tab', 'text-emerald-600');
         el.classList.add('t-text-muted');
     });
-    const favTab = document.getElementById('tab-favorites');
+    const favTab = document.getElementById(window._myPlaylistView ? 'tab-my-playlists' : 'tab-favorites');
     if (favTab) {
         favTab.classList.add('active-tab');
         favTab.classList.remove('t-text-muted');
     }
+    window._myPlaylistView = false;
 
     // Highlight Child List
     document.querySelectorAll('[data-sidebar-list-id]').forEach(el => {
@@ -9081,7 +9168,9 @@ async function syncSongloftPlaylist(listId, silent = false) {
     const response = await fetch('/api/v1/integration/playlists/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...tokenHeaders },
-        body: JSON.stringify({ yinyunPlaylistId: list.id, direction: 'push', mode: 'merge' }),
+        // 用户歌单是音云侧的来源；用 replace 让删除、重排和改名也能同步，
+        // 服务器会在无法可靠匹配时拒绝覆盖，避免误删 Songloft 歌曲。
+        body: JSON.stringify({ yinyunPlaylistId: list.id, direction: 'push', mode: 'replace' }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload?.error?.message || payload?.message || `Songloft 同步失败（${response.status}）`);
@@ -9107,7 +9196,7 @@ async function handleSongloftSyncList(listId, event) {
     if (event) event.stopPropagation();
     const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
     if (!list) return;
-    const confirmed = typeof showSelect !== 'function' || await showSelect('同步到 Songloft', `将“${list.name || '歌单'}”安全合并到 Songloft（只追加，不删除远端歌曲）。继续吗？`);
+    const confirmed = typeof showSelect !== 'function' || await showSelect('同步到 Songloft', `将“${list.name || '歌单'}”镜像同步到 Songloft（会同步新增、删除、重排和重命名；无法可靠匹配时会取消覆盖）。继续吗？`);
     if (!confirmed) return;
     try {
         await syncSongloftPlaylist(listId, false);
@@ -9655,6 +9744,7 @@ async function handleRefreshList(listId, event, silent = false) {
 
         // 推送同步并重绘 UI
         await pushDataChange();
+        scheduleSongloftPlaylistSync(listId);
         renderMyLists(currentListData);
 
         // 如果当前正处于该列表视图，刷新结果列表显示
@@ -9809,6 +9899,7 @@ async function refreshUserListData() {
     if (!window.SyncManager) return;
     try {
         const listData = await window.SyncManager.sync();
+        await hydratePersonalPlaylistArtwork(listData);
         setActiveListData(listData);
         if (typeof renderMyLists === 'function') {
             renderMyLists(listData);
