@@ -26,8 +26,19 @@ window.SongListManager = (function () {
         list: [],
         page: 1,
         total: 0,
-        limit: 30
+        limit: 30,
+        returnTab: 'songlist',
+        hostParentId: 'view-songlist',
+        isLocal: false,
     };
+
+    function ensureDetailHost(parentId) {
+        const detailView = document.getElementById('songlist-detail-view');
+        const parent = document.getElementById(parentId);
+        if (detailView && parent && detailView.parentElement !== parent) parent.appendChild(detailView);
+        detailState.hostParentId = parentId;
+        return detailView;
+    }
 
     // Initialize
     async function init() {
@@ -197,13 +208,16 @@ window.SongListManager = (function () {
     async function loadDetail(id, source, page = 1) {
         detailState.id = id;
         detailState.source = source;
+        detailState.returnTab = 'songlist';
+        detailState.isLocal = false;
         detailState.page = page;
 
-        const detailView = document.getElementById('songlist-detail-view');
+        const detailView = ensureDetailHost('view-songlist');
         const listContainer = document.getElementById('sl-detail-list');
 
         if (page === 1) {
             detailView.classList.remove('hidden');
+            document.getElementById('sl-detail-collect')?.classList.remove('hidden');
             setTimeout(() => detailView.classList.remove('translate-x-full'), 10);
             listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
 
@@ -275,6 +289,45 @@ window.SongListManager = (function () {
                 listContainer.innerHTML = `<div class="text-center text-red-500 p-10">加载失败: ${e.message}</div>`;
             }
         }
+    }
+
+    function openLocalDetail(list) {
+        if (!list) return;
+        const songs = Array.isArray(list.list) ? list.list.map((song, index) => ({
+            ...song,
+            id: song.id || song.songmid || song.songId || song.hash || `local_${list.id}_${index}`,
+            name: song.name || song.title || '未知歌曲',
+            singer: song.singer || song.artist || '',
+            albumName: song.albumName || song.album || '',
+            source: song.source || 'local',
+        })) : [];
+        detailState.id = String(list.id || '');
+        detailState.source = 'local';
+        detailState.returnTab = 'my-playlists';
+        detailState.isLocal = true;
+        detailState.page = 1;
+        detailState.total = songs.length;
+        detailState.list = songs;
+        detailState.info = {
+            name: list.name || '未命名歌单',
+            author: '音云 · 我的歌单',
+            total: songs.length,
+            img: (window.getImgUrl && songs[0]) ? window.getImgUrl(songs[0]) : (songs[0]?.img || songs[0]?.albumImg || '/_player/assets/logo.svg'),
+            desc: list.sourceListId ? '网络歌单导入的本地歌单，可继续在曲库联动中补齐。' : '音云用户歌单。',
+        };
+        if (window.ListSearch) window.ListSearch.resetState();
+        switchTab('my-playlists');
+        const detailView = ensureDetailHost('view-my-playlists');
+        const listContainer = document.getElementById('sl-detail-list');
+        if (!detailView || !listContainer) return;
+        detailView.classList.remove('hidden');
+        listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
+        const collect = document.getElementById('sl-detail-collect');
+        if (collect) collect.classList.add('hidden');
+        window.viewingPlaylist = detailState.list;
+        window.ListSearch?.init('songlist', { renderCallback: () => window.SongListManager.renderDetail(), getList: () => detailState.list });
+        renderDetail();
+        requestAnimationFrame(() => detailView.classList.remove('translate-x-full'));
     }
 
     // --- Rendering ---
@@ -586,16 +639,23 @@ window.SongListManager = (function () {
             if (window.ListSearch) window.ListSearch.resetState();
             loadDetail(id, source);
         },
+        openLocalDetail,
         closeDetail: function () {
             const detailView = document.getElementById('songlist-detail-view');
+            if (!detailView) return;
             detailView.classList.add('translate-x-full');
-            setTimeout(() => detailView.classList.add('hidden'), 300);
+            const returnTab = detailState.returnTab || 'songlist';
+            setTimeout(() => {
+                detailView.classList.add('hidden');
+                ensureDetailHost('view-songlist');
+                switchTab(returnTab);
+            }, 300);
         },
         toggleTagSelector,
         playSong: function (index) {
             const song = detailState.list[index];
             if (song && typeof window.updatePlaylist === 'function') {
-                const listWithSource = detailState.list.map(s => ({ ...s, source: detailState.source }));
+                const listWithSource = detailState.list.map(s => ({ ...s, source: s.source || detailState.source }));
                 const playback = window.WebPlayerState.buildSingleTrackPlayback(
                     listWithSource,
                     index,
@@ -607,7 +667,7 @@ window.SongListManager = (function () {
         playAll: function () {
             if (detailState.list.length === 0) return;
             if (typeof window.updatePlaylist === 'function') {
-                const listWithSource = detailState.list.map(s => ({ ...s, source: detailState.source }));
+                const listWithSource = detailState.list.map(s => ({ ...s, source: s.source || detailState.source }));
                 // 播放全部：不加入默认列表 (shouldAddToDefault = false)
                 window.updatePlaylist(listWithSource, 0, 'songlist', false);
                 this.closeDetail();

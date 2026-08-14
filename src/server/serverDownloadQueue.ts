@@ -26,6 +26,14 @@ export interface ServerDownloadTask {
   embedLyric: boolean
   sidecarLyricFormat: LyricOutputFormat
   embedLyricFormat: LyricOutputFormat
+  playlistName?: string
+  playlistId?: string
+  playlistImportId?: string
+  queuedAt: number
+  startedAt?: number
+  completedAt?: number
+  failedAt?: number
+  retryCount: number
   createdAt: number
   updatedAt: number
 }
@@ -39,6 +47,10 @@ interface QueueInput {
   embedLyric?: boolean
   sidecarLyricFormat?: LyricOutputFormat
   embedLyricFormat?: LyricOutputFormat
+  playlistName?: string
+  playlistId?: string
+  playlistImportId?: string
+  queuedAt?: number | string
 }
 
 interface ResolveResult {
@@ -83,6 +95,14 @@ const normalizeConcurrency = (value: unknown) => {
   const parsed = Number.parseInt(String(value), 10)
   if (!Number.isFinite(parsed)) return DEFAULT_CONCURRENT
   return Math.min(MAX_CONCURRENT_PER_USER, Math.max(1, parsed))
+}
+
+const normalizeTimestamp = (value: unknown, fallback: number) => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value
+  const numeric = Number(value)
+  if (Number.isFinite(numeric) && numeric > 0) return numeric
+  const parsed = Date.parse(String(value || ''))
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
 export const getConcurrency = (username: string) => {
@@ -163,6 +183,14 @@ const loadTasks = () => {
         embedLyric: raw.embedLyric !== false,
         sidecarLyricFormat: normalizeLyricOutputFormat(raw.sidecarLyricFormat),
         embedLyricFormat: normalizeLyricOutputFormat(raw.embedLyricFormat),
+        playlistName: raw.playlistName ? String(raw.playlistName) : undefined,
+        playlistId: raw.playlistId ? String(raw.playlistId) : undefined,
+        playlistImportId: raw.playlistImportId ? String(raw.playlistImportId) : undefined,
+        queuedAt: normalizeTimestamp(raw.queuedAt, normalizeTimestamp(raw.createdAt, now)),
+        startedAt: raw.startedAt ? normalizeTimestamp(raw.startedAt, now) : undefined,
+        completedAt: raw.completedAt ? normalizeTimestamp(raw.completedAt, now) : (['finished', 'exists'].includes(status) ? normalizeTimestamp(raw.updatedAt, now) : undefined),
+        failedAt: raw.failedAt ? normalizeTimestamp(raw.failedAt, now) : (status === 'error' ? normalizeTimestamp(raw.updatedAt, now) : undefined),
+        retryCount: Number(raw.retryCount || 0),
         createdAt: Number(raw.createdAt || now),
         updatedAt: now,
       }
@@ -193,6 +221,14 @@ const getPublicTask = (task: ServerDownloadTask) => {
     errorMsg: String(live?.errorMsg || task.errorMsg || ''),
     sidecarLyricFormat: task.sidecarLyricFormat,
     embedLyricFormat: task.embedLyricFormat,
+    playlistName: task.playlistName || task.songInfo?.playlistName || task.songInfo?.playlist,
+    playlistId: task.playlistId,
+    playlistImportId: task.playlistImportId,
+    queuedAt: task.queuedAt || task.createdAt,
+    startedAt: task.startedAt,
+    completedAt: task.completedAt,
+    failedAt: task.failedAt,
+    retryCount: task.retryCount || 0,
     createdAt: task.createdAt,
     updatedAt: Number(live?.updatedAt || task.updatedAt),
   }
@@ -209,6 +245,9 @@ const runTask = async (task: ServerDownloadTask) => {
   task.received = 0
   task.speed = 0
   task.errorMsg = ''
+  task.startedAt = Date.now()
+  task.completedAt = undefined
+  task.failedAt = undefined
   task.updatedAt = Date.now()
   scheduleSave()
 
@@ -240,6 +279,8 @@ const runTask = async (task: ServerDownloadTask) => {
     task.received = Number(progress?.received || task.total || 0)
     task.speed = 0
     task.errorMsg = ''
+    task.completedAt = Date.now()
+    task.failedAt = undefined
   } catch (err: any) {
     if (controller.signal.aborted || err?.message === 'Aborted') {
       task.status = 'paused'
@@ -247,6 +288,7 @@ const runTask = async (task: ServerDownloadTask) => {
     } else {
       task.status = 'error'
       task.errorMsg = err?.message || '下载失败'
+      task.failedAt = Date.now()
     }
     task.speed = 0
   } finally {
@@ -341,6 +383,14 @@ export const enqueue = (username: string, inputs: QueueInput[]) => {
       existing.embedLyric = input.embedLyric !== false
       existing.sidecarLyricFormat = normalizeLyricOutputFormat(input.sidecarLyricFormat)
       existing.embedLyricFormat = normalizeLyricOutputFormat(input.embedLyricFormat)
+      existing.playlistName = input.playlistName ? String(input.playlistName) : undefined
+      existing.playlistId = input.playlistId ? String(input.playlistId) : undefined
+      existing.playlistImportId = input.playlistImportId ? String(input.playlistImportId) : undefined
+      existing.queuedAt = normalizeTimestamp(input.queuedAt, now)
+      existing.startedAt = undefined
+      existing.completedAt = undefined
+      existing.failedAt = undefined
+      existing.retryCount = existing.retryCount || 0
       existing.createdAt = now
       existing.updatedAt = now
       added.push(existing)
@@ -359,6 +409,11 @@ export const enqueue = (username: string, inputs: QueueInput[]) => {
       embedLyric: input.embedLyric !== false,
       sidecarLyricFormat: normalizeLyricOutputFormat(input.sidecarLyricFormat),
       embedLyricFormat: normalizeLyricOutputFormat(input.embedLyricFormat),
+      playlistName: input.playlistName ? String(input.playlistName) : undefined,
+      playlistId: input.playlistId ? String(input.playlistId) : undefined,
+      playlistImportId: input.playlistImportId ? String(input.playlistImportId) : undefined,
+      queuedAt: normalizeTimestamp(input.queuedAt, now),
+      retryCount: 0,
       createdAt: now, updatedAt: now,
     }
     tasks.set(key, task)
@@ -391,11 +446,26 @@ export const pause = (username: string, id?: string) => {
   saveNow()
 }
 
-export const resume = (username: string, id?: string) => {
+export const resume = (username: string, id?: string, replacement?: any) => {
   username = assertConfiguredQueueUser(username)
   for (const task of tasks.values()) {
     if (task.username !== username || (id && task.id !== id)) continue
     if (task.status !== 'paused' && task.status !== 'error') continue
+    if (replacement && typeof replacement === 'object' && (replacement.source || replacement.songmid || replacement.id || replacement.name || replacement.title)) {
+      const source = String(replacement.source || task.songInfo?.source || '').trim()
+      task.songInfo = {
+        ...task.songInfo,
+        ...replacement,
+        source,
+        id: replacement.id ?? replacement.songmid ?? task.songInfo?.id,
+        songmid: replacement.songmid ?? replacement.sourceId ?? replacement.id ?? task.songInfo?.songmid,
+        name: replacement.name ?? replacement.title ?? task.songInfo?.name,
+        singer: replacement.singer ?? replacement.artist ?? task.songInfo?.singer,
+        albumName: replacement.albumName ?? replacement.album ?? task.songInfo?.albumName,
+        interval: replacement.interval ?? replacement.duration ?? task.songInfo?.interval,
+      }
+      task.songKey = fileCache.normalizeSongId(task.songInfo) + '_' + task.requestedQuality
+    }
     task.status = 'waiting'
     task.progress = 0
     task.total = 0
@@ -404,6 +474,11 @@ export const resume = (username: string, id?: string) => {
     task.errorMsg = ''
     task.activeSongKey = undefined
     task.quality = task.requestedQuality
+    task.retryCount = (task.retryCount || 0) + 1
+    task.startedAt = undefined
+    task.completedAt = undefined
+    task.failedAt = undefined
+    task.queuedAt = Date.now()
     task.updatedAt = Date.now()
   }
   saveNow()

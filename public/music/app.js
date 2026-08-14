@@ -626,9 +626,13 @@ window.handleHeaderLogout = handleHeaderLogout;
     try {
         window.lx_config = window.CONFIG || {};
 
-        // 获取到公共配置后，立即刷新一次 UI 状态 (管理员按钮/设置项禁用等)
-        if (typeof syncSettingsUI === 'function') syncSettingsUI();
-        else if (typeof updateAdminUI === 'function') updateAdminUI();
+        // 获取到公共配置后刷新一次 UI 状态 (管理员按钮/设置项禁用等)。
+        // SETTINGS_UI_MAP 在本文件后部用 const 声明；这里的认证恢复 IIFE
+        // 会先于该声明执行，因此必须排到当前脚本完成初始化之后，避免 TDZ。
+        setTimeout(() => {
+            if (typeof syncSettingsUI === 'function') syncSettingsUI();
+            else if (typeof updateAdminUI === 'function') updateAdminUI();
+        }, 0);
 
         // 兼容旧版本仅保存用户名和密码的登录状态，先换取用户 Token。
         if (!userToken && isUserLoggedIn()) {
@@ -9004,8 +9008,16 @@ function renderMyPlaylists(data) {
 }
 
 function handleMyPlaylistCardClick(listId) {
+    const list = Array.isArray(currentListData?.userList)
+        ? currentListData.userList.find(item => String(item?.id) === String(listId))
+        : null;
+    if (!list) return;
     window._myPlaylistView = true;
-    handleListClick(listId);
+    if (window.SongListManager?.openLocalDetail) {
+        window.SongListManager.openLocalDetail(list);
+    } else {
+        handleListClick(listId);
+    }
 }
 
 function handleListClick(listId, skipAutoUpdate = false) {
@@ -9842,9 +9854,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // [New] Switch to the user's default entry tab on load
-    const defaultTab = DEFAULT_ENTRY_TABS.has(settings.defaultEntry)
+    // 入口设置只允许进入真正的播放器页面；旧版本曾把“关于”持久化为
+    // 默认入口，导致首次打开时先闪现关于页再跳回播放器。
+    const defaultTab = settings.defaultEntry && settings.defaultEntry !== 'about' && DEFAULT_ENTRY_TABS.has(settings.defaultEntry)
         ? settings.defaultEntry
         : DEFAULT_SETTINGS.defaultEntry;
+    document.getElementById('view-about')?.classList.add('hidden', 'opacity-0');
     switchTab(defaultTab);
 
     // 2. Auto-login the configured account.

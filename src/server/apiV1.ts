@@ -621,6 +621,64 @@ const publicTrackMatch = (match: ReturnType<typeof matchTracks>[number]) => ({
 
 const awaitSdkRequest = async (value: any) => value?.promise ? await value.promise : await value
 
+// “聚合”只是一层统一搜索，不新增音源脚本，也不改 Songloft。实际结果保留
+// source 字段，后续试听和下载仍会回到对应的在线平台解析地址。
+const AGGREGATE_SOURCE_ORDER = ['wy', 'tx', 'kw', 'kg', 'mg', 'bd']
+
+const getAggregateSources = (deps: ApiV1Dependencies, username: string) => {
+  const ordered = [...AGGREGATE_SOURCE_ORDER, ...Object.keys(deps.musicSdk || {})]
+  return [...new Set(ordered)].filter(source => (
+    source !== 'aggregate' &&
+    deps.isSourceSupported(source, username) &&
+    typeof deps.musicSdk?.[source]?.musicSearch?.search === 'function'
+  ))
+}
+
+const searchAggregate = async (
+  deps: ApiV1Dependencies,
+  username: string,
+  query: string,
+  page: number,
+  limit: number,
+) => {
+  const sources = getAggregateSources(deps, username)
+  if (!sources.length) throw new ApiError(409, 'source_unavailable', '当前账户没有可用的在线音源')
+  const safeLimit = Math.min(Math.max(limit, 1), 100)
+  const groups = await Promise.all(sources.map(async source => {
+    try {
+      const result = await awaitSdkRequest(deps.musicSdk[source].musicSearch.search(query, page, safeLimit))
+      return normalizeSearchResult(result, source).items
+    } catch (error: any) {
+      // 单个平台暂时不可用不能阻断其他平台结果。
+      console.warn(`[AggregateSearch] ${source} failed: ${error?.message || error}`)
+      return []
+    }
+  }))
+  const seen = new Set<string>()
+  const items = groups.flat().filter(item => {
+    const key = `${item.source}:${String(item.id || item.title).trim()}:${String(item.artist).trim()}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return { items: items.slice(0, safeLimit), total: items.length, page, limit: safeLimit, sources }
+}
+
+const resolveAggregateTrack = async (
+  deps: ApiV1Dependencies,
+  username: string,
+  track: IntegrationTrack,
+) => {
+  const query = [track.title, track.artist, track.album].filter(Boolean).join(' ')
+  if (!query) return null
+  const result = await searchAggregate(deps, username, query, 1, 30)
+  const candidates = result.items.map(item => toIntegrationTrack(item))
+  const match = matchTracks([track], candidates, { threshold: 0, ambiguityMargin: 0 })[0]
+  const candidate = match?.candidate
+  if (!candidate?.source || !deps.isSourceSupported(String(candidate.source), username)) return null
+  return candidate
+}
+
 const getExternalPlaylist = async (deps: ApiV1Dependencies, username: string, source: string, id: string, page: number) => {
   if (!deps.isSourceSupported(source, username)) throw new ApiError(409, 'source_unavailable', `当前账户没有可用的 ${source} 音源`)
   const sdk = deps.musicSdk[source]
@@ -878,7 +936,7 @@ const getImportSelection = (body: any, record: PlaylistImportRecord, matches: Re
     })
 }
 
-const enqueuePlaylistImportDownloads = (
+const enqueuePlaylistImportDownloads = async (
   deps: ApiV1Dependencies,
   username: string,
   record: PlaylistImportRecord,
@@ -889,12 +947,12 @@ const enqueuePlaylistImportDownloads = (
   const quality = QUALITY_ORDER.includes(body.quality) ? body.quality : 'flac'
   const overrides = body.selections && typeof body.selections === 'object' ? body.selections : {}
   const skipped: Array<{ index: number; reason: string }> = []
-  const inputs = selected.flatMap(({ match, index, track }) => {
+  const buildInput = async ({ match, index, track }: { match: any; index: number; track: IntegrationTrack }) => {
     const override = overrides[String(index)] && typeof overrides[String(index)] === 'object' ? overrides[String(index)] : null
     // Manual completion may select a different online version.  Only accept a
     // compact public track object; raw/provider-private fields never become a
     // download source without passing through normalizeImportedSong.
-    const selectedTrack = override ? toIntegrationTrack({
+    let selectedTrack = override ? toIntegrationTrack({
       id: override.id ?? override.sourceId,
       sourceId: override.sourceId ?? override.id,
       source: override.source,
@@ -902,27 +960,55 @@ const enqueuePlaylistImportDownloads = (
       artist: override.artist || override.singer,
       album: override.album || override.albumName,
       duration: override.duration || override.interval,
+      relativePath: override.relativePath,
     }) : track
+    // 一键补齐固定走聚合结果。这样歌单原始来源暂时失效时仍可从其他
+    // 已启用平台下载；手工补齐则保留用户在对话框中明确选择的版本。
+    if (!override && body.mode === 'all') {
+      try {
+        const aggregate = await resolveAggregateTrack(deps, username, track)
+        if (!aggregate) {
+          skipped.push({ index, reason: 'aggregate_no_match' })
+          return null
+        }
+        selectedTrack = aggregate
+      } catch (error: any) {
+        console.warn(`[AggregateDownload] index=${index} failed: ${error?.message || error}`)
+        skipped.push({ index, reason: 'aggregate_search_failed' })
+        return null
+      }
+    }
     const source = String(selectedTrack.source || record.source || '')
     if (isNonYinyunDownloadSource(source) || !deps.isSourceSupported(source, username)) {
       skipped.push({ index, reason: 'source_unavailable' })
-      return []
+      return null
     }
     try {
       const songInfo = normalizeImportedSong(deps, selectedTrack, record.source)
-      return [{
+      return {
         id: `import_${record.importId}_${index}`,
         songInfo,
         quality,
         enableOnlyDownloadMode: true,
         cacheLyric: body.downloadLyrics !== false,
         embedLyric: body.embedLyrics !== false,
-      }]
+        playlistName: record.name,
+        playlistId: record.yinyunPlaylistId,
+        playlistImportId: record.importId,
+        queuedAt: new Date().toISOString(),
+      }
     } catch {
       skipped.push({ index, reason: 'invalid_song' })
-      return []
+      return null
     }
-  })
+  }
+  const inputs: any[] = []
+  // 每批最多并行 4 首；每首内部再并行访问启用音源，避免一键补齐
+  // 对单个平台造成突发请求。
+  for (let offset = 0; offset < selected.length; offset += 4) {
+    const batch = await Promise.all(selected.slice(offset, offset + 4).map(buildInput))
+    inputs.push(...batch.filter(Boolean))
+  }
   const queued = serverDownloadQueue.enqueue(username, inputs)
   return { selected: selected.map(item => item.index), queued, skipped }
 }
@@ -1299,9 +1385,9 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       }
       await store.upsert(record)
 
-      let download: ReturnType<typeof enqueuePlaylistImportDownloads> | null = null
+      let download: Awaited<ReturnType<typeof enqueuePlaylistImportDownloads>> | null = null
       if (body.autoDownload === true) {
-        download = enqueuePlaylistImportDownloads(deps, username, record, localMatches, { ...body, mode: 'all' })
+        download = await enqueuePlaylistImportDownloads(deps, username, record, localMatches, { ...body, mode: 'all' })
       }
       success(res, {
         importId,
@@ -1400,7 +1486,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       const record = store.get(importId)
       if (!record || record.username !== username) throw new ApiError(404, 'playlist_import_not_found', '导入歌单记录不存在')
       const matches = await getPlaylistImportMatches(deps, username, record)
-      const download = enqueuePlaylistImportDownloads(deps, username, record, matches, {
+      const download = await enqueuePlaylistImportDownloads(deps, username, record, matches, {
         ...body,
         mode: body.all === true ? 'all' : body.mode,
       })
@@ -1747,6 +1833,11 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       const page = parsePositiveInt(url.searchParams.get('page'), 1, 10000)
       const limit = parsePositiveInt(url.searchParams.get('limit'), 30, 100)
       if (!query) throw new ApiError(400, 'query_required', '请输入搜索内容')
+      if (source === 'aggregate') {
+        if (type !== 'song') throw new ApiError(400, 'aggregate_type_unsupported', '聚合音源只支持歌曲搜索')
+        success(res, await searchAggregate(deps, username, query, page, limit))
+        return true
+      }
       if (!deps.isSourceSupported(source, username)) throw new ApiError(409, 'source_unavailable', `当前账户没有可用的 ${source} 音源`)
       if (type === 'singer' || type === 'album') {
         const method = type === 'singer' ? 'searchSinger' : 'searchAlbum'
@@ -2023,7 +2114,10 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       return true
     }
     if (pathname === `${API_PREFIX}/downloads/resume` && req.method === 'POST') {
-      const body = await readJson(req); serverDownloadQueue.resume(username, body.id); success(res, { resumed: true }); return true
+      const body = await readJson(req)
+      const replacement = body.songInfo || body.track || (body.source ? body : undefined)
+      serverDownloadQueue.resume(username, body.id, replacement)
+      success(res, { resumed: true, sourceChanged: Boolean(replacement) }); return true
     }
     if (pathname === `${API_PREFIX}/downloads/pause` && req.method === 'POST') {
       const body = await readJson(req); serverDownloadQueue.pause(username, body.id); success(res, { paused: true }); return true

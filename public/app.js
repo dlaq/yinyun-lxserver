@@ -282,6 +282,8 @@ class App {
         document.getElementById('page-title').textContent = titles[viewName] || viewName;
 
         this.currentView = viewName;
+        // 队列轮询只在曲库联动面板可见时运行；离开面板立即停止。
+        window.LibraryIntegration?.setActive(viewName === 'library-integration');
 
         // 加载对应数据
         switch (viewName) {

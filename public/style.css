@@ -764,6 +764,21 @@
 .integration-candidate-item small { margin-top: 3px; color: var(--text-secondary); font-size: 11px; }
 .integration-candidate-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .integration-preview-audio { width: 100%; margin-top: 10px; }
+.integration-candidate-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 4px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+.integration-candidate-toolbar .form-input {
+    width: auto;
+    min-width: 120px;
+    padding: 7px 10px;
+    font-size: 12px;
+}
+.integration-candidate-toolbar .integration-caption { margin-left: auto; }
 
 .integration-result-heading-meta {
     display: flex;
@@ -1033,6 +1048,19 @@
     font-size: 10px !important;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+.queue-task-meta {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.35;
+}
+.integration-queue-history-note {
+    margin: 8px 0 10px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.45;
 }
 
 .queue-actions {
@@ -1380,6 +1408,24 @@ body {
     white-space: nowrap;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+/* 联动列表中的操作按钮必须保持紧凑，避免“试听/采用/换源”撑破表格。 */
+.btn-xs,
+.btn-primary.btn-xs,
+.btn-secondary.btn-xs,
+.btn-danger.btn-xs {
+    width: auto !important;
+    min-width: 0;
+    min-height: 30px;
+    height: 30px;
+    padding: 4px 10px !important;
+    border-radius: 8px;
+    font-size: 11px !important;
+    font-weight: 600;
+    line-height: 1;
+    flex: 0 0 auto;
+}
+.integration-candidate-actions .btn-xs { min-width: 58px; }
 
 .btn-secondary:hover {
     background: rgba(255, 255, 255, 0.15);
