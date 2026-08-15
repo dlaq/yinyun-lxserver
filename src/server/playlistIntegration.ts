@@ -422,6 +422,8 @@ export type PlaylistImportRecord = {
   tracks: IntegrationTrack[]
   /** User-confirmed provider for an ambiguous row, keyed by source index. */
   resolutions?: Record<string, 'yinyun' | 'songloft'>
+  /** Snapshot of the candidate selected by the user, keyed by source index. */
+  resolvedCandidates?: Record<string, IntegrationTrack>
   createdAt: string
   updatedAt: string
 }
@@ -436,8 +438,19 @@ export class PlaylistImportStore {
 
   constructor(private readonly filePath: string) {}
 
+  private detachedRecord(record: PlaylistImportRecord) {
+    return {
+      ...record,
+      tracks: record.tracks.map(track => ({ ...track })),
+      resolutions: record.resolutions ? { ...record.resolutions } : undefined,
+      resolvedCandidates: record.resolvedCandidates
+        ? Object.fromEntries(Object.entries(record.resolvedCandidates).map(([index, track]) => [index, { ...track }]))
+        : undefined,
+    }
+  }
+
   load() {
-    if (this.loaded) return this.payload.records.map(record => ({ ...record, tracks: record.tracks.map(track => ({ ...track })) }))
+    if (this.loaded) return this.payload.records.map(record => this.detachedRecord(record))
     try {
       const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf8')) as Partial<PlaylistImportStorePayload>
       if (raw.version === 1 && Array.isArray(raw.records)) {
@@ -447,7 +460,7 @@ export class PlaylistImportStore {
       if (error?.code !== 'ENOENT') console.warn('[PlaylistImport] failed to load ledger:', error?.message || error)
     }
     this.loaded = true
-    return this.payload.records.map(record => ({ ...record, tracks: record.tracks.map(track => ({ ...track })) }))
+    return this.payload.records.map(record => this.detachedRecord(record))
   }
 
   get(importId: string) { return this.payload.records.find(record => record.importId === importId) }
@@ -455,11 +468,7 @@ export class PlaylistImportStore {
   /** Return a detached copy so callers can render history without mutating the ledger. */
   list() {
     if (!this.loaded) this.load()
-    return this.payload.records.map(record => ({
-      ...record,
-      tracks: record.tracks.map(track => ({ ...track })),
-      resolutions: record.resolutions ? { ...record.resolutions } : undefined,
-    }))
+    return this.payload.records.map(record => this.detachedRecord(record))
   }
 
   upsert(record: PlaylistImportRecord) {

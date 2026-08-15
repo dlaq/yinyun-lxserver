@@ -343,6 +343,18 @@
         catch (error) { notifyError(error) }
     }
 
+    async function clearQueueHistory() {
+        const confirmed = typeof showSelect === 'function'
+            ? await showSelect('清除补齐队列历史', '只清除已完成、已存在、失败和暂停的历史任务；下载中和等待中的任务会保留。继续吗？', { danger: true, confirmText: '清除历史' })
+            : window.confirm('清除已完成、已存在、失败和暂停的补齐队列历史？')
+        if (!confirmed) return
+        try {
+            await api('/api/v1/downloads', { method: 'DELETE', body: JSON.stringify({ history: true }) })
+            await loadQueue()
+            if (typeof showSuccess === 'function') showSuccess('补齐队列历史已清除，活动任务已保留')
+        } catch (error) { notifyError(error) }
+    }
+
     function previewQueueItem(id) {
         const task = state.queueSongs.get(String(id));
         if (!task) return notifyError(new Error('队列歌曲已刷新，请重新点击试听'));
@@ -1103,7 +1115,7 @@
     }
 
     window.LibraryIntegration = {
-        activate, login, refreshAll, refreshStatus, loadQueue, importPlaylist, openSelectedImport,
+        activate, login, refreshAll, refreshStatus, loadQueue, clearQueueHistory, importPlaylist, openSelectedImport,
         onHistoryChange, retryQueueItem, removeQueueItem,
         setFilter, toggleItem, toggleVisible, completeSelected, completeAll,
         triggerScan, refreshBothIndexes, refreshYinyunIndex, refreshSongloftIndex, resolveItem, updateSyncMode, syncPlaylist,

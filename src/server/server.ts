@@ -4467,17 +4467,24 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
           // console.log(`[HotSearch] 获取热搜: source=${source}`)
           const result = await musicSdk[source].hotSearch.getList()
+          // Keep the response shape stable across SDK versions.  Older
+          // providers return a bare keyword array while newer ones return
+          // `{ list, source }`; the player can consume both forms.
+          const list = Array.isArray(result) ? result : (Array.isArray(result?.list) ? result.list : [])
+          const payload = Array.isArray(result)
+            ? { source, list }
+            : { ...(result || {}), source: result?.source || source, list }
 
           res.writeHead(200, {
             'Content-Type': 'application/json',
             'Cache-Control': 'public, max-age=300' // 5分钟缓存
           })
-          res.end(JSON.stringify(result))
+          res.end(JSON.stringify(payload))
         } catch (err: any) {
           console.error('[HotSearch] Error:', err.message)
           // Return empty array instead of 500 to keep UI stable
           res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify([]))
+          res.end(JSON.stringify({ source, list: [] }))
         }
         return
       }

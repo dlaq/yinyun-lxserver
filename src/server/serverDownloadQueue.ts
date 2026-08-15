@@ -492,11 +492,13 @@ export const resume = (username: string, id?: string, replacement?: any) => {
   void processQueue()
 }
 
-export const remove = (username: string, options: { id?: string; all?: boolean; completed?: boolean }) => {
+export const remove = (username: string, options: { id?: string; all?: boolean; completed?: boolean; history?: boolean }) => {
   username = assertConfiguredQueueUser(username)
   for (const [key, task] of tasks) {
     if (task.username !== username) continue
-    const shouldRemove = options.all || (options.id && task.id === options.id) || (options.completed && ['finished', 'exists'].includes(task.status))
+    const shouldRemove = options.all || (options.id && task.id === options.id)
+      || (options.completed && ['finished', 'exists'].includes(task.status))
+      || (options.history && ['finished', 'exists', 'error', 'paused'].includes(task.status))
     if (!shouldRemove) continue
     controllers.get(key)?.abort()
     tasks.delete(key)

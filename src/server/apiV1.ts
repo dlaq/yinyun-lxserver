@@ -123,7 +123,7 @@ type HealthReport = {
   playlists: number
   tracksChecked: number
   healthyTracks: number
-  failures: Array<{ playlist: string; title: string; artist: string; message: string }>
+  failures: Array<{ playlist: string; source: string; index: number; title: string; artist: string; message: string }>
 }
 
 type HealthState = { settings: HealthSettings; report: HealthReport | null }
@@ -219,28 +219,34 @@ const runHealthCheck = async (deps: ApiV1Dependencies, username: string): Promis
   const records = store ? store.load() : []
   const sampleSize = Math.min(100, Math.max(1, Number(state.settings.sampleSize) || DEFAULT_HEALTH_SETTINGS.sampleSize))
   const failures: HealthReport['failures'] = []
+  // sampleSize is a global budget, not a per-playlist multiplier.  Select
+  // evenly-spaced entries so one large playlist cannot hide other sources.
+  const entries = records.flatMap(record => (Array.isArray(record.tracks) ? record.tracks : []).map((track, index) => ({ record, track, index })))
+  const sample = entries.length <= sampleSize
+    ? entries
+    : Array.from({ length: sampleSize }, (_, position) => entries[Math.floor(position * entries.length / sampleSize)])
   let tracksChecked = 0
   let healthyTracks = 0
-  for (const record of records) {
-    const tracks = Array.isArray(record.tracks) ? record.tracks.slice(0, sampleSize) : []
-    for (const track of tracks) {
-      tracksChecked++
-      try {
-        const song = normalizeImportedSong(deps, track, String(record.source || track.source || ''))
-        const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('解析超时')), 15000))
-        await Promise.race([
-          deps.resolveSong(song, '128k', username, true, { allowPlatformSwitch: false, allowApiSwitch: false }),
-          timeout,
-        ])
-        healthyTracks++
-      } catch (error: any) {
-        if (failures.length < 100) failures.push({
-          playlist: String(record.name || record.sourcePlaylistName || '未命名歌单'),
-          title: String(track.title || ''),
-          artist: String(track.artist || ''),
-          message: String(error?.message || '解析失败'),
-        })
-      }
+  for (const entry of sample) {
+    const { record, track, index } = entry
+    tracksChecked++
+    try {
+      const song = normalizeImportedSong(deps, track, String(record.source || track.source || ''))
+      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('解析超时')), 15000))
+      await Promise.race([
+        deps.resolveSong(song, '128k', username, true, { allowPlatformSwitch: false, allowApiSwitch: false }),
+        timeout,
+      ])
+      healthyTracks++
+    } catch (error: any) {
+      if (failures.length < 100) failures.push({
+        playlist: String(record.name || record.sourcePlaylistName || '未命名歌单'),
+        source: String(record.source || track.source || '未知音源'),
+        index,
+        title: String(track.title || ''),
+        artist: String(track.artist || ''),
+        message: String(error?.message || '解析失败'),
+      })
     }
   }
   const report: HealthReport = {
@@ -1077,7 +1083,22 @@ const getPlaylistImportMatches = async (
     const provider = record.resolutions?.[String(index)]
     if (!provider) return match
     const selected = match[provider]
-    if (!selected?.candidate) return match
+    if (!selected?.candidate) {
+      // The provider can temporarily reorder or omit a candidate while its
+      // index is rescanning.  Reuse the persisted user choice instead of
+      // regressing the row to “需确认”.
+      const persisted = record.resolvedCandidates?.[String(index)]
+      if (!persisted?.title) return match
+      return {
+        ...match,
+        status: 'matched' as const,
+        candidate: persisted,
+        score: 1,
+        method: 'confirmed_snapshot',
+        candidates: [{ track: persisted, score: 1, method: 'confirmed_snapshot' }],
+        matchedBy: provider,
+      }
+    }
     // An ambiguous match still exposes its best candidate.  The explicit
     // user choice turns that candidate into the effective matched result;
     // without this conversion the confirmation button would have no effect.
@@ -1953,7 +1974,11 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         throw new ApiError(409, 'playlist_candidate_unavailable', '所选来源当前没有可确认的本地候选，请先刷新两个曲库索引')
       }
       const resolutions = { ...(record.resolutions || {}), [String(index)]: provider }
-      const updatedRecord: PlaylistImportRecord = { ...record, resolutions, updatedAt: new Date().toISOString() }
+      const resolvedCandidates = {
+        ...(record.resolvedCandidates || {}),
+        [String(index)]: toIntegrationTrack(selected.candidate),
+      }
+      const updatedRecord: PlaylistImportRecord = { ...record, resolutions, resolvedCandidates, updatedAt: new Date().toISOString() }
       await store.upsert(updatedRecord)
       const playlistUpdated = await replaceConfirmedPlaylistTrack(deps, username, updatedRecord, index, selected.candidate)
       const matches = await getPlaylistImportMatches(deps, username, updatedRecord)
@@ -2642,7 +2667,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       const body = await readJson(req); serverDownloadQueue.pause(username, body.id); success(res, { paused: true }); return true
     }
     if (pathname === `${API_PREFIX}/downloads` && req.method === 'DELETE') {
-      const body = await readJson(req); serverDownloadQueue.remove(username, { id: body.id, all: body.all, completed: body.completed }); res.writeHead(204); res.end(); return true
+      const body = await readJson(req); serverDownloadQueue.remove(username, { id: body.id, all: body.all, completed: body.completed, history: body.history }); res.writeHead(204); res.end(); return true
     }
 
     if (pathname === `${API_PREFIX}/replacement` && req.method === 'GET') {

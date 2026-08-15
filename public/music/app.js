@@ -1033,20 +1033,58 @@ function toggleCustomSourceSection(force) {
 }
 window.toggleCustomSourceSection = toggleCustomSourceSection;
 
+function toggleSourceBasicsSection(force) {
+    const content = document.getElementById('settings-source-basics-content');
+    const button = document.getElementById('settings-source-basics-toggle');
+    if (!content || !button) return;
+    const collapsed = force === undefined ? !content.classList.contains('hidden') : !force;
+    content.classList.toggle('hidden', collapsed);
+    button.setAttribute('aria-expanded', String(!collapsed));
+    button.innerHTML = collapsed
+        ? '<i class="fas fa-chevron-down"></i><span>展开</span>'
+        : '<i class="fas fa-chevron-up"></i><span>收起</span>';
+    localStorage.setItem('lx_source_basics_collapsed', collapsed ? 'true' : 'false');
+}
+window.toggleSourceBasicsSection = toggleSourceBasicsSection;
+
 function healthAuthHeaders(extra = {}) {
     return { ...extra, ...getUserAuthHeaders() };
 }
 function renderHealthReport(report) {
     const target = document.getElementById('health-status');
     if (!target) return;
+    window.__lastHealthReport = report || null;
+    target.onclick = null;
+    target.style.cursor = 'default';
+    target.title = '';
     if (!report) { target.textContent = '尚未测试'; return; }
     const when = report.checkedAt ? new Date(report.checkedAt).toLocaleString('zh-CN') : '—';
     const stateText = report.ok ? '通过' : `发现 ${report.failures?.length || 0} 个问题`;
-    target.innerHTML = `<span class="${report.ok ? 'text-emerald-500' : 'text-red-400'}"><i class="fas ${report.ok ? 'fa-check-circle' : 'fa-triangle-exclamation'} mr-1"></i>${stateText}</span> · ${report.healthyTracks || 0}/${report.tracksChecked || 0} 首可解析 · ${when}`;
-    if (!report.ok && Array.isArray(report.failures) && report.failures.length) {
-        target.title = report.failures.slice(0, 3).map(item => `${item.playlist} · ${item.title} · ${item.message}`).join('\n');
+    const failures = Array.isArray(report.failures) ? report.failures : [];
+    target.innerHTML = `<span class="${report.ok ? 'text-emerald-500' : 'text-red-400'}"><i class="fas ${report.ok ? 'fa-check-circle' : 'fa-triangle-exclamation'} mr-1"></i>${stateText}</span> · ${report.healthyTracks || 0}/${report.tracksChecked || 0} 首可解析 · ${when}${failures.length ? ' · <button type="button" class="health-report-link">查看问题明细</button>' : ''}`;
+    if (failures.length) {
+        target.style.cursor = 'pointer';
+        target.title = '点击查看健康检查问题明细';
+        target.onclick = () => showHealthReportDialog(window.__lastHealthReport);
     }
 }
+
+function showHealthReportDialog(report) {
+    if (!report) return;
+    document.getElementById('health-report-modal')?.remove();
+    const failures = Array.isArray(report.failures) ? report.failures : [];
+    const modal = document.createElement('div');
+    modal.id = 'health-report-modal';
+    modal.className = 'health-report-modal';
+    const rows = failures.length ? failures.map(item => `<li><strong>${escapeHtmlText(item.playlist || '未命名歌单')}</strong><span>${escapeHtmlText(item.source || '未知音源')} · 第 ${Number(item.index ?? 0) + 1} 首 · ${escapeHtmlText(item.title || '未知歌曲')} · ${escapeHtmlText(item.artist || '')}</span><em>${escapeHtmlText(item.message || '解析失败')}</em></li>`).join('') : '<li class="health-report-empty">抽查歌曲全部可以解析。</li>';
+    modal.innerHTML = `<div class="health-report-dialog" role="dialog" aria-modal="true" aria-labelledby="health-report-title"><div class="health-report-heading"><div><span class="health-report-kicker"><i class="fas fa-heart-pulse"></i> 曲源健康检查</span><h2 id="health-report-title">问题明细</h2></div><button type="button" class="btn-icon health-report-close" aria-label="关闭"><i class="fas fa-times"></i></button></div><p class="health-report-summary">检查 ${Number(report.tracksChecked || 0)} 首歌曲，${Number(report.healthyTracks || 0)} 首可解析；发现 ${failures.length} 个问题。</p><ul class="health-report-list">${rows}</ul></div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('.health-report-close')?.addEventListener('click', close);
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+    modal.querySelector('.health-report-dialog')?.addEventListener('click', event => event.stopPropagation());
+}
+window.showHealthReportDialog = showHealthReportDialog;
 async function loadHealthSettings() {
     if (!isUserLoggedIn()) return;
     try {
@@ -1841,11 +1879,14 @@ async function fetchHotSearch(source = 'mg') {
 
     try {
         // [优化] 使用低优先级 fetch 获取热搜，避免阻塞主加载
-        const res = await fetch(`${API_BASE}/hotSearch?source=${source}`, { priority: 'low' });
+        const res = await fetch(`${API_BASE}/hotSearch?source=${encodeURIComponent(source)}`, { priority: 'low', headers: getUserAuthHeaders() });
         if (!res.ok) {
             throw new Error(`获取热搜失败: ${res.status}`);
         }
-        const data = await res.json();
+        const raw = await res.json();
+        const data = Array.isArray(raw)
+            ? { source, list: raw }
+            : { ...(raw || {}), source: raw?.source || source, list: Array.isArray(raw?.list) ? raw.list : (Array.isArray(raw?.data) ? raw.data : []) };
 
         // 更新缓存
         hotSearchCache = data;
@@ -1859,6 +1900,15 @@ async function fetchHotSearch(source = 'mg') {
         console.error('[HotSearch] 获取热搜失败:', e);
         return null;
     }
+}
+
+async function fetchHotSearchWithFallback(source = 'mg') {
+    const candidates = [...new Set([source, 'mg', 'tx', 'wy', 'kw', 'kg'])].filter(Boolean);
+    for (const candidate of candidates) {
+        const data = await fetchHotSearch(candidate);
+        if (data && Array.isArray(data.list) && data.list.length) return data;
+    }
+    return { source, list: [] };
 }
 
 function renderHotSearch(data) {
@@ -1975,7 +2025,7 @@ function showInitialSearchState() {
     const sourceSelect = document.getElementById('search-source');
     const source = sourceSelect ? sourceSelect.value : 'tx';
 
-    fetchHotSearch(source).then(data => {
+    fetchHotSearchWithFallback(source).then(data => {
         renderHotSearch(data);
     }).catch(err => {
         console.error('[HotSearch] 显示热搜失败:', err);
@@ -8949,6 +8999,13 @@ async function handleLocalLogin(options = {}) {
 
             if (typeof loadHealthSettings === 'function') loadHealthSettings().catch(() => {});
             if (window.LibraryIntegration) window.LibraryIntegration.activate();
+            // A login can happen while the search tab is already visible.  In
+            // that case the initial unauthenticated request has already
+            // failed; reload hot search after the user token is available.
+            const searchInputAfterLogin = document.getElementById('search-input');
+            if (document.getElementById('view-search')?.classList.contains('active') && !searchInputAfterLogin?.value.trim()) {
+                setTimeout(() => showInitialSearchState(), 0);
+            }
             if (requiredLoginVisible) hideRequiredLoginModal();
             return true;
 
@@ -12435,7 +12492,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 预加载自定义源数据，确保设置界面和模态框打开时有数据
     loadCustomSources();
-    if (localStorage.getItem('lx_custom_sources_collapsed') === 'true') toggleCustomSourceSection(false);
+    // Source/basic settings and the custom-source list are dense maintenance
+    // panels.  Collapse them on first use; retain an explicit user choice.
+    if (localStorage.getItem('lx_source_basics_collapsed') !== 'false') toggleSourceBasicsSection(false);
+    if (localStorage.getItem('lx_custom_sources_collapsed') !== 'false') toggleCustomSourceSection(false);
 
     // [优化] 此处不再立即调用 showInitialSearchState()，移至下方的 setTimeout 中
 
@@ -13564,12 +13624,16 @@ window.loadTokenConfig = loadTokenConfig;
 // ── 全新自定义下拉框管理模块 (Portal 模式版) ──
 window.CustomSelectManager = {
     initAll() {
-        document.querySelectorAll('select:not(.cs-hidden)').forEach(select => {
+        // Library integration controls intentionally remain native selects.
+        // They are populated asynchronously and their compact controls must
+        // stay clickable for regular users; wrapping them here used to leave
+        // a stale portal trigger after the options were replaced.
+        document.querySelectorAll('select:not(.cs-hidden):not(.cs-native)').forEach(select => {
             this.init(select);
         });
     },
     init(select) {
-        if (select.classList.contains('cs-hidden')) return;
+        if (select.classList.contains('cs-hidden') || select.classList.contains('cs-native')) return;
         
         // 创建包装器，继承原 select 的布局类（如 flex-1, flex-shrink-0）
         const wrapper = document.createElement('div');
