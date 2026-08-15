@@ -320,6 +320,50 @@ window.SongListManager = (function () {
         }
     }
 
+    async function hydrateLocalDetailArtwork(list, listId) {
+        if (!listId || !window.getUserAuthHeaders) return;
+        try {
+            const response = await fetch(`/api/v1/playlists/${encodeURIComponent(listId)}`, {
+                headers: window.getUserAuthHeaders(),
+                cache: 'no-store',
+            });
+            if (!response.ok) return;
+            const payload = await response.json();
+            const enrichedItems = payload?.data?.items || payload?.items || [];
+            if (!Array.isArray(enrichedItems) || !enrichedItems.length) return;
+
+            // A native playlist snapshot can contain an expired signed cover URL.
+            // Refresh each row from the stable playlist API before the detail
+            // table renders its <img> tags; ordinary <img> requests cannot carry
+            // the x-user-token header themselves.
+            const refreshedSongs = detailState.list.map((song, index) => {
+                const enriched = enrichedItems[index];
+                if (!enriched) return song;
+                const artwork = enriched.artworkUrl || enriched.coverUrl || '';
+                if (!artwork) {
+                    return { ...song, hasCover: enriched.hasCover ?? song.hasCover };
+                }
+                return {
+                    ...song,
+                    img: artwork,
+                    picUrl: artwork,
+                    meta: { ...(song.meta || {}), picUrl: artwork },
+                    _artworkUrl: artwork,
+                    hasCover: enriched.hasCover ?? song.hasCover,
+                    localTrackId: enriched.localTrackId || song.localTrackId,
+                };
+            });
+
+            if (detailState.id !== String(listId) || !detailState.isLocal) return;
+            detailState.list = refreshedSongs;
+            detailState.total = refreshedSongs.length;
+            detailState.info.img = payload?.data?.artworkUrl || payload.artworkUrl || playlistArtwork(list, refreshedSongs);
+            renderDetail();
+        } catch (error) {
+            console.debug('[SongList] 本地歌单封面刷新失败:', error?.message || error);
+        }
+    }
+
     function openLocalDetail(list) {
         if (!list) return;
         const songs = Array.isArray(list.list) ? list.list.map((song, index) => ({
@@ -358,6 +402,9 @@ window.SongListManager = (function () {
         window.ListSearch?.init('songlist', { renderCallback: () => window.SongListManager.renderDetail(), getList: () => detailState.list });
         renderDetail();
         requestAnimationFrame(() => detailView.classList.remove('translate-x-full'));
+        // Render immediately from the local snapshot, then replace stale local
+        // cover URLs with fresh signed artwork without blocking navigation.
+        void hydrateLocalDetailArtwork(list, detailState.id);
     }
 
     // --- Rendering ---
