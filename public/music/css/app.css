@@ -1088,3 +1088,34 @@ aside {
     border-color: #f87171 !important;
     box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.4) !important;
 }
+/* Energy-saving mode intentionally keeps layout and audio behaviour intact
+   while disabling the expensive decorative effects. */
+body.energy-saving-mode *,
+body.energy-saving-mode *::before,
+body.energy-saving-mode *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+}
+body.energy-saving-mode #footer-visualizer,
+body.energy-saving-mode #detail-visualizer,
+body.energy-saving-mode #visualizer-container,
+body.energy-saving-mode #player-detail-bg-overlay {
+    display: none !important;
+    opacity: 0 !important;
+}
+body.energy-saving-mode [style*="backdrop-filter"],
+body.energy-saving-mode .backdrop-blur,
+body.energy-saving-mode .backdrop-blur-sm,
+body.energy-saving-mode .backdrop-blur-md,
+body.energy-saving-mode .backdrop-blur-lg,
+body.energy-saving-mode .backdrop-blur-xl,
+body.energy-saving-mode .backdrop-blur-2xl,
+body.energy-saving-mode .backdrop-blur-3xl,
+body.energy-saving-mode .integration-page .glass {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+body.energy-saving-mode .integration-page .glass {
+    box-shadow: none !important;
+}

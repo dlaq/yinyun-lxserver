@@ -1083,6 +1083,30 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         return
       }
 
+      // The web player is a user-facing application.  Keep only the four
+      // authentication probes public; every other player endpoint requires a
+      // valid session token.  Static HTML/assets remain public so the client
+      // can render its login dialog before credentials are supplied.
+      if (apiNamespace === 'player') {
+        const publicAuthPath = (
+          pathname === '/api/v1/player/user/verify' ||
+          pathname === '/api/v1/player/user/login' ||
+          pathname === '/api/v1/player/user/logout' ||
+          pathname === '/api/v1/player/user/auth/verify'
+        )
+        const querySessionUser = urlObj.searchParams.get('token')
+          ? getConfiguredUsername(userSessions.get(String(urlObj.searchParams.get('token')))?.username)
+          : null
+        if (!publicAuthPath && !verifyUserAuth(req) && !querySessionUser) {
+          res.writeHead(401, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          })
+          res.end(JSON.stringify({ success: false, message: '请先登录后再使用播放器' }))
+          return
+        }
+      }
+
 
 
       // [新增] 获取服务器状态
@@ -3070,6 +3094,19 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               }
               return { filename: item.filename, folder: item.folder }
             })
+
+            // A normal account may manage playlists and its download queue,
+            // but deleting a physical shared-library file is an administrator
+            // operation.  Treat an omitted folder as music as well: older
+            // clients used the short {filenames:[...]} payload and the cache
+            // layer resolves that payload to the music tree when appropriate.
+            const isFrontendAdmin = req.headers['x-frontend-auth'] === global.lx.config['frontend.password']
+            const deletesMusic = deleteItems.some(item => !item.folder || item.folder === 'music')
+            if (deletesMusic && !isFrontendAdmin) {
+              res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' })
+              res.end(JSON.stringify({ success: false, message: '只有管理员可以删除本地音乐文件' }))
+              return
+            }
 
             let deletedCount = 0
             const failures: Array<{ filename: string; folder?: fileCache.CacheFolder; message: string }> = []

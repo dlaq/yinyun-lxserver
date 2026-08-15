@@ -10,19 +10,19 @@
     <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build Status">
     <img src="https://img.shields.io/badge/version-v1.5.4-blue?style=flat-square" alt="Version">
     <img src="https://img.shields.io/badge/node-%3E%3D22.12-green?style=flat-square" alt="Node Version">
-    <img src="https://img.shields.io/github/license/bobcc4/yinyun-lxserver?style=flat-square" alt="License">
+    <img src="https://img.shields.io/github/license/dlaq/yinyun-lxserver?style=flat-square" alt="License">
     <br>
     <br>
-    <a href="https://github.com/bobcc4/yinyun-lxserver/stargazers"><img src="https://img.shields.io/github/stars/bobcc4/yinyun-lxserver?style=flat-square&color=ffe16b" alt="GitHub stars"></a>
-    <a href="https://github.com/bobcc4/yinyun-lxserver/network/members"><img src="https://img.shields.io/github/forks/bobcc4/yinyun-lxserver?style=flat-square" alt="GitHub forks"></a>
-    <a href="https://github.com/bobcc4/yinyun-lxserver/issues"><img src="https://img.shields.io/github/issues/bobcc4/yinyun-lxserver?style=flat-square&color=red" alt="GitHub issues"></a>
-    <a href="https://github.com/bobcc4/yinyun-lxserver/commits/main"><img src="https://img.shields.io/github/last-commit/bobcc4/yinyun-lxserver?style=flat-square&color=blueviolet" alt="Last Commit"></a>
-    <img src="https://img.shields.io/github/commit-activity/m/bobcc4/yinyun-lxserver?style=flat-square&color=ff69b4" alt="Commit Activity">
-    <a href="https://github.com/bobcc4/yinyun-lxserver/releases"><img src="https://img.shields.io/github/downloads/bobcc4/yinyun-lxserver/total?style=flat-square&color=blue" alt="Total Downloads"></a>
+    <a href="https://github.com/dlaq/yinyun-lxserver/stargazers"><img src="https://img.shields.io/github/stars/dlaq/yinyun-lxserver?style=flat-square&color=ffe16b" alt="GitHub stars"></a>
+    <a href="https://github.com/dlaq/yinyun-lxserver/network/members"><img src="https://img.shields.io/github/forks/dlaq/yinyun-lxserver?style=flat-square" alt="GitHub forks"></a>
+    <a href="https://github.com/dlaq/yinyun-lxserver/issues"><img src="https://img.shields.io/github/issues/dlaq/yinyun-lxserver?style=flat-square&color=red" alt="GitHub issues"></a>
+    <a href="https://github.com/dlaq/yinyun-lxserver/commits/main"><img src="https://img.shields.io/github/last-commit/dlaq/yinyun-lxserver?style=flat-square&color=blueviolet" alt="Last Commit"></a>
+    <img src="https://img.shields.io/github/commit-activity/m/dlaq/yinyun-lxserver?style=flat-square&color=ff69b4" alt="Commit Activity">
+    <a href="https://github.com/dlaq/yinyun-lxserver/releases"><img src="https://img.shields.io/github/downloads/dlaq/yinyun-lxserver/total?style=flat-square&color=blue" alt="Total Downloads"></a>
   </p>
 </div>
 
-[帮助文档 Documentation](https://bobcc4.github.io/yinyun-lxserver/) | [同步服务器 SyncServer](md/lxserver.md) | [Songloft 曲库联动说明](docs/songloft-playlist-integration.md) | [更新日志 Changelog](changelog.md) | [English](README_EN.md)
+[帮助文档 Documentation](https://dlaq.github.io/yinyun-lxserver/) | [同步服务器 SyncServer](md/lxserver.md) | [Songloft 曲库联动说明](docs/songloft-playlist-integration.md) | [更新日志 Changelog](changelog.md) | [English](README_EN.md)
 
 ---
 
@@ -31,9 +31,67 @@
 > [!IMPORTANT]
 > v1.5.0 调整了固定访问入口：根地址 `/` 为 Web 播放器，管理后台为 `/admin`，旧 `/music` 网页入口已删除。`/api/v1`、Subsonic `/rest` 以及 `/server/music` 音频持久化目录不受影响。
 
+## dlaq 部署分支：曲库联动、健康检查与节能模式
+
+本仓库的 `dlaq/yinyun-lxserver` 部署分支在保留上游播放器和服务端接口的基础上，增加了与本地 Songloft/Navidrome 共享曲库配合使用的用户侧功能。Songloft 源码没有修改，联动只通过它暴露的原生 API、OpenSubsonic API 和可配置的曲库扫描接口实现，便于将来合并音云上游版本。
+
+- **所有播放器用户先登录。** 打开 `/`、刷新页面或点击播放器功能时，未登录用户会看到登录框；登录后才可以搜索、播放、维护自己的歌单和导入记录。管理员后台仍使用 `/admin` 与 `FRONTEND_PASSWORD`。
+- **我的歌单与曲库联动。** 左侧主菜单的“我的歌单”和“曲库联动”是同级入口。用户可按歌单名称选择旧导入记录、导入第三方歌单、查看音云/Songloft 独立匹配数、手工或一键补齐、重试/换源失败任务，并把个人歌单同步到 Songloft。普通用户只能删除歌单或队列记录；删除共享音乐文件仍要求管理员凭据。
+- **聚合音源和试听。** “聚合”会并行搜索已启用的网易、QQ、酷我、酷狗、咪咕、百度等源，结果仍标明真实来源。选择版本前可编辑关键字；已有本地文件时先显示并可试听，不会自动发起在线搜索。试听播放器是可拖动的小型浮层，不会驱动主播放器或自动播放下一首。
+- **队列历史。** 补齐队列保留历史累计统计，每项显示所属歌单、加入时间、完成/失败时间和错误原因；失败项提供重试、换源和移除。队列轮询只在用户停留在“曲库联动”且浏览器页面可见时运行（4 秒一次），离开页面或切到后台立即停止。
+- **健康检查。** 设置中的“曲源健康检查”可抽样测试已导入歌曲的解析能力，不下载文件；支持 15 分钟至 7 天的周期检查，以及向 [message-pusher](https://github.com/songquanpeng/message-pusher) 兼容地址发送 JSON 通知。Token 仅保存在服务端用户数据目录，界面不会回显。
+- **节能模式。** 设置中打开“节能模式”后会关闭页脚/详情波形、背景模糊和高频过渡动画，保留正常播放和歌单功能，以降低 Web 播放器 GPU/CPU 占用。若仍需进一步降低占用，可同时关闭普通可视化器和歌词荧光效果。
+- **标签含义。** 歌曲卡片上的 `网易` 表示该行记录的在线来源是网易云（`wy`）；`LOCAL` 表示已解析到共享本地音乐文件，来自音云/Songloft 的本地索引或直接拷贝的音乐，不表示又下载了一份文件。`Songloft`、`Subsonic` 等标签同理表示解析或匹配所使用的来源。
+
+### Docker 镜像与 Compose 文件
+
+Docker 文件就在仓库根目录：[`Dockerfile`](Dockerfile)、[`.dockerignore`](.dockerignore) 和 [`docker-compose.yml`](docker-compose.yml)。GitHub Actions 使用仓库 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN` 登录 Docker Hub，并在推送 `main` 或 `v*` 标签时构建多架构镜像；令牌不会出现在 README、镜像层或日志中。
+
+拉取最新镜像：
+
+```bash
+docker pull dlaq/yinyun-lxserver:latest
+```
+
+当前 Compose 文件内容（共享音乐目录应与 Songloft/Navidrome 挂载到同一宿主机目录）：
+
+```yaml
+services:
+  yinyun:
+    image: dlaq/yinyun-lxserver:latest
+    container_name: yinyun
+    restart: unless-stopped
+    ports:
+      - "9527:9527"
+    volumes:
+      - ./data:/server/data
+      - ./logs:/server/logs
+      - ./cache:/server/cache
+      - ./music:/server/music/${LX_MUSIC_USER:-admin}
+    environment:
+      NODE_ENV: production
+      # 以下变量按实际部署填写，不要提交密码或令牌：
+      # SONGLOFT_API_URL: http://songloft-host:58091/api/v1
+      # SONGLOFT_USERNAME: your-songloft-user
+      # SONGLOFT_PASSWORD: your-songloft-password
+      # SONGLOFT_SUBSONIC_URL: http://songloft-host:58091/api/v1/jsplugin/subsonic
+      # SONGLOFT_SUBSONIC_USERNAME: your-songloft-user
+      # SONGLOFT_SUBSONIC_PASSWORD: your-songloft-password
+      # SONGLOFT_SCAN_ON_DOWNLOAD: "true"
+```
+
+启动或升级：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+保留 `/server/data`、`/server/logs`、`/server/cache` 和 `/server/music/<用户>` 挂载，不要把远端快满的分区作为 Docker 构建上下文或临时目录。
+
 ## 项目地址与推荐使用方式
 
-- **服务端：** [bobcc4/yinyun-lxserver](https://github.com/bobcc4/yinyun-lxserver)
+- **服务端：** [dlaq/yinyun-lxserver](https://github.com/dlaq/yinyun-lxserver)
   支持使用 Docker 搭建，也提供 Windows、macOS 等平台的安装包。
 - **Windows 客户端：** [bobcc4/yinyun-windows](https://github.com/bobcc4/yinyun-windows)
   当前仅制作了 Windows 客户端；其他平台更推荐使用成熟的第三方客户端。
@@ -134,11 +192,11 @@
 
 本项目支持从 Docker Hub 或 GitHub Packages 拉取镜像：
 
-- **Docker Hub**: `bobcc4/yinyun-lxserver:latest`
-- **GitHub Packages**: `ghcr.io/bobcc4/yinyun-lxserver:latest`
+- **Docker Hub**: `dlaq/yinyun-lxserver:latest`
+- **GitHub Packages**: `ghcr.io/dlaq/yinyun-lxserver:latest`
 
 > [!IMPORTANT]
-> Docker 正式镜像已改用 `latest` 标签，原 `v1` 标签停止更新。现有用户必须把 Compose 或 NAS 容器中的镜像改为 `bobcc4/yinyun-lxserver:latest`。每次正式发布还会永久保留完整版本标签，例如 `bobcc4/yinyun-lxserver:v1.5.4`，用于锁定版本或回滚。数据目录结构没有变化，请保留原有 `/server/data`、`/server/logs`、`/server/cache` 和 `/server/music` 挂载。
+> Docker 正式镜像已改用 `latest` 标签，原 `v1` 标签停止更新。现有用户必须把 Compose 或 NAS 容器中的镜像改为 `dlaq/yinyun-lxserver:latest`。每次正式发布还会永久保留完整版本标签，例如 `dlaq/yinyun-lxserver:v1.5.6`，用于锁定版本或回滚。数据目录结构没有变化，请保留原有 `/server/data`、`/server/logs`、`/server/cache` 和 `/server/music` 挂载。
 
 **Docker Run 示例：**
 
@@ -151,7 +209,7 @@ docker run -d \
   -v $(pwd)/music:/server/music \
   --name yinyun \
   --restart unless-stopped \
-  bobcc4/yinyun-lxserver:latest
+  dlaq/yinyun-lxserver:latest
 ```
 
 **Docker Compose 示例：**
@@ -161,7 +219,7 @@ docker run -d \
 ```yaml
 services:
   yinyun:
-    image: bobcc4/yinyun-lxserver:latest
+    image: dlaq/yinyun-lxserver:latest
     container_name: yinyun
     restart: unless-stopped
     ports:
@@ -194,7 +252,7 @@ docker compose up -d
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/bobcc4/yinyun-lxserver.git && cd yinyun-lxserver
+git clone https://github.com/dlaq/yinyun-lxserver.git && cd yinyun-lxserver
 
 # 2. 安装依赖并编译
 npm ci && npm run build
@@ -299,14 +357,14 @@ npm start
 
 ### 👥 贡献者 (Contributors)
 
-<a href="https://github.com/bobcc4/yinyun-lxserver/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=bobcc4/yinyun-lxserver" />
+<a href="https://github.com/dlaq/yinyun-lxserver/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dlaq/yinyun-lxserver" />
 </a>
 
 
 ## 📈 Star History
 
-[![Star History Chart](md/star-history.svg)](https://github.com/bobcc4/yinyun-lxserver/stargazers)
+[![Star History Chart](md/star-history.svg)](https://github.com/dlaq/yinyun-lxserver/stargazers)
 
 
 

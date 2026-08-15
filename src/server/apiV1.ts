@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { getUserSpace } from '@/user'
 import { tryNormalizeUsername } from '@/utils/username'
@@ -105,6 +106,173 @@ const activePlaylistSyncs = new Set<string>()
 let songloftMatchingCache: { client: SongloftClient; tracks: IntegrationTrack[]; expiresAt: number } | null = null
 let songloftMatchingPromise: Promise<IntegrationTrack[]> | null = null
 const SONGLOFT_MATCHING_CACHE_TTL = 60_000
+
+type HealthSettings = {
+  enabled: boolean
+  intervalMinutes: number
+  sampleSize: number
+  notify: boolean
+  messagePusherUrl: string
+  messagePusherToken: string
+  messagePusherChannel: string
+}
+
+type HealthReport = {
+  checkedAt: string
+  ok: boolean
+  playlists: number
+  tracksChecked: number
+  healthyTracks: number
+  failures: Array<{ playlist: string; title: string; artist: string; message: string }>
+}
+
+type HealthState = { settings: HealthSettings; report: HealthReport | null }
+
+const DEFAULT_HEALTH_SETTINGS: HealthSettings = {
+  enabled: false,
+  intervalMinutes: 360,
+  sampleSize: 20,
+  notify: false,
+  messagePusherUrl: '',
+  messagePusherToken: '',
+  messagePusherChannel: '',
+}
+const healthStateCache = new Map<string, HealthState>()
+let healthScheduler: NodeJS.Timeout | null = null
+
+const healthStateFile = (username: string) => {
+  const dataPath = String((global as any).lx?.dataPath || path.join(process.cwd(), 'data'))
+  return path.join(dataPath, 'health', `${encodeURIComponent(username)}.json`)
+}
+
+const readHealthState = (username: string): HealthState => {
+  const cached = healthStateCache.get(username)
+  if (cached) return cached
+  let persisted: Partial<HealthState> = {}
+  try {
+    const filename = healthStateFile(username)
+    if (fs.existsSync(filename)) persisted = JSON.parse(fs.readFileSync(filename, 'utf8'))
+  } catch { /* a corrupt health report should not prevent the player from logging in */ }
+  const settings = { ...DEFAULT_HEALTH_SETTINGS, ...(persisted.settings || {}) }
+  const state: HealthState = { settings, report: persisted.report || null }
+  healthStateCache.set(username, state)
+  return state
+}
+
+const writeHealthState = (username: string, state: HealthState) => {
+  healthStateCache.set(username, state)
+  try {
+    const filename = healthStateFile(username)
+    fs.mkdirSync(path.dirname(filename), { recursive: true })
+    fs.writeFileSync(filename, JSON.stringify(state, null, 2), 'utf8')
+  } catch (error: any) {
+    console.warn('[Health] unable to persist health state:', error?.message || error)
+  }
+}
+
+const publicHealthSettings = (settings: HealthSettings) => ({
+  enabled: settings.enabled,
+  intervalMinutes: settings.intervalMinutes,
+  sampleSize: settings.sampleSize,
+  notify: settings.notify,
+  messagePusherUrl: settings.messagePusherUrl,
+  messagePusherChannel: settings.messagePusherChannel,
+  messagePusherTokenConfigured: Boolean(settings.messagePusherToken),
+})
+
+const postHealthNotification = async (settings: HealthSettings, report: HealthReport) => {
+  if (!settings.notify || !settings.messagePusherUrl) return
+  const content = report.ok
+    ? `曲源健康检查通过：检查 ${report.tracksChecked} 首，全部可解析。`
+    : `曲源健康检查发现 ${report.failures.length} 个问题（${report.healthyTracks}/${report.tracksChecked} 首正常）。`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
+  try {
+    await fetch(settings.messagePusherUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(settings.messagePusherToken ? {
+          Authorization: `Bearer ${settings.messagePusherToken}`,
+          'X-Message-Pusher-Token': settings.messagePusherToken,
+        } : {}),
+      },
+      body: JSON.stringify({
+        title: '音云曲源健康检查',
+        content,
+        channel: settings.messagePusherChannel || undefined,
+        token: settings.messagePusherToken || undefined,
+        report,
+      }),
+      signal: controller.signal,
+    })
+  } catch (error: any) {
+    console.warn('[Health] message-pusher notification failed:', error?.message || error)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+const runHealthCheck = async (deps: ApiV1Dependencies, username: string): Promise<HealthReport> => {
+  const state = readHealthState(username)
+  const store = deps.getPlaylistImportStore?.(username)
+  const records = store ? store.load() : []
+  const sampleSize = Math.min(100, Math.max(1, Number(state.settings.sampleSize) || DEFAULT_HEALTH_SETTINGS.sampleSize))
+  const failures: HealthReport['failures'] = []
+  let tracksChecked = 0
+  let healthyTracks = 0
+  for (const record of records) {
+    const tracks = Array.isArray(record.tracks) ? record.tracks.slice(0, sampleSize) : []
+    for (const track of tracks) {
+      tracksChecked++
+      try {
+        const song = normalizeImportedSong(deps, track, String(record.source || track.source || ''))
+        const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('解析超时')), 15000))
+        await Promise.race([
+          deps.resolveSong(song, '128k', username, true, { allowPlatformSwitch: false, allowApiSwitch: false }),
+          timeout,
+        ])
+        healthyTracks++
+      } catch (error: any) {
+        if (failures.length < 100) failures.push({
+          playlist: String(record.name || record.sourcePlaylistName || '未命名歌单'),
+          title: String(track.title || ''),
+          artist: String(track.artist || ''),
+          message: String(error?.message || '解析失败'),
+        })
+      }
+    }
+  }
+  const report: HealthReport = {
+    checkedAt: new Date().toISOString(),
+    ok: failures.length === 0,
+    playlists: records.length,
+    tracksChecked,
+    healthyTracks,
+    failures,
+  }
+  state.report = report
+  writeHealthState(username, state)
+  await postHealthNotification(state.settings, report)
+  return report
+}
+
+const startHealthScheduler = (deps: ApiV1Dependencies) => {
+  if (healthScheduler) return
+  healthScheduler = setInterval(() => {
+    for (const user of deps.getUsers()) {
+      const username = tryNormalizeUsername(user.name)
+      if (!username) continue
+      const state = readHealthState(username)
+      if (!state.settings.enabled) continue
+      const last = Date.parse(state.report?.checkedAt || '')
+      const interval = Math.max(15, Number(state.settings.intervalMinutes) || DEFAULT_HEALTH_SETTINGS.intervalMinutes) * 60_000
+      if (Number.isFinite(last) && Date.now() - last < interval) continue
+      runHealthCheck(deps, username).catch(error => console.warn('[Health] scheduled check failed:', error?.message || error))
+    }
+  }, 60_000)
+  healthScheduler.unref?.()
+}
 
 const invalidateSongloftMatchingCache = () => {
   songloftMatchingCache = null
@@ -572,6 +740,9 @@ const getUserLocalIntegrationTracks = async (username: string): Promise<Integrat
     album: item.album,
     duration: item.interval,
     relativePath: item.filename,
+    isLocal: true,
+    folder: item.folder || 'music',
+    storageLocation: item.storageLocation || (item as any)._localStorageLocation,
   }))
 }
 
@@ -916,6 +1087,19 @@ const getPlaylistImportMatches = async (
 
 const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1Dependencies, username: string, source: string) => {
   const replaceable = match.status === 'matched' && isLocalIntegrationTrack(match.candidate)
+  // A provider index may temporarily report "missing" while its candidate
+  // list already contains the shared local file (for example while Songloft
+  // is rescanning).  Keep that physical-file evidence explicit so the UI can
+  // show the local match without inflating either provider's authoritative
+  // indexed count.
+  const providerMatches = [match.yinyun, match.songloft, match]
+  const localCandidate = providerMatches
+    .flatMap(item => [
+      ...(item?.candidates || []).map(candidate => ({ track: candidate.track, score: candidate.score })),
+      item?.candidate ? { track: item.candidate, score: item.score } : null,
+    ])
+    .filter((item): item is { track: IntegrationTrack; score: number } => Boolean(item?.track && isLocalIntegrationTrack(item.track)))
+    .sort((left, right) => Number(right.score || 0) - Number(left.score || 0))[0]?.track
   return {
   index,
   ...publicTrackMatch(match),
@@ -925,7 +1109,9 @@ const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1
   availability: {
     yinyun: (match.yinyun || match).status,
     songloft: (match.songloft || match).status,
+    local: localCandidate ? 'matched' : 'missing',
   },
+  localCandidate: publicIntegrationTrack(localCandidate),
   replaceable,
   downloadable: (match.status !== 'matched' || replaceable) && !isNonYinyunDownloadSource(match.source.source) && deps.isSourceSupported(String(match.source.source || source), username),
   }
@@ -1356,6 +1542,9 @@ export const apiV1OpenApi = {
     '/api/v1/integration/playlists/sync': { post: { summary: '双向同步音云与 Songloft 歌单' } },
     '/api/v1/integration/playlists/sync/{yinyunPlaylistId}': { delete: { summary: '删除音云歌单对应的 Songloft 映射歌单' } },
     '/api/v1/integration/songloft/playlists/{playlistId}': { delete: { summary: '删除指定 Songloft 歌单' } },
+    '/api/v1/health/settings': { get: { summary: '查询曲源健康检查设置' }, put: { summary: '更新曲源健康检查设置' } },
+    '/api/v1/health/status': { get: { summary: '查询最近一次曲源健康检查' } },
+    '/api/v1/health/test': { post: { summary: '立即测试导入音源解析能力' } },
     '/api/v1/downloads': { get: { summary: '查询服务端下载队列' }, post: { summary: '加入服务端下载队列' } },
     '/api/v1/replacement': { get: { summary: '查询洗版任务' }, post: { summary: '启动洗版任务' } },
     '/api/v1/sources': { get: { summary: '查询可用音源及平台开关' } },
@@ -1371,6 +1560,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 ): Promise<boolean> => {
   const pathname = url.pathname
   if (pathname !== API_PREFIX && !pathname.startsWith(`${API_PREFIX}/`)) return false
+  startHealthScheduler(deps)
 
   try {
     if ((pathname === API_PREFIX || pathname === `${API_PREFIX}/capabilities`) && req.method === 'GET') {
@@ -1391,6 +1581,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
           leaderboards: true,
           serverDownloads: true,
           replacement: true,
+          healthChecks: true,
           customSources: true,
           playlistSharing: true,
           playlistImport: {
@@ -1447,6 +1638,44 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     }
 
     const username = requireUser(req, deps, url)
+
+    if (pathname === `${API_PREFIX}/health/settings` && req.method === 'GET') {
+      const state = readHealthState(username)
+      success(res, publicHealthSettings(state.settings))
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/health/settings` && req.method === 'PUT') {
+      const body = await readJson(req)
+      const current = readHealthState(username)
+      const next: HealthSettings = {
+        ...current.settings,
+        enabled: body.enabled === undefined ? current.settings.enabled : Boolean(body.enabled),
+        intervalMinutes: Math.min(7 * 24 * 60, Math.max(15, Number(body.intervalMinutes) || current.settings.intervalMinutes)),
+        sampleSize: Math.min(100, Math.max(1, Number(body.sampleSize) || current.settings.sampleSize)),
+        notify: body.notify === undefined ? current.settings.notify : Boolean(body.notify),
+        messagePusherUrl: String(body.messagePusherUrl ?? current.settings.messagePusherUrl).trim().slice(0, 1000),
+        messagePusherToken: body.messagePusherToken === undefined
+          ? current.settings.messagePusherToken
+          : String(body.messagePusherToken || '').trim().slice(0, 1000),
+        messagePusherChannel: String(body.messagePusherChannel ?? current.settings.messagePusherChannel).trim().slice(0, 200),
+      }
+      current.settings = next
+      writeHealthState(username, current)
+      success(res, publicHealthSettings(next))
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/health/status` && req.method === 'GET') {
+      const state = readHealthState(username)
+      success(res, { settings: publicHealthSettings(state.settings), report: state.report })
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/health/test` && req.method === 'POST') {
+      success(res, await runHealthCheck(deps, username))
+      return true
+    }
 
     if (pathname === `${API_PREFIX}/integration/songloft/status` && req.method === 'GET') {
       const client = deps.getSongloftClient?.() || null
@@ -1520,7 +1749,6 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     }
 
     if (pathname === `${API_PREFIX}/integration/library/refresh/yinyun` && req.method === 'POST') {
-      requireIntegrationAdmin(req, deps)
       const yinyun = await refreshYinyunLibraryIndex(username)
       invalidateSongloftMatchingCache()
       success(res, { yinyun, message: '音云曲库索引已刷新；Songloft 索引未触发' }, 202)
@@ -1528,7 +1756,6 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     }
 
     if (pathname === `${API_PREFIX}/integration/library/refresh/songloft` && req.method === 'POST') {
-      requireIntegrationAdmin(req, deps)
       const client = requireSongloftClient(deps)
       const body = await readJson(req)
       invalidateSongloftMatchingCache()
@@ -1537,7 +1764,6 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     }
 
     if (pathname === `${API_PREFIX}/integration/library/refresh` && req.method === 'POST') {
-      requireIntegrationAdmin(req, deps)
       const client = requireSongloftClient(deps)
       const body = await readJson(req)
       const yinyun = await refreshYinyunLibraryIndex(username)

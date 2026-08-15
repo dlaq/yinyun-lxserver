@@ -36,13 +36,17 @@
     const unwrap = payload => payload?.data ?? payload;
 
     async function api(path, options = {}) {
-        if (!state.token && path !== '/api/v1/auth/login') throw new Error('请先连接音云用户');
+        const legacyToken = localStorage.getItem('lx_user_token') || '';
+        const legacyUser = localStorage.getItem('lx_sync_user') || '';
+        const nativeToken = state.token && state.token !== 'legacy' ? state.token : '';
+        if (!nativeToken && !legacyToken && path !== '/api/v1/auth/login') throw new Error('请先登录音云用户');
         const adminPassword = window.app?.password || localStorage.getItem('lx_auth') || '';
         const response = await fetch(path, {
             ...options,
             headers: {
                 'Content-Type': 'application/json',
-                ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+                ...(nativeToken ? { Authorization: `Bearer ${nativeToken}` } : {}),
+                ...(!nativeToken && legacyToken ? { 'X-User-Name': legacyUser, 'X-User-Token': legacyToken } : {}),
                 ...(adminPassword ? { 'X-Frontend-Auth': adminPassword } : {}),
                 ...(options.headers || {}),
             },
@@ -124,14 +128,15 @@
 
     function updateAuth(connected) {
         const badge = el('integration-auth-state');
+        if (!badge) return;
         badge.textContent = connected ? `已连接 · ${state.username}` : '未连接';
         badge.classList.toggle('is-online', connected);
         badge.classList.toggle('is-offline', !connected);
     }
 
     async function login() {
-        const username = el('integration-username').value.trim();
-        const password = el('integration-password').value;
+        const username = el('integration-username')?.value.trim();
+        const password = el('integration-password')?.value;
         if (!username || !password) return notifyError(new Error('请输入音云用户名和密码'));
         setBusy('integration-login-btn', true, '连接中');
         try {
@@ -828,9 +833,17 @@
             sourceSelect.value = 'aggregate';
             sourceSelect.onchange = () => { state.candidateSource = sourceSelect.value; searchCandidates(); };
         }
-        const searchPromise = searchCandidates();
+        // A local file is useful for immediate auditioning, but opening the
+        // picker must not unexpectedly fan out to every online provider.  The
+        // user can edit the query and press 搜索 when an online replacement is
+        // actually needed.  Queue tasks have no local candidate and retain
+        // the original convenience of an initial search.
         if (options.previewLocal && localCandidate) await previewCandidate(localCandidate);
-        await searchPromise;
+        if (!localCandidate) {
+            await searchCandidates();
+        } else {
+            list.innerHTML = '<div class="integration-empty">本地文件已显示。请修改关键字或点击“搜索”加载在线候选版本。</div>';
+        }
     }
 
     async function openQueueSourcePicker(id) {
@@ -871,7 +884,12 @@
         const visible = state.filter === 'all' ? items : items.filter(item => item.status === state.filter);
         const body = el('integration-result-body');
         const statusLabel = status => status === 'matched' ? '已找到' : status === 'missing' ? '未找到' : '需确认';
-        const statusCell = (match, label, index, provider) => `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(match?.status || 'missing')}">${label}: ${statusLabel(match?.status)}</span>${match?.candidate ? `<small>${escapeHtml(match.candidate.title || '')} · ${escapeHtml(match.candidate.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
+        const statusCell = (match, label, index, provider, localFallback) => {
+            const fallback = !match?.candidate && localFallback ? localFallback : null;
+            const effectiveStatus = match?.status || (fallback ? 'matched' : 'missing');
+            const title = match?.candidate || fallback;
+            return `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(effectiveStatus)}">${label}: ${statusLabel(effectiveStatus)}${fallback ? '（共享本地文件）' : ''}</span>${title ? `<small>${escapeHtml(title.title || '')} · ${escapeHtml(title.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
+        };
         body.innerHTML = visible.length ? visible.map(item => {
             const source = item.source || {};
             const checked = state.selected.has(Number(item.index));
@@ -881,7 +899,7 @@
             const confirmButtons = item.status === 'ambiguous' ? `<div class="integration-confirm-actions">${item.yinyun?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'yinyun')" title="使用音云候选">采用音云</button>` : ''}${item.songloft?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'songloft')" title="使用 Songloft 候选">采用 Songloft</button>` : ''}</div>` : '';
             const manualButton = item.status !== 'matched' || item.replaceable ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.openCandidatePicker(${Number(item.index)})"><i class="fas fa-headphones"></i> ${selected ? '更换版本' : item.replaceable ? '替换版本' : '选择版本'}</button>` : '';
             const selectionText = selected ? `<small class="integration-match-source">${selected.replaceLocal ? '已选替换：' : '已选：'}${escapeHtml(selected.title)} · ${escapeHtml(selected.artist)}</small>` : '';
-            return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun')}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft')}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${selectionText}${manualButton}${confirmButtons}</td></tr>`;
+            return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun', item.localCandidate)}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft', item.localCandidate)}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${item.localCandidate && item.status !== 'matched' ? '<small class="integration-match-source">共享曲库已有本地文件，可试听；索引状态可能正在刷新</small>' : ''}${selectionText}${manualButton}${confirmButtons}</td></tr>`;
         }).join('') : '<tr><td colspan="6" class="integration-empty">当前筛选没有歌曲</td></tr>';
         document.querySelectorAll('[data-integration-filter]').forEach(button => button.classList.toggle('active', button.dataset.integrationFilter === state.filter));
         el('integration-selected-count').textContent = `已选 ${state.selected.size} 首`;
@@ -942,7 +960,7 @@
     function previewLocalCandidate(index, provider, candidateIndex = 0) {
         const item = (state.importData?.items || []).find(row => Number(row.index) === Number(index));
         const match = item?.[provider];
-        const candidate = match?.candidates?.[Number(candidateIndex)]?.track || match?.candidate;
+        const candidate = match?.candidates?.[Number(candidateIndex)]?.track || match?.candidate || item?.localCandidate;
         if (!candidate) return notifyError(new Error('当前来源没有可试听的候选'));
         return openCandidatePicker(index, { provider, localCandidate: candidate, previewLocal: true });
     }
@@ -1070,7 +1088,14 @@
 
     function activate() {
         const savedUser = sessionStorage.getItem('yinyun.integration.username');
-        if (savedUser) el('integration-username').value = savedUser;
+        const legacyUser = localStorage.getItem('lx_sync_user') || savedUser || '';
+        const legacyToken = localStorage.getItem('lx_user_token') || '';
+        if (savedUser && el('integration-username')) el('integration-username').value = savedUser;
+        if (!state.token && legacyToken) {
+            state.token = 'legacy';
+            state.username = legacyUser;
+            updateAuth(true);
+        }
         if (state.token) {
             refreshAll().catch(notifyError);
             setActive(true);

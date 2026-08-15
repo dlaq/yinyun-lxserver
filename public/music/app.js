@@ -63,7 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Settings & Batch Selection
-const DEFAULT_ENTRY_TABS = new Set(['search', 'songlist', 'leaderboard', 'favorites', 'localmusic', 'about']);
+const DEFAULT_ENTRY_TABS = new Set(['search', 'songlist', 'my-playlists', 'library-integration', 'leaderboard', 'favorites', 'localmusic', 'about']);
 const DEFAULT_SETTINGS = {
     itemsPerPage: 20, // Default 20 items per page, can be 'all'
     defaultEntry: 'search', // 默认入口：播放器主界面
@@ -104,6 +104,7 @@ const DEFAULT_SETTINGS = {
     detailVisualizerStyle: 'pulse',
     visualizerOpacity: 0.5,
     visualizerGlobalStyle: 'blocks',
+    energySavingMode: false,
     // Cache Settings
     enableServerCache: true, // 开启服务器缓存
     enableServerLyricCache: true, // 开启服务器歌词文件缓存
@@ -608,6 +609,51 @@ function updateUserUI() {
 }
 window.updateUserUI = updateUserUI;
 
+let requiredLoginVisible = false;
+function showRequiredLoginModal() {
+    const agreement = document.getElementById('project-agreement-modal');
+    if (agreement && !agreement.classList.contains('hidden')) return false;
+    const modal = document.getElementById('required-login-modal');
+    if (!modal || isUserLoggedIn()) return false;
+    const userInput = document.getElementById('required-login-user');
+    if (userInput && !userInput.value) userInput.value = localStorage.getItem('lx_sync_user') || '';
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    requiredLoginVisible = true;
+    setTimeout(() => (userInput || document.getElementById('required-login-pass'))?.focus(), 30);
+    return true;
+}
+function hideRequiredLoginModal() {
+    const modal = document.getElementById('required-login-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+    requiredLoginVisible = false;
+}
+async function submitRequiredLogin(event) {
+    event?.preventDefault();
+    const user = document.getElementById('required-login-user')?.value || '';
+    const pass = document.getElementById('required-login-pass')?.value || '';
+    const statusEl = document.getElementById('required-login-status');
+    const button = document.getElementById('required-login-submit');
+    if (button) button.disabled = true;
+    if (statusEl) statusEl.innerHTML = '<i class="fas fa-spinner fa-spin text-emerald-500"></i> 正在登录…';
+    const success = await handleLocalLogin({ user, pass, statusEl: { set innerHTML(value) { if (statusEl) statusEl.innerHTML = value; }, get innerHTML() { return statusEl?.innerHTML || ''; } } });
+    if (button) button.disabled = false;
+    if (success) {
+        if (statusEl) statusEl.innerHTML = '<i class="fas fa-check-circle text-emerald-500"></i> 登录成功';
+        document.getElementById('required-login-pass').value = '';
+        hideRequiredLoginModal();
+        const pending = window.pendingRequiredTab;
+        window.pendingRequiredTab = null;
+        if (pending) switchTab(pending);
+    } else if (statusEl && !statusEl.innerHTML) {
+        statusEl.innerHTML = '<i class="fas fa-times-circle text-red-500"></i> 登录失败，请检查用户名和密码';
+    }
+}
+window.showRequiredLoginModal = showRequiredLoginModal;
+window.submitRequiredLogin = submitRequiredLogin;
+
 /**
  * 顶部栏退出登录处理 (带确认弹窗与全量缓存清理)
  */
@@ -973,9 +1019,103 @@ function changeQualityPreference(quality) {
     updateSetting('preferredQuality', quality);
 }
 
+function toggleCustomSourceSection(force) {
+    const list = document.getElementById('settings-custom-sources-list');
+    const button = document.getElementById('settings-custom-source-toggle');
+    if (!list || !button) return;
+    const collapsed = force === undefined ? !list.classList.contains('hidden') : !force;
+    list.classList.toggle('hidden', collapsed);
+    button.setAttribute('aria-expanded', String(!collapsed));
+    button.innerHTML = collapsed
+        ? '<i class="fas fa-chevron-down"></i><span>展开</span>'
+        : '<i class="fas fa-chevron-up"></i><span>收起</span>';
+    localStorage.setItem('lx_custom_sources_collapsed', collapsed ? 'true' : 'false');
+}
+window.toggleCustomSourceSection = toggleCustomSourceSection;
+
+function healthAuthHeaders(extra = {}) {
+    return { ...extra, ...getUserAuthHeaders() };
+}
+function renderHealthReport(report) {
+    const target = document.getElementById('health-status');
+    if (!target) return;
+    if (!report) { target.textContent = '尚未测试'; return; }
+    const when = report.checkedAt ? new Date(report.checkedAt).toLocaleString('zh-CN') : '—';
+    const stateText = report.ok ? '通过' : `发现 ${report.failures?.length || 0} 个问题`;
+    target.innerHTML = `<span class="${report.ok ? 'text-emerald-500' : 'text-red-400'}"><i class="fas ${report.ok ? 'fa-check-circle' : 'fa-triangle-exclamation'} mr-1"></i>${stateText}</span> · ${report.healthyTracks || 0}/${report.tracksChecked || 0} 首可解析 · ${when}`;
+    if (!report.ok && Array.isArray(report.failures) && report.failures.length) {
+        target.title = report.failures.slice(0, 3).map(item => `${item.playlist} · ${item.title} · ${item.message}`).join('\n');
+    }
+}
+async function loadHealthSettings() {
+    if (!isUserLoggedIn()) return;
+    try {
+        const [settingsResponse, statusResponse] = await Promise.all([
+            fetch('/api/v1/health/settings', { headers: healthAuthHeaders(), cache: 'no-store' }),
+            fetch('/api/v1/health/status', { headers: healthAuthHeaders(), cache: 'no-store' }),
+        ]);
+        const settingsPayload = await settingsResponse.json().catch(() => ({}));
+        const statusPayload = await statusResponse.json().catch(() => ({}));
+        const value = settingsPayload.data || settingsPayload;
+        if (value && settingsResponse.ok) {
+            const enabled = document.getElementById('health-enabled'); if (enabled) enabled.checked = value.enabled === true;
+            const interval = document.getElementById('health-interval'); if (interval) interval.value = value.intervalMinutes || 360;
+            const sample = document.getElementById('health-sample-size'); if (sample) sample.value = value.sampleSize || 20;
+            const notify = document.getElementById('health-notify'); if (notify) notify.checked = value.notify === true;
+            const url = document.getElementById('health-pusher-url'); if (url) url.value = value.messagePusherUrl || '';
+            const channel = document.getElementById('health-pusher-channel'); if (channel) channel.value = value.messagePusherChannel || '';
+        }
+        renderHealthReport((statusPayload.data || statusPayload).report || null);
+    } catch (error) { console.warn('[Health] 加载设置失败:', error); }
+}
+async function saveHealthSettings() {
+    if (!isUserLoggedIn()) return showRequiredLoginModal();
+    const body = {
+        enabled: document.getElementById('health-enabled')?.checked === true,
+        intervalMinutes: Number(document.getElementById('health-interval')?.value || 360),
+        sampleSize: Number(document.getElementById('health-sample-size')?.value || 20),
+        notify: document.getElementById('health-notify')?.checked === true,
+        messagePusherUrl: document.getElementById('health-pusher-url')?.value || '',
+        messagePusherChannel: document.getElementById('health-pusher-channel')?.value || '',
+    };
+    const token = document.getElementById('health-pusher-token')?.value || '';
+    if (token) body.messagePusherToken = token;
+    try {
+        const response = await fetch('/api/v1/health/settings', { method: 'PUT', headers: healthAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload?.error?.message || '健康检查设置保存失败');
+        if (typeof showSuccess === 'function') showSuccess('健康检查设置已保存');
+    } catch (error) { if (typeof showError === 'function') showError(error.message || String(error)); }
+}
+async function runHealthCheckNow() {
+    if (!isUserLoggedIn()) return showRequiredLoginModal();
+    const button = document.getElementById('health-test-btn');
+    if (button) { button.disabled = true; button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>测试中'; }
+    try {
+        const response = await fetch('/api/v1/health/test', { method: 'POST', headers: healthAuthHeaders({ 'Content-Type': 'application/json' }) });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload?.error?.message || '健康检查失败');
+        renderHealthReport(payload.data || payload);
+        if (typeof showSuccess === 'function') showSuccess('曲源健康检查完成');
+    } catch (error) { if (typeof showError === 'function') showError(error.message || String(error)); }
+    finally { if (button) { button.disabled = false; button.innerHTML = '<i class="fas fa-stethoscope mr-1"></i>立即测试'; } }
+}
+window.loadHealthSettings = loadHealthSettings;
+window.saveHealthSettings = saveHealthSettings;
+window.runHealthCheckNow = runHealthCheckNow;
+
 
 // Tab Switching
 function switchTab(tabId) {
+    // Every player tab is user-scoped.  The project agreement is the only
+    // public overlay; after it is accepted an unauthenticated tab selection
+    // always routes through the required-login dialog, including “关于”.
+    if (!isUserLoggedIn()) {
+        window.pendingRequiredTab = tabId;
+        if (showRequiredLoginModal()) return;
+        const agreement = document.getElementById('project-agreement-modal');
+        if (agreement && !agreement.classList.contains('hidden')) return;
+    }
     // Favorites is a sidebar group toggle, not a main content view.
     if (tabId === 'favorites') {
         handleFavoritesClick();
@@ -1004,6 +1144,7 @@ function switchTab(tabId) {
     if (tabId === 'settings') {
         if (typeof syncSettingsUI === 'function') syncSettingsUI();
         else if (typeof updateAdminUI === 'function') updateAdminUI();
+        if (typeof loadHealthSettings === 'function') loadHealthSettings();
     }
 
     // Reset Sidebar Highlight
@@ -1062,6 +1203,14 @@ function switchTab(tabId) {
     if (tabId === 'my-playlists') {
         document.getElementById('page-title').innerText = "我的歌单";
         renderMyPlaylists(currentListData);
+    }
+
+    if (tabId === 'library-integration') {
+        document.getElementById('page-title').innerText = '曲库联动';
+        window.LibraryIntegration?.activate?.();
+        window.LibraryIntegration?.setActive?.(true);
+    } else {
+        window.LibraryIntegration?.setActive?.(false);
     }
 
     if (tabId === 'leaderboard') {
@@ -1802,6 +1951,10 @@ function handleHotSearchClick(keyword) {
 }
 
 function showInitialSearchState() {
+    if (!isUserLoggedIn()) {
+        showRequiredLoginModal();
+        return;
+    }
     const container = document.getElementById('search-results');
     const header = document.getElementById('search-results-header');
 
@@ -1898,7 +2051,7 @@ function getSourceTag(source) {
         wy: 't-badge-red border-red-200 dark:border-red-500/30',
         mg: 't-badge-pink border-pink-200 dark:border-pink-500/30'
     };
-    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕' };
+    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', local: 'LOCAL', songloft: 'Songloft', subsonic: 'Subsonic' };
     const color = colors[source] || 't-bg-main t-text-muted t-border-main';
     const name = names[source] || source.toUpperCase();
     return `<span class="flex-shrink-0 px-1 py-0 rounded text-[10px] font-bold border ${color} mr-1">${name}</span>`;
@@ -6012,6 +6165,11 @@ async function updateSetting(key, value) {
         }
     }
 
+    if (key === 'energySavingMode') {
+        document.body.classList.toggle('energy-saving-mode', Boolean(value));
+        if (window.musicVisualizer) window.musicVisualizer.applySettings();
+    }
+
     if (key === 'playerBackground') {
         applyPlayerBackground(value);
     }
@@ -6156,6 +6314,7 @@ const SETTINGS_UI_MAP = {
             if (valEl) valEl.innerText = v;
         }
     },
+    energySavingMode: { id: 'setting-energy-saving', type: 'checkbox', action: value => document.body.classList.toggle('energy-saving-mode', Boolean(value)) },
 
     // 系统 & 网络 (System & Network)
     autoUpdateNetworkList: { id: 'setting-auto-update-list', type: 'checkbox' },
@@ -8669,14 +8828,17 @@ async function handleSyncLogout(skipConfirm = false) {
     }
 }
 
-async function handleLocalLogin() {
-    const user = normalizeSyncUsername(document.getElementById('sync-local-user').value);
-    const pass = document.getElementById('sync-local-pass').value;
-    const statusEl = document.getElementById('sync-status');
+async function handleLocalLogin(options = {}) {
+    const userInput = options.user ?? document.getElementById('sync-local-user')?.value ?? '';
+    const passInput = options.pass ?? document.getElementById('sync-local-pass')?.value ?? '';
+    const user = normalizeSyncUsername(userInput);
+    const pass = passInput;
+    const statusEl = options.statusEl || document.getElementById('sync-status') || { innerHTML: '' };
 
     if (!user || !pass) {
-        showError('请输入用户名和密码');
-        return;
+        if (options.statusEl) statusEl.innerHTML = '<i class="fas fa-exclamation-circle text-red-500"></i> 请输入用户名和密码';
+        else showError('请输入用户名和密码');
+        return false;
     }
 
     statusEl.innerHTML = '<i class="fas fa-spinner fa-spin text-emerald-500"></i> 正在登录...';
@@ -8773,11 +8935,18 @@ async function handleLocalLogin() {
             await loadPlaylistSharingSetting();
             startPlaylistSharePolling();
 
+            if (typeof loadHealthSettings === 'function') loadHealthSettings().catch(() => {});
+            if (window.LibraryIntegration) window.LibraryIntegration.activate();
+            if (requiredLoginVisible) hideRequiredLoginModal();
+            return true;
+
         } else {
             statusEl.innerHTML = '<i class="fas fa-times-circle text-red-500"></i> 登录失败: 用户名或密码错误';
+            return false;
         }
     } catch (e) {
         statusEl.innerHTML = `<i class="fas fa-exclamation-circle text-red-500"></i> 错误: ${e.message}`;
+        return false;
     }
 }
 
@@ -12254,6 +12423,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 预加载自定义源数据，确保设置界面和模态框打开时有数据
     loadCustomSources();
+    if (localStorage.getItem('lx_custom_sources_collapsed') === 'true') toggleCustomSourceSection(false);
 
     // [优化] 此处不再立即调用 showInitialSearchState()，移至下方的 setTimeout 中
 

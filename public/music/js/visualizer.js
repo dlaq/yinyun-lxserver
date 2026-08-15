@@ -74,6 +74,8 @@ const musicVisualizer = (function () {
         syncSize();
 
         const s = window.settings || {};
+        const energySaving = s.energySavingMode === true;
+        document.body.classList.toggle('energy-saving-mode', energySaving);
         const themeColor = getComputedStyle(document.documentElement).getPropertyValue('--c-500').trim() || '#10b981';
         const opacity = s.visualizerOpacity !== undefined ? s.visualizerOpacity : 0.5;
         const globalStyle = s.visualizerGlobalStyle || 'blocks';
@@ -83,7 +85,7 @@ const musicVisualizer = (function () {
         waveFooter.clearAnimations();
         const visualizerContainer = document.getElementById('visualizer-container');
 
-        if (s.showFooterVisualizer && footerCanvas && visualizerContainer) {
+        if (s.showFooterVisualizer && !energySaving && footerCanvas && visualizerContainer) {
             const style = s.footerVisualizerStyle || 'bars';
             // 获取容器实际宽度而不是 Canvas 宽度
             const containerRect = visualizerContainer.getBoundingClientRect();
@@ -232,7 +234,7 @@ const musicVisualizer = (function () {
 
         // --- Handle Detail Visualizer ---
         waveDetail.clearAnimations();
-        if (s.showDetailVisualizer && detailCanvas) {
+        if (s.showDetailVisualizer && !energySaving && detailCanvas) {
             const style = s.detailVisualizerStyle || 'pulse';
             const options = {
                 fillColor: themeColor,

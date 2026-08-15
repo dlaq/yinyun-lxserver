@@ -25,6 +25,7 @@
     <script src="/_player/js/Sortable.min.js"></script>
     <script src="/js/notification-engine.js"></script>
     <link rel="stylesheet" href="/_player/css/app.css">
+    <link rel="stylesheet" href="/_player/css/library-integration.css">
 </head>
 
 <body class="t-bg-main h-screen flex flex-col overflow-hidden t-text-main font-sans">
@@ -71,6 +72,13 @@
                             <i class="fas fa-music w-6 text-center" aria-hidden="true"></i>
                             <span class="ml-3 font-medium">我的歌单</span>
                             <span id="my-playlists-count" class="ml-auto text-xs opacity-60">0</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" onclick="switchTab('library-integration')" id="tab-library-integration"
+                            class="flex items-center px-6 py-3 t-text-muted hover:t-bg-main transition-colors duration-200">
+                            <i class="fas fa-link w-6 text-center" aria-hidden="true"></i>
+                            <span class="ml-3 font-medium">曲库联动</span>
                         </a>
                     </li>
                     <li>
@@ -212,7 +220,7 @@
 
                     <!-- Hide social/version info on mobile -->
                     <div class="hidden lg:flex items-center gap-4">
-                        <a href="https://github.com/bobcc4/yinyun-lxserver" target="_blank"
+                        <a href="https://github.com/dlaq/yinyun-lxserver" target="_blank"
                             class="t-text-muted hover:t-text-muted transition-colors" title="GitHub">
                             <i class="fab fa-github text-xl"></i>
                         </a>
@@ -960,6 +968,71 @@
                     </div>
                 </div>
 
+                <!-- User-facing library bridge.  It reuses the same API and
+                     visual language as the administrator console, but the
+                     account is taken from the current player session. -->
+                <div id="view-library-integration"
+                    class="absolute inset-0 overflow-y-auto overflow-x-hidden custom-scrollbar px-2 pt-2 pb-44 md:px-6 md:pt-6 md:pb-32 hidden opacity-0 transition-all duration-300">
+                    <div class="integration-page">
+                        <section class="integration-hero glass">
+                            <div>
+                                <span class="integration-eyebrow">PLAYLIST BRIDGE</span>
+                                <h1>曲库联动</h1>
+                                <p>用当前登录账户导入网络歌单，先比对共享曲库，再由音云下载补齐，最后同步到 Songloft。</p>
+                            </div>
+                            <div class="integration-hero-actions">
+                                <button id="integration-refresh-status-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshStatus()"><i class="fas fa-rotate"></i> 刷新状态</button>
+                                <button id="integration-refresh-yinyun-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshYinyunIndex()"><i class="fas fa-arrows-rotate"></i> 刷新音云索引</button>
+                                <button id="integration-refresh-songloft-btn" class="btn-secondary" type="button" onclick="LibraryIntegration.refreshSongloftIndex()"><i class="fas fa-arrows-rotate"></i> 刷新 Songloft 索引</button>
+                            </div>
+                        </section>
+                        <div class="integration-status-grid">
+                            <article class="integration-status-card glass integration-index-card"><span>音云索引</span><strong id="integration-yinyun-index-count">—</strong><small id="integration-yinyun-index-detail">共享音乐目录 · 尚未读取</small></article>
+                            <article class="integration-status-card glass integration-index-card"><span>SONGLOFT 索引</span><strong id="integration-songloft-index-count">—</strong><small id="integration-songloft-index-detail">共享音乐目录 · 尚未读取</small></article>
+                            <article class="integration-status-card glass"><span>SONGLOFT API</span><strong id="integration-native-status">待检测</strong><small id="integration-native-detail">原生 API</small></article>
+                            <article class="integration-status-card glass"><span>OPEN SUBSONIC</span><strong id="integration-subsonic-status">待检测</strong><small id="integration-subsonic-detail">只读回退</small></article>
+                            <article class="integration-status-card glass"><span>LIBRARY SCAN</span><strong id="integration-scan-status">待检测</strong><small id="integration-scan-detail">Songloft 扫描状态</small></article>
+                            <article class="integration-status-card glass"><span>DOWNLOAD QUEUE</span><strong id="integration-queue-status">0</strong><small id="integration-queue-detail">等待刷新</small></article>
+                        </div>
+                        <section class="integration-panel glass">
+                            <div class="integration-section-heading"><div><span class="step-badge">01</span><h2>导入网络歌单</h2></div><span class="integration-caption">网易云 · QQ · 酷我 · 酷狗 · 咪咕</span></div>
+                            <div class="integration-import-row">
+                                <label class="integration-grow"><span>歌单分享地址</span><input id="integration-playlist-url" class="form-input" placeholder="粘贴歌单分享链接"></label>
+                                <label><span>补齐音质</span><select id="integration-quality" class="form-input"><option value="flac">FLAC</option><option value="320k">320K</option><option value="128k">128K</option><option value="flac24bit">24bit FLAC</option><option value="hires">Hi-Res</option></select></label>
+                                <button id="integration-import-btn" class="btn-primary integration-submit integration-import-submit" type="button" onclick="LibraryIntegration.importPlaylist()"><i class="fas fa-link"></i><span>导入</span></button>
+                            </div>
+                            <div class="integration-history-row">
+                                <label class="integration-grow"><span>我的导入歌单</span><select id="integration-import-history" class="form-input" onchange="LibraryIntegration.onHistoryChange()"><option value="">导入成功后会显示在这里</option></select><small class="integration-field-help">按歌单名称选择；不需要记住内部记录 ID。</small></label>
+                                <div class="integration-history-actions"><button id="integration-open-history-btn" class="btn-primary integration-submit" type="button" onclick="LibraryIntegration.openSelectedImport()" disabled><i class="fas fa-folder-open"></i><span>打开歌单</span></button></div>
+                            </div>
+                        </section>
+                        <section id="integration-result-panel" class="integration-panel glass hidden">
+                            <div class="integration-section-heading"><div><span class="step-badge">02</span><h2 id="integration-result-title">匹配结果</h2></div><span id="integration-import-meta" class="integration-caption"></span></div>
+                            <div class="integration-count-grid">
+                                <button class="count-card is-all active" data-integration-filter="all" onclick="LibraryIntegration.setFilter('all')"><strong id="integration-count-total">0</strong><span>歌单歌曲</span></button>
+                                <button class="count-card is-matched count-card-provider" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')"><strong id="integration-count-yinyun">0</strong><span>音云找到</span></button>
+                                <button class="count-card is-matched count-card-provider" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')"><strong id="integration-count-songloft">0</strong><span>Songloft找到</span></button>
+                                <button class="count-card is-missing" data-integration-filter="missing" onclick="LibraryIntegration.setFilter('missing')"><strong id="integration-count-missing">0</strong><span>等待补齐</span></button>
+                                <button class="count-card is-ambiguous" data-integration-filter="ambiguous" onclick="LibraryIntegration.setFilter('ambiguous')"><strong id="integration-count-ambiguous">0</strong><span>需要确认</span></button>
+                            </div>
+                            <div class="integration-confirm-help"><i class="fas fa-circle-info"></i><span><strong>需要确认：</strong>两个候选版本分数接近，系统不会擅自选择。确认只记录你的版本选择，不会自动删除文件。</span></div>
+                            <div class="integration-result-toolbar"><label class="integration-check"><input id="integration-select-visible" type="checkbox" onchange="LibraryIntegration.toggleVisible(this.checked)"><span>选择当前缺失项</span></label><div class="integration-toolbar-actions"><span id="integration-selected-count" class="integration-caption">已选 0 首</span><div class="integration-complete-actions"><button id="integration-complete-selected" class="btn-secondary" type="button" onclick="LibraryIntegration.completeSelected()">手工补齐</button><button id="integration-complete-all" class="btn-primary" type="button" onclick="LibraryIntegration.completeAll()"><i class="fas fa-bolt"></i> 一键补齐全部缺失</button></div></div></div>
+                            <div class="integration-table-wrap"><table class="integration-table"><thead><tr><th></th><th>歌曲</th><th>专辑</th><th>音云索引</th><th>Songloft 索引</th><th>处理结果</th></tr></thead><tbody id="integration-result-body"><tr><td colspan="6" class="integration-empty">暂无匹配结果</td></tr></tbody></table></div>
+                        </section>
+                        <section class="integration-two-column">
+                            <div class="integration-panel glass">
+                                <div class="integration-section-heading"><div><span class="step-badge">03</span><h2>补齐队列</h2></div><div class="integration-queue-heading-actions"><span id="integration-queue-updated" class="integration-caption">尚未刷新</span><button class="btn-icon" title="立即刷新队列" onclick="LibraryIntegration.loadQueue()"><i class="fas fa-rotate"></i></button></div></div>
+                                <div id="integration-queue-summary" class="queue-summary"><div class="queue-chip status-downloading"><strong id="integration-queue-downloading">0</strong><span>下载中</span></div><div class="queue-chip status-waiting"><strong id="integration-queue-waiting">0</strong><span>等待</span></div><div class="queue-chip status-finished"><strong id="integration-queue-finished">0</strong><span>完成</span></div><div class="queue-chip status-exists"><strong id="integration-queue-exists">0</strong><span>已存在</span></div><div class="queue-chip status-error"><strong id="integration-queue-error">0</strong><span>失败</span></div></div><p class="integration-queue-history-note">统计保留队列历史；每行显示所属歌单、加入时间和完成/失败时间。</p><div id="integration-queue-list" class="queue-list"></div>
+                            </div>
+                            <div class="integration-panel glass">
+                                <div class="integration-section-heading"><div><span class="step-badge">04</span><h2>同步 Songloft 歌单</h2></div><span class="integration-caption">匹配后同步</span></div>
+                                <div class="integration-sync-grid"><div class="integration-playlist-control"><label><span>音云歌单</span><select id="integration-yinyun-playlist" class="form-input"><option value="">连接后加载</option></select></label><button id="integration-delete-yinyun-btn" class="btn-danger btn-xs" type="button" onclick="LibraryIntegration.deleteYinyunPlaylist()" disabled><i class="fas fa-trash"></i> 删除音云歌单</button></div><div class="integration-playlist-control"><label><span>Songloft 歌单</span><select id="integration-songloft-playlist" class="form-input"><option value="">连接后加载</option></select></label><button id="integration-delete-songloft-btn" class="btn-danger btn-xs" type="button" onclick="LibraryIntegration.deleteSongloftPlaylist()" disabled><i class="fas fa-trash"></i> 删除 Songloft 歌单</button></div><label><span>方向</span><select id="integration-sync-direction" class="form-input" onchange="LibraryIntegration.updateSyncMode()"><option value="push">音云 → Songloft</option><option value="pull">Songloft → 音云</option><option value="merge">双向合并</option></select></label><label><span>模式</span><select id="integration-sync-mode" class="form-input"><option value="merge">安全合并（只追加）</option><option value="replace">覆盖 Songloft（仅推送）</option></select></label></div>
+                                <div class="integration-sync-footer"><p>普通用户只能将自己的音云歌单推送到 Songloft；删除本地音乐仍需管理员。</p><button id="integration-sync-btn" class="btn-primary" type="button" onclick="LibraryIntegration.syncPlaylist()"><i class="fas fa-arrows-rotate"></i> 开始同步</button></div><pre id="integration-sync-result" class="integration-sync-result hidden"></pre>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+
                 <!-- Favorites View -->
                 <div id="view-favorites"
                     class="absolute inset-0 flex flex-col px-6 pt-6 md:px-12 md:pt-12 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300">
@@ -1421,12 +1494,32 @@
                                             class="ml-auto flex-shrink-0 px-4 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-lg shadow shadow-emerald-200/50 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5">
                                             <i class="fas fa-plus-circle"></i> 管理 / 添加
                                         </button>
+                                        <button id="settings-custom-source-toggle" type="button" onclick="toggleCustomSourceSection()"
+                                            class="shrink-0 px-3 py-1.5 t-bg-main border t-border-main rounded-lg text-xs t-text-muted hover:text-emerald-500 transition-colors flex items-center gap-1.5"
+                                            aria-expanded="true" aria-controls="settings-custom-sources-list">
+                                            <i class="fas fa-chevron-up"></i><span>收起</span>
+                                        </button>
                                     </div>
 
                                     <!-- 已上传的源列表 -->
-                                    <div id="settings-custom-sources-list" class="space-y-2">
+                                    <div id="settings-custom-sources-list" class="space-y-2 transition-all duration-200">
                                         <div class="text-xs t-text-muted text-center py-2">暂无数据 (JS未加载)</div>
                                     </div>
+                                </div>
+
+                                <div class="t-bg-panel rounded-xl border t-border-main p-4 hover:shadow-sm transition-shadow">
+                                    <div class="flex items-center justify-between gap-3">
+                                        <div><h3 class="font-bold text-emerald-500 flex items-center gap-2"><i class="fas fa-heart-pulse"></i> 曲源健康检查</h3><p class="text-xs t-text-muted mt-1">抽样测试已导入歌单的音源解析，不下载文件；可按周期检查并通过 message-pusher 推送结果。</p></div>
+                                        <button id="health-test-btn" type="button" onclick="runHealthCheckNow()" class="shrink-0 px-3 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold"><i class="fas fa-stethoscope mr-1"></i>立即测试</button>
+                                    </div>
+                                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 text-xs">
+                                        <label class="flex items-center gap-2 t-text-main"><input id="health-enabled" type="checkbox" onchange="saveHealthSettings()" class="accent-emerald-500">启用定期检查</label>
+                                        <label class="flex items-center gap-2 t-text-muted">间隔（分钟）<input id="health-interval" type="number" min="15" step="15" value="360" onchange="saveHealthSettings()" class="w-24 px-2 py-1 rounded border t-border-main t-bg-main"></label>
+                                        <label class="flex items-center gap-2 t-text-muted">每个歌单抽样<input id="health-sample-size" type="number" min="1" max="100" value="20" onchange="saveHealthSettings()" class="w-20 px-2 py-1 rounded border t-border-main t-bg-main">首</label>
+                                        <label class="flex items-center gap-2 t-text-main"><input id="health-notify" type="checkbox" onchange="saveHealthSettings()" class="accent-emerald-500">异常时推送</label>
+                                    </div>
+                                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3 text-xs"><input id="health-pusher-url" placeholder="message-pusher URL（可选）" onchange="saveHealthSettings()" class="px-2 py-1.5 rounded border t-border-main t-bg-main"><input id="health-pusher-token" type="password" placeholder="Token（留空保持不变）" onchange="saveHealthSettings()" class="px-2 py-1.5 rounded border t-border-main t-bg-main"><input id="health-pusher-channel" placeholder="channel（可选）" onchange="saveHealthSettings()" class="px-2 py-1.5 rounded border t-border-main t-bg-main"></div>
+                                    <div id="health-status" class="mt-3 text-xs t-text-muted">尚未测试</div>
                                 </div>
 
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1487,6 +1580,8 @@
                                             class="lm-select !w-full !py-2">
                                             <option value="search">搜索</option>
                                             <option value="songlist">歌单</option>
+                                            <option value="my-playlists">我的歌单</option>
+                                            <option value="library-integration">曲库联动</option>
                                             <option value="leaderboard">排行榜</option>
                                             <option value="favorites">我的收藏</option>
                                             <option value="localmusic">本地音乐</option>
@@ -2333,6 +2428,14 @@
                                             <option value="solid">纯色背景</option>
                                             <option value="dark">黑色背景</option>
                                         </select>
+                                    </div>
+
+                                    <!-- Energy saving mode -->
+                                    <div class="t-bg-panel rounded-xl border t-border-main p-4 hover:shadow-sm transition-shadow">
+                                        <div class="flex items-center justify-between gap-3">
+                                            <div><h4 class="text-sm font-bold t-text-main flex items-center"><i class="fas fa-leaf mr-2 text-emerald-500"></i>节能模式</h4><p class="text-xs t-text-muted mt-1">关闭波形、背景模糊和高频过渡动画，降低 Web 播放器的 GPU/CPU 占用；播放功能不受影响。</p></div>
+                                            <label class="relative inline-flex items-center cursor-pointer shrink-0"><input type="checkbox" id="setting-energy-saving" class="sr-only peer" onchange="updateSetting('energySavingMode', this.checked)"><div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500 transition-all"></div></label>
+                                        </div>
                                     </div>
 
                                     <!-- Footer Visualizer -->
@@ -4812,6 +4915,40 @@
         </div>
     </div>
 
+    <!-- Library bridge candidate picker and floating preview player.  They are
+         outside the scrollable view so a long result list can never cover the
+         close button or trap the compact player below another panel. -->
+    <div id="integration-candidate-modal" class="integration-candidate-modal hidden" role="dialog" aria-modal="true" aria-labelledby="integration-candidate-title">
+        <div class="integration-candidate-dialog glass">
+            <div class="integration-section-heading"><div><span class="step-badge">试听</span><h2 id="integration-candidate-title">选择下载版本</h2></div><button type="button" class="btn-icon" onclick="LibraryIntegration.closeCandidatePicker()" title="关闭"><i class="fas fa-times"></i></button></div>
+            <p id="integration-candidate-query" class="integration-caption"></p>
+            <div class="integration-candidate-searchbar"><label class="integration-candidate-query-field"><span>搜索关键字</span><input id="integration-candidate-query-input" class="form-input" type="search" autocomplete="off" placeholder="歌曲名 歌手"></label><button id="integration-candidate-search-btn" type="button" class="btn-primary btn-xs" onclick="LibraryIntegration.searchCandidates()"><i class="fas fa-search"></i> 搜索</button></div>
+            <div class="integration-candidate-toolbar"><label for="integration-candidate-source">搜索音源</label><select id="integration-candidate-source" class="form-input"></select><span id="integration-candidate-source-status" class="integration-caption"></span></div>
+            <section id="integration-local-candidate" class="integration-local-candidate hidden" aria-live="polite"><div class="integration-candidate-section-title"><span><i class="fas fa-hard-drive"></i> 本地曲库</span><small>当前文件，试听不会触发下载</small></div><div class="integration-local-candidate-row"><div class="integration-local-candidate-cover"><img id="integration-local-candidate-cover" src="/_player/assets/logo.svg" alt="本地歌曲封面"></div><div class="integration-local-candidate-copy"><strong id="integration-local-candidate-title">未找到本地歌曲</strong><small id="integration-local-candidate-meta">将直接搜索在线版本</small></div><button id="integration-local-preview-btn" type="button" class="btn-secondary btn-xs"><i class="fas fa-headphones"></i> 试听本地</button></div></section>
+            <div id="integration-online-candidate-divider" class="integration-candidate-divider"><span><i class="fas fa-cloud-arrow-down"></i> 在线搜索候选</span><small>点击搜索后加载；采用后会下载并替换本地文件</small></div>
+            <div id="integration-candidate-list" class="integration-candidate-list"><div class="integration-empty">请点击“搜索”加载候选版本。</div></div>
+        </div>
+    </div>
+    <div id="integration-preview-player" class="integration-preview-player hidden" aria-live="polite" role="region" aria-label="单曲试听播放器">
+        <div class="integration-preview-drag-handle" title="拖动播放器"><i class="fas fa-grip-lines"></i><span>试听</span></div>
+        <div class="integration-preview-heading"><span class="integration-preview-icon"><i class="fas fa-headphones"></i></span><div class="integration-preview-copy"><strong id="integration-preview-title">未选择试听</strong><small id="integration-preview-meta">点击候选版本或本地歌曲试听</small></div><span id="integration-preview-state" class="integration-preview-state">未加载</span><button id="integration-preview-close" type="button" class="integration-preview-close" aria-label="关闭试听播放器" title="关闭试听播放器"><i class="fas fa-times"></i></button></div>
+        <div class="integration-preview-controls"><button id="integration-preview-toggle" type="button" class="btn-secondary btn-xs" aria-label="播放试听"><i class="fas fa-play"></i><span>播放</span></button><input id="integration-preview-seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="试听进度"><span id="integration-preview-time" class="integration-preview-time">00:00 / 00:00</span></div><div class="integration-preview-progress" aria-hidden="true"><span id="integration-preview-progress-bar"></span></div><audio id="integration-preview-audio" class="integration-preview-audio" preload="none"></audio>
+    </div>
+
+    <!-- Required login gate.  The project agreement remains the first-run
+         modal; this dialog appears immediately after acceptance when no user
+         session is available. -->
+    <div id="required-login-modal" class="fixed inset-0 z-[150] hidden items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="required-login-title">
+        <div class="absolute inset-0 bg-black/70 backdrop-blur-md"></div>
+        <form id="required-login-form" class="relative w-full max-w-md t-bg-panel rounded-2xl border t-border-main shadow-2xl p-6" onsubmit="submitRequiredLogin(event)">
+            <div class="flex items-center gap-3 mb-2"><span class="w-10 h-10 rounded-xl bg-emerald-500 text-white flex items-center justify-center"><i class="fas fa-lock"></i></span><div><h2 id="required-login-title" class="text-xl font-bold t-text-main">请先登录</h2><p class="text-xs t-text-muted mt-1">登录后才能搜索、播放和维护个人歌单。</p></div></div>
+            <label class="block mt-5 text-sm t-text-muted">用户名<input id="required-login-user" class="w-full mt-1 px-3 py-2 rounded-lg t-bg-main border t-border-main" autocomplete="username" required></label>
+            <label class="block mt-3 text-sm t-text-muted">密码<input id="required-login-pass" type="password" class="w-full mt-1 px-3 py-2 rounded-lg t-bg-main border t-border-main" autocomplete="current-password" required></label>
+            <div id="required-login-status" class="min-h-5 mt-3 text-xs t-text-muted"></div>
+            <button id="required-login-submit" type="submit" class="w-full mt-3 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white font-bold"><i class="fas fa-right-to-bracket mr-1"></i> 登录</button>
+        </form>
+    </div>
+
     <!-- Project Agreement Modal Overlay -->
     <div id="project-agreement-modal"
         class="fixed inset-0 z-[100] flex items-center justify-center hidden transition-opacity duration-300">
@@ -4827,7 +4964,7 @@
             <h2 class="text-2xl font-black t-text-main text-center mb-4">项目使用声明</h2>
             <div
                 class="t-text-muted text-sm space-y-4 mb-8 leading-relaxed max-h-[40vh] overflow-y-auto pr-2 custom-scrollbar">
-                <p>欢迎使用音云 Web 播放器。本项目是一个 <a href="https://github.com/bobcc4/yinyun-lxserver" target="_blank"
+                    <p>欢迎使用音云 Web 播放器。本项目是一个 <a href="https://github.com/dlaq/yinyun-lxserver" target="_blank"
                         class="t-text-main hover:text-emerald-500 underline decoration-dotted transition-colors">开源</a>
                     的音乐同步管理辅助工具，在您开始使用之前，请知晓以下声明：</p>
                 <ul class="list-disc pl-5 space-y-2">
@@ -4875,6 +5012,7 @@
     <script src="/_player/js/download_manager.js"></script>
     <script src="/_player/js/local_music.js"></script>
     <script src="/_player/js/common_ui.js"></script>
+    <script src="/admin/js/library-integration.js"></script>
     <script src="/_player/app.js"></script>
 </body>
 

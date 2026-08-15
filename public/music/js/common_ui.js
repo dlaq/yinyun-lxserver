@@ -113,7 +113,11 @@ function acceptProjectAgreement() {
             // 协议弹窗是一次性确认，不应把用户从播放器带到“关于”。
             // 首次进入、刷新以及从管理台打开 Web 播放器都统一落到搜索页。
             // 详细协议仍可通过左侧“关于”菜单主动查看。
-            if (typeof switchTab === 'function') switchTab('search');
+            if (typeof switchTab === 'function') {
+                const target = window.pendingRequiredTab || 'search';
+                switchTab(target);
+                if (typeof showRequiredLoginModal === 'function' && typeof isUserLoggedIn === 'function' && !isUserLoggedIn()) showRequiredLoginModal();
+            }
         }, 300);
     }
 }
