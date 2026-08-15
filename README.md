@@ -8,7 +8,7 @@
   <h1>音云 Yinyun</h1> -->
   <p>
     <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build Status">
-    <img src="https://img.shields.io/badge/version-v1.5.4-blue?style=flat-square" alt="Version">
+    <img src="https://img.shields.io/badge/version-v1.5.6-blue?style=flat-square" alt="Version">
     <img src="https://img.shields.io/badge/node-%3E%3D22.12-green?style=flat-square" alt="Node Version">
     <img src="https://img.shields.io/github/license/dlaq/yinyun-lxserver?style=flat-square" alt="License">
     <br>
@@ -46,6 +46,8 @@
 ### Docker 镜像与 Compose 文件
 
 Docker 文件就在仓库根目录：[`Dockerfile`](Dockerfile)、[`.dockerignore`](.dockerignore) 和 [`docker-compose.yml`](docker-compose.yml)。GitHub Actions 使用仓库 Secrets `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN` 登录 Docker Hub，并在推送 `main` 或 `v*` 标签时构建多架构镜像；令牌不会出现在 README、镜像层或日志中。
+
+如果这是从上游 fork 的仓库，第一次使用时请打开 [Actions → Build and Push Docker Image](https://github.com/dlaq/yinyun-lxserver/actions/workflows/docker.yml)，按页面提示启用本仓库的 Actions；也可以点击 **Run workflow**、选择 `main` 手动构建。若 Actions 页面显示 “This workflow has no runs yet”，通常就是 fork 的 Actions 尚未启用，不能仅靠推送代码生成 Docker Hub 镜像。
 
 拉取最新镜像：
 
