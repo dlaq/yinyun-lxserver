@@ -2052,9 +2052,21 @@ function getSourceTag(source) {
         mg: 't-badge-pink border-pink-200 dark:border-pink-500/30'
     };
     const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', local: 'LOCAL', songloft: 'Songloft', subsonic: 'Subsonic' };
-    const color = colors[source] || 't-bg-main t-text-muted t-border-main';
-    const name = names[source] || source.toUpperCase();
-    return `<span class="flex-shrink-0 px-1 py-0 rounded text-[10px] font-bold border ${color} mr-1">${name}</span>`;
+    const descriptions = {
+        kw: '在线来源：酷我音乐',
+        kg: '在线来源：酷狗音乐',
+        tx: '在线来源：QQ 音乐',
+        wy: '在线来源：网易云音乐',
+        mg: '在线来源：咪咕音乐',
+        local: '本地来源：共享音乐目录中的文件（音云/Songloft 本地曲库）',
+        songloft: '本地来源：Songloft 共享曲库索引',
+        subsonic: '本地来源：Subsonic/OpenSubsonic 曲库'
+    };
+    const sourceKey = String(source || '').toLowerCase();
+    const color = colors[sourceKey] || 't-bg-main t-text-muted t-border-main';
+    const name = names[sourceKey] || sourceKey.toUpperCase() || '未知来源';
+    const title = descriptions[sourceKey] || `来源：${name}`;
+    return `<span title="${escapeHtmlText(title)}" class="flex-shrink-0 px-1 py-0 rounded text-[10px] font-bold border ${color} mr-1">${escapeHtmlText(name)}</span>`;
 }
 window.getSourceTag = getSourceTag;
 
