@@ -53,6 +53,8 @@ const mapSong = (song: any): IntegrationTrack => ({
   duration: Number(song?.duration || 0) || undefined,
   artworkUrl: song?.artworkUrl || song?.coverUrl || song?.cover_url || song?.albumArt || song?.album_art || song?.albumCover || song?.album_cover || song?.albumArtUrl || song?.cover || song?.image || song?.picUrl || song?.pic_url || song?.img || undefined,
   relativePath: relativeMusicPath(song?.file_path || song?.filePath || song?.path || ''),
+  isLocal: Boolean(song?.file_path || song?.filePath || song?.path),
+  folder: Boolean(song?.file_path || song?.filePath || song?.path) ? 'music' : undefined,
   isrc: song?.isrc || '',
   fingerprint: song?.fingerprint || '',
   source: 'songloft',

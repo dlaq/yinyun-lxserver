@@ -1537,14 +1537,19 @@ export const getCacheCover = async (filename: string, username?: string, preferr
 /**
  * Remove a specific cache file
  */
-export const removeCacheFile = (filename: string, username?: string, requestedFolder?: CacheFolder): RemoveCacheFileResult => {
+export const removeCacheFile = (
+    filename: string,
+    username?: string,
+    requestedFolder?: CacheFolder,
+    preferredLocation?: string,
+): RemoveCacheFileResult => {
     if (!filename || typeof filename !== 'string') throw new Error('Invalid filename')
     if (requestedFolder && requestedFolder !== 'cache' && requestedFolder !== 'music') throw new Error('Invalid folder')
 
     const normalizedUsername = normalizeCacheUsername(username)
     const candidateFolders: CacheFolder[] = requestedFolder ? [requestedFolder] : ['cache', 'music']
     const matches = candidateFolders.map(folder => {
-        const dir = getCacheDir(normalizedUsername, folder === 'music')
+        const dir = getCacheDir(normalizedUsername, folder === 'music', preferredLocation)
         const filePath = resolveCacheRelativePath(dir, filename)
         return filePath && fs.existsSync(filePath) ? { folder, dir, filePath } : null
     }).filter((entry): entry is { folder: CacheFolder; dir: string; filePath: string } => entry !== null)
@@ -1557,7 +1562,7 @@ export const removeCacheFile = (filename: string, username?: string, requestedFo
     if (matches.length === 0) return { deleted: false }
 
     const { folder, dir, filePath } = matches[0]
-    const item = indexManager.getAll(normalizedUsername, folder).find(i => i.filename === filename)
+    const item = indexManager.getAll(normalizedUsername, folder, preferredLocation).find(i => i.filename === filename)
     let coverCacheHash = ''
     try {
         coverCacheHash = getCoverCacheHash(filename, fs.statSync(filePath))
@@ -1592,12 +1597,12 @@ export const removeCacheFile = (filename: string, username?: string, requestedFo
         }
     }
 
-    if (item) indexManager.remove(normalizedUsername, item.id, folder, item.quality)
+    if (item) indexManager.remove(normalizedUsername, item.id, folder, item.quality, preferredLocation)
 
     // Cover cache is shared by filename. Preserve it while the same relative file
     // still exists in the other root so deleting cache does not affect downloads.
     const otherFolder: CacheFolder = folder === 'cache' ? 'music' : 'cache'
-    const otherDir = getCacheDir(normalizedUsername, otherFolder === 'music')
+    const otherDir = getCacheDir(normalizedUsername, otherFolder === 'music', preferredLocation)
     const otherPath = resolveCacheRelativePath(otherDir, filename)
     const hasCounterpart = !!otherPath && fs.existsSync(otherPath)
     if (!hasCounterpart) {

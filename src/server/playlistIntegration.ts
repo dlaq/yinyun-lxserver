@@ -11,6 +11,10 @@ export type IntegrationTrack = {
   album?: string
   duration?: number
   relativePath?: string
+  /** Present when the candidate came from Yinyun's local file index. */
+  isLocal?: boolean
+  folder?: 'cache' | 'music' | string
+  storageLocation?: string
   isrc?: string
   fingerprint?: string
   artworkUrl?: string
@@ -541,6 +545,9 @@ export const toIntegrationTrack = (value: any): IntegrationTrack => ({
   album: String(value?.album || value?.albumName || ''),
   duration: durationSeconds(value?.duration ?? value?.interval),
   relativePath: value?.relativePath || value?._localFilename || value?.file_path,
+  isLocal: Boolean(value?.isLocal || value?.folder || value?.storageLocation || value?.filename),
+  folder: value?.folder,
+  storageLocation: value?.storageLocation || value?._localStorageLocation,
   isrc: value?.isrc,
   fingerprint: value?.fingerprint,
   artworkUrl: value?.artworkUrl || value?.coverUrl || value?.cover_url || value?.picUrl || value?.pic_url || value?.img || value?.raw?.artworkUrl || value?.raw?.coverUrl || value?.raw?.cover_url || undefined,

@@ -603,15 +603,26 @@
                             <div class="integration-candidate-dialog glass">
                                 <div class="integration-section-heading"><div><span class="step-badge">试听</span><h2 id="integration-candidate-title">选择下载版本</h2></div><button type="button" class="btn-icon" onclick="LibraryIntegration.closeCandidatePicker()" title="关闭"><i class="fas fa-times"></i></button></div>
                                 <p id="integration-candidate-query" class="integration-caption"></p>
-                                <div class="integration-candidate-toolbar"><label for="integration-candidate-source">搜索音源</label><select id="integration-candidate-source" class="form-input"></select><span id="integration-candidate-source-status" class="integration-caption"></span></div>
-                                <div id="integration-candidate-list" class="integration-candidate-list"><div class="integration-empty">正在搜索候选版本…</div></div>
-                                <div id="integration-preview-player" class="integration-preview-player hidden" aria-live="polite">
-                                    <div class="integration-preview-heading"><span class="integration-preview-icon"><i class="fas fa-headphones"></i></span><div class="integration-preview-copy"><strong id="integration-preview-title">未选择试听</strong><small id="integration-preview-meta">点击任一“试听”加载播放地址</small></div><span id="integration-preview-state" class="integration-preview-state">未加载</span></div>
-                                    <div class="integration-preview-controls"><button id="integration-preview-toggle" type="button" class="btn-secondary btn-xs" aria-label="播放试听"><i class="fas fa-play"></i><span>播放</span></button><input id="integration-preview-seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="试听进度"><span id="integration-preview-time" class="integration-preview-time">00:00 / 00:00</span></div>
-                                    <div class="integration-preview-progress" aria-hidden="true"><span id="integration-preview-progress-bar"></span></div>
-                                    <audio id="integration-preview-audio" class="integration-preview-audio" controls preload="none"></audio>
+                                <div class="integration-candidate-searchbar">
+                                    <label class="integration-candidate-query-field"><span>搜索关键字</span><input id="integration-candidate-query-input" class="form-input" type="search" autocomplete="off" placeholder="歌曲名 歌手"></label>
+                                    <button id="integration-candidate-search-btn" type="button" class="btn-primary btn-xs" onclick="LibraryIntegration.searchCandidates()"><i class="fas fa-search"></i> 搜索</button>
                                 </div>
+                                <div class="integration-candidate-toolbar"><label for="integration-candidate-source">搜索音源</label><select id="integration-candidate-source" class="form-input"></select><span id="integration-candidate-source-status" class="integration-caption"></span></div>
+                                <section id="integration-local-candidate" class="integration-local-candidate hidden" aria-live="polite">
+                                    <div class="integration-candidate-section-title"><span><i class="fas fa-hard-drive"></i> 本地曲库</span><small>当前文件，试听不会触发下载</small></div>
+                                    <div class="integration-local-candidate-row"><div class="integration-local-candidate-cover"><img id="integration-local-candidate-cover" src="/_player/assets/logo.svg" alt="本地歌曲封面"></div><div class="integration-local-candidate-copy"><strong id="integration-local-candidate-title">未找到本地歌曲</strong><small id="integration-local-candidate-meta">将直接搜索在线版本</small></div><button id="integration-local-preview-btn" type="button" class="btn-secondary btn-xs"><i class="fas fa-headphones"></i> 试听本地</button></div>
+                                </section>
+                                <div id="integration-online-candidate-divider" class="integration-candidate-divider"><span><i class="fas fa-cloud-arrow-down"></i> 在线搜索候选</span><small>采用后会下载并替换本地文件</small></div>
+                                <div id="integration-candidate-list" class="integration-candidate-list"><div class="integration-empty">正在搜索候选版本…</div></div>
                             </div>
+                        </div>
+
+                        <div id="integration-preview-player" class="integration-preview-player hidden" aria-live="polite" role="region" aria-label="单曲试听播放器">
+                            <div class="integration-preview-drag-handle" title="拖动播放器"><i class="fas fa-grip-lines"></i><span>试听</span></div>
+                            <div class="integration-preview-heading"><span class="integration-preview-icon"><i class="fas fa-headphones"></i></span><div class="integration-preview-copy"><strong id="integration-preview-title">未选择试听</strong><small id="integration-preview-meta">点击候选版本或本地歌曲试听</small></div><span id="integration-preview-state" class="integration-preview-state">未加载</span><button id="integration-preview-close" type="button" class="integration-preview-close" aria-label="关闭试听播放器" title="关闭试听播放器"><i class="fas fa-times"></i></button></div>
+                            <div class="integration-preview-controls"><button id="integration-preview-toggle" type="button" class="btn-secondary btn-xs" aria-label="播放试听"><i class="fas fa-play"></i><span>播放</span></button><input id="integration-preview-seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="试听进度"><span id="integration-preview-time" class="integration-preview-time">00:00 / 00:00</span></div>
+                            <div class="integration-preview-progress" aria-hidden="true"><span id="integration-preview-progress-bar"></span></div>
+                            <audio id="integration-preview-audio" class="integration-preview-audio" preload="none"></audio>
                         </div>
 
                         <section class="integration-two-column">

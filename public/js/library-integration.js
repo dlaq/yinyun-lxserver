@@ -20,6 +20,9 @@
         candidateQuery: '',
         candidateContext: 'import',
         candidateResults: [],
+        localCandidate: null,
+        previewDragBound: false,
+        candidateSearchSerial: 0,
         previewBound: false,
         queueLoading: false,
         panelActive: false,
@@ -415,6 +418,9 @@
             filename: raw.filename || '',
             streamPath: raw.streamPath || raw.streamUrl || '',
             localTrackId: raw.localTrackId || '',
+            isLocal: Boolean(raw.isLocal || raw.folder || raw.storageLocation || raw.localTrackId),
+            folder: raw.folder || '',
+            storageLocation: raw.storageLocation || '',
             isrc: raw.isrc || '',
             fingerprint: raw.fingerprint || '',
             raw: raw.raw || raw,
@@ -484,18 +490,61 @@
         audio.addEventListener('pause', () => { if (!audio.ended) setPreviewState('已暂停', 'is-ready'); setToggle(false); });
         audio.addEventListener('ended', () => { setPreviewState('播放结束', ''); setToggle(false); updatePreviewProgress(); });
         audio.addEventListener('error', () => setPreviewState('加载失败', 'is-error'));
+
+        const close = el('integration-preview-close');
+        close?.addEventListener('click', () => closePreviewPlayer());
+
+        // The preview player is intentionally independent from the main web
+        // player.  Dragging its small handle changes only this floating panel;
+        // it never changes the global playlist or advances to another song.
+        const panel = el('integration-preview-player');
+        const handle = panel?.querySelector('.integration-preview-drag-handle');
+        if (panel && handle && !state.previewDragBound) {
+            const clampToViewport = () => {
+                if (panel.classList.contains('hidden')) return;
+                const rect = panel.getBoundingClientRect();
+                const maxLeft = Math.max(8, window.innerWidth - panel.offsetWidth - 8);
+                const maxTop = Math.max(8, window.innerHeight - panel.offsetHeight - 8);
+                const left = Math.min(maxLeft, Math.max(8, rect.left));
+                const top = Math.min(maxTop, Math.max(8, rect.top));
+                panel.style.left = `${left}px`;
+                panel.style.top = `${top}px`;
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+            };
+            let dragging = false;
+            let offsetX = 0;
+            let offsetY = 0;
+            handle.addEventListener('pointerdown', event => {
+                dragging = true;
+                const rect = panel.getBoundingClientRect();
+                offsetX = event.clientX - rect.left;
+                offsetY = event.clientY - rect.top;
+                panel.style.left = `${rect.left}px`;
+                panel.style.top = `${rect.top}px`;
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+                handle.setPointerCapture?.(event.pointerId);
+                event.preventDefault();
+            });
+            handle.addEventListener('pointermove', event => {
+                if (!dragging) return;
+                const maxLeft = Math.max(8, window.innerWidth - panel.offsetWidth - 8);
+                const maxTop = Math.max(8, window.innerHeight - panel.offsetHeight - 8);
+                panel.style.left = `${Math.min(maxLeft, Math.max(8, event.clientX - offsetX))}px`;
+                panel.style.top = `${Math.min(maxTop, Math.max(8, event.clientY - offsetY))}px`;
+            });
+            const stopDragging = () => { dragging = false; };
+            handle.addEventListener('pointerup', stopDragging);
+            handle.addEventListener('pointercancel', stopDragging);
+            window.addEventListener('resize', clampToViewport, { passive: true });
+            state.previewDragBound = true;
+        }
         state.previewBound = true;
     }
 
     function showPreviewPlayer(candidate) {
         bindPreviewPlayer();
-        const modal = el('integration-candidate-modal');
-        const wasHidden = Boolean(modal?.classList.contains('hidden'));
-        if (modal && wasHidden) {
-            modal.classList.remove('hidden');
-            el('integration-candidate-title').textContent = '试听歌曲';
-            el('integration-candidate-query').textContent = '正在准备本地或在线试听地址';
-        }
         const player = el('integration-preview-player');
         if (player) player.classList.remove('hidden');
         const title = el('integration-preview-title');
@@ -506,21 +555,96 @@
         setPreviewState('准备中', 'is-loading');
     }
 
+    function isLikelyLocalCandidate(candidate) {
+        const source = String(candidate?.source || '').toLowerCase();
+        return Boolean(candidate?.isLocal || candidate?.folder || candidate?.storageLocation || candidate?.localTrackId)
+            || ['local', 'songloft', 'subsonic', 'navidrome', 'musichub'].includes(source);
+    }
+
+    function findLocalCandidate(item, preferredProvider = '') {
+        const matches = [
+            preferredProvider ? item?.[preferredProvider] : null,
+            item?.yinyun,
+            item?.songloft,
+        ].filter(Boolean);
+        for (const match of matches) {
+            const candidates = [
+                ...(Array.isArray(match.candidates) ? match.candidates.map(entry => entry?.track || entry) : []),
+                match.candidate,
+            ].filter(Boolean);
+            const local = candidates.find(isLikelyLocalCandidate);
+            if (local) return compactCandidate({ ...local, isLocal: true }, local.source || 'local');
+        }
+        return null;
+    }
+
+    function renderLocalCandidate() {
+        const section = el('integration-local-candidate');
+        const divider = el('integration-online-candidate-divider');
+        const candidate = state.localCandidate;
+        if (!section) return;
+        if (!candidate) {
+            section.classList.add('hidden');
+            if (divider) {
+                const note = divider.querySelector('small');
+                if (note) note.textContent = '本地未找到；采用后下载并加入歌单';
+            }
+            return;
+        }
+        section.classList.remove('hidden');
+        const cover = el('integration-local-candidate-cover');
+        if (cover) cover.src = candidate.artworkUrl || '/_player/assets/logo.svg';
+        const title = el('integration-local-candidate-title');
+        if (title) title.textContent = candidate.title || '本地歌曲';
+        const meta = el('integration-local-candidate-meta');
+        if (meta) {
+            const path = candidate.relativePath || candidate.filename || '';
+            meta.textContent = [candidate.artist, candidate.album, path ? `文件：${path}` : '本地曲库'].filter(Boolean).join(' · ');
+        }
+        const button = el('integration-local-preview-btn');
+        if (button) {
+            button.onclick = () => previewCandidate(candidate);
+            button.disabled = false;
+        }
+        if (divider) {
+            const note = divider.querySelector('small');
+            if (note) note.textContent = '采用在线版本后会下载新文件，完成后删除当前本地文件并同步两端歌单';
+        }
+    }
+
+    function closePreviewPlayer() {
+        const audio = el('integration-preview-audio');
+        if (audio) {
+            audio.pause();
+            audio.removeAttribute('src');
+            audio.load();
+        }
+        el('integration-preview-player')?.classList.add('hidden');
+        el('integration-preview-title') && (el('integration-preview-title').textContent = '未选择试听');
+        el('integration-preview-meta') && (el('integration-preview-meta').textContent = '点击候选版本或本地歌曲试听');
+        el('integration-preview-seek') && (el('integration-preview-seek').value = '0');
+        el('integration-preview-progress-bar') && (el('integration-preview-progress-bar').style.width = '0%');
+        el('integration-preview-time') && (el('integration-preview-time').textContent = '00:00 / 00:00');
+        setPreviewState('未加载');
+    }
+
     async function previewCandidate(track) {
         const candidate = compactCandidate(track, state.importData?.source || '');
-        if (!candidate.source) return notifyError(new Error('候选歌曲缺少音源'));
+        if (!candidate.source && !candidate.isLocal) return notifyError(new Error('候选歌曲缺少音源'));
         const audio = el('integration-preview-audio');
         if (!audio) return;
         showPreviewPlayer(candidate);
         audio.removeAttribute('src');
+        audio.loop = false;
         audio.load();
         try {
-            if (['local', 'songloft', 'subsonic', 'navidrome', 'musichub'].includes(String(candidate.source).toLowerCase())) {
+            if (isLikelyLocalCandidate(candidate)) {
                 // 本地候选优先使用索引返回的真实 track id/path；老记录没有这些字段时，
                 // 再用标题、艺术家和专辑逐级查找，绝不把搜索结果第一首当作试听文件。
                 let rows = [];
-                if (candidate.localTrackId) {
-                    const direct = await api(`/api/v1/library/tracks/${encodeURIComponent(candidate.localTrackId)}/stream-token`, { method: 'POST' }).catch(() => null);
+                const localTrackId = candidate.localTrackId || candidate.id;
+                if (localTrackId) {
+                    const direct = await api(`/api/v1/library/tracks/${encodeURIComponent(localTrackId)}/stream-token`, { method: 'POST' }).catch(() => null);
                     if (direct?.path) {
                         audio.src = direct.path;
                         audio.load();
@@ -579,19 +703,11 @@
     function closeCandidatePicker() {
         const modal = el('integration-candidate-modal');
         if (modal) modal.classList.add('hidden');
-        const audio = el('integration-preview-audio');
-        if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); }
-        el('integration-preview-player')?.classList.add('hidden');
-        el('integration-preview-title') && (el('integration-preview-title').textContent = '未选择试听');
-        el('integration-preview-meta') && (el('integration-preview-meta').textContent = '点击任一“试听”加载播放地址');
-        el('integration-preview-seek') && (el('integration-preview-seek').value = '0');
-        el('integration-preview-progress-bar') && (el('integration-preview-progress-bar').style.width = '0%');
-        el('integration-preview-time') && (el('integration-preview-time').textContent = '00:00 / 00:00');
-        setPreviewState('未加载');
         state.candidateIndex = -1;
         state.candidateQueueId = '';
         state.candidateContext = 'import';
         state.candidateResults = [];
+        state.localCandidate = null;
     }
 
     function selectDownloadCandidate(index, track) {
@@ -614,15 +730,19 @@
                 if (typeof showSuccess === 'function') showSuccess(data?.sourceChanged ? '已换源并重新加入下载队列' : '已重新加入下载队列');
             }).catch(notifyError);
         }
-        state.downloadSelections.set(Number(index), candidate);
+        const replacingLocal = Boolean(state.localCandidate && isLikelyLocalCandidate(state.localCandidate));
+        const selection = { ...candidate, replaceLocal: replacingLocal };
+        state.downloadSelections.set(Number(index), selection);
         state.selected.add(Number(index));
         closeCandidatePicker();
         renderRows();
-        if (typeof showSuccess === 'function') showSuccess(`第 ${Number(index) + 1} 首已选择下载版本，可点击手工补齐加入队列`);
+        if (typeof showSuccess === 'function') showSuccess(replacingLocal
+            ? `第 ${Number(index) + 1} 首已选择替换版本；下载完成后将删除原文件并同步歌单`
+            : `第 ${Number(index) + 1} 首已选择下载版本，可点击手工补齐加入队列`);
     }
 
     function sourceLabel(source) {
-        return ({ aggregate: '聚合', wy: '网易云', tx: 'QQ音乐', kw: '酷我', kg: '酷狗', mg: '咪咕', bd: '百度' })[source] || String(source || '').toUpperCase();
+        return ({ aggregate: '聚合', local: '本地曲库', wy: '网易云', tx: 'QQ音乐', kw: '酷我', kg: '酷狗', mg: '咪咕', bd: '百度' })[source] || String(source || '').toUpperCase();
     }
 
     async function loadCandidateSources() {
@@ -638,13 +758,24 @@
     async function searchCandidates() {
         const list = el('integration-candidate-list');
         const source = state.candidateSource || 'aggregate';
-        const query = state.candidateQuery;
-        if (!list || !query) return;
+        const queryInput = el('integration-candidate-query-input');
+        const query = String(queryInput?.value ?? state.candidateQuery ?? '').trim();
+        if (queryInput) queryInput.value = query;
+        if (query) state.candidateQuery = query;
+        if (!list || !query) {
+            if (list) list.innerHTML = '<div class="integration-empty">请输入搜索关键字。</div>';
+            return;
+        }
+        const serial = ++state.candidateSearchSerial;
+        const searchButton = el('integration-candidate-search-btn');
+        if (searchButton) searchButton.disabled = true;
+        el('integration-candidate-query') && (el('integration-candidate-query').textContent = `搜索：${query}`);
         list.innerHTML = '<div class="integration-empty"><i class="fas fa-circle-notch fa-spin"></i> 正在搜索候选版本…</div>';
         const status = el('integration-candidate-source-status');
         if (status) status.textContent = `音源：${sourceLabel(source)}`;
         try {
             const payload = await api(`/api/v1/search?query=${encodeURIComponent(query)}&source=${encodeURIComponent(source)}&type=song&limit=20&page=1`);
+            if (serial !== state.candidateSearchSerial) return;
             const results = Array.isArray(payload) ? payload : (payload?.items || payload?.list || []);
             state.candidateResults = results.map(raw => compactCandidate(raw, source));
             if (!state.candidateResults.length) {
@@ -658,33 +789,48 @@
             [...list.querySelectorAll('[data-candidate-index]')].forEach(button => button.addEventListener('click', () => previewCandidate(state.candidateResults[Number(button.dataset.candidateIndex)])));
             [...list.querySelectorAll('[data-select-index]')].forEach(button => button.addEventListener('click', () => selectDownloadCandidate(state.candidateIndex, state.candidateResults[Number(button.dataset.selectIndex)])));
         } catch (error) {
+            if (serial !== state.candidateSearchSerial) return;
             state.candidateResults = [];
             list.innerHTML = `<div class="integration-empty">${escapeHtml(error.message || String(error))}</div>`;
+        } finally {
+            if (serial === state.candidateSearchSerial && searchButton) searchButton.disabled = false;
         }
     }
 
-    async function openCandidatePicker(index) {
+    async function openCandidatePicker(index, options = {}) {
         const item = (state.importData?.items || []).find(row => Number(row.index) === Number(index));
         if (!item) return;
         const modal = el('integration-candidate-modal');
         const list = el('integration-candidate-list');
-        const query = `${item.source?.title || ''} ${item.source?.artist || ''}`.trim();
+        const localCandidate = options.localCandidate ? compactCandidate({ ...options.localCandidate, isLocal: true }, options.localCandidate.source || 'local') : findLocalCandidate(item, options.provider);
+        const query = `${item.source?.title || localCandidate?.title || ''} ${item.source?.artist || localCandidate?.artist || ''}`.trim();
         if (!modal || !list) return;
         state.candidateContext = 'import';
         state.candidateQueueId = '';
         state.candidateIndex = Number(index);
         state.candidateQuery = query;
         state.candidateSource = 'aggregate';
+        state.localCandidate = localCandidate;
         modal.classList.remove('hidden');
-        el('integration-candidate-title').textContent = `选择第 ${Number(index) + 1} 首下载版本`;
+        el('integration-candidate-title').textContent = item.replaceable || localCandidate ? `试听/替换第 ${Number(index) + 1} 首` : `选择第 ${Number(index) + 1} 首下载版本`;
         el('integration-candidate-query').textContent = `搜索：${query}`;
+        const queryInput = el('integration-candidate-query-input');
+        if (queryInput) {
+            queryInput.value = query;
+            queryInput.onkeydown = event => {
+                if (event.key === 'Enter') { event.preventDefault(); searchCandidates(); }
+            };
+        }
+        renderLocalCandidate();
         const sourceSelect = el('integration-candidate-source');
         if (sourceSelect) {
             sourceSelect.innerHTML = (await loadCandidateSources()).map(source => `<option value="${escapeHtml(source)}">${escapeHtml(sourceLabel(source))}</option>`).join('');
             sourceSelect.value = 'aggregate';
             sourceSelect.onchange = () => { state.candidateSource = sourceSelect.value; searchCandidates(); };
         }
-        await searchCandidates();
+        const searchPromise = searchCandidates();
+        if (options.previewLocal && localCandidate) await previewCandidate(localCandidate);
+        await searchPromise;
     }
 
     async function openQueueSourcePicker(id) {
@@ -699,9 +845,18 @@
         state.candidateIndex = -1;
         state.candidateQuery = query;
         state.candidateSource = 'aggregate';
+        state.localCandidate = null;
         modal.classList.remove('hidden');
         el('integration-candidate-title').textContent = '为失败任务选择下载版本';
         el('integration-candidate-query').textContent = `搜索：${query}`;
+        const queryInput = el('integration-candidate-query-input');
+        if (queryInput) {
+            queryInput.value = query;
+            queryInput.onkeydown = event => {
+                if (event.key === 'Enter') { event.preventDefault(); searchCandidates(); }
+            };
+        }
+        renderLocalCandidate();
         const sourceSelect = el('integration-candidate-source');
         if (sourceSelect) {
             sourceSelect.innerHTML = (await loadCandidateSources()).map(source => `<option value="${escapeHtml(source)}">${escapeHtml(sourceLabel(source))}</option>`).join('');
@@ -724,8 +879,8 @@
             const canSelect = item.downloadable !== false && (item.status === 'missing' || (item.status === 'ambiguous' && Boolean(selected)));
             const decision = item.status === 'matched' ? (item.matchedBy === 'songloft' ? '共享文件已存在，等待音云索引' : '音云已收录') : item.status === 'ambiguous' ? '需要人工确认' : '可加入音云下载';
             const confirmButtons = item.status === 'ambiguous' ? `<div class="integration-confirm-actions">${item.yinyun?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'yinyun')" title="使用音云候选">采用音云</button>` : ''}${item.songloft?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'songloft')" title="使用 Songloft 候选">采用 Songloft</button>` : ''}</div>` : '';
-            const manualButton = item.status !== 'matched' ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.openCandidatePicker(${Number(item.index)})"><i class="fas fa-headphones"></i> ${selected ? '更换版本' : '选择版本'}</button>` : '';
-            const selectionText = selected ? `<small class="integration-match-source">已选：${escapeHtml(selected.title)} · ${escapeHtml(selected.artist)}</small>` : '';
+            const manualButton = item.status !== 'matched' || item.replaceable ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.openCandidatePicker(${Number(item.index)})"><i class="fas fa-headphones"></i> ${selected ? '更换版本' : item.replaceable ? '替换版本' : '选择版本'}</button>` : '';
+            const selectionText = selected ? `<small class="integration-match-source">${selected.replaceLocal ? '已选替换：' : '已选：'}${escapeHtml(selected.title)} · ${escapeHtml(selected.artist)}</small>` : '';
             return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun')}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft')}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${selectionText}${manualButton}${confirmButtons}</td></tr>`;
         }).join('') : '<tr><td colspan="6" class="integration-empty">当前筛选没有歌曲</td></tr>';
         document.querySelectorAll('[data-integration-filter]').forEach(button => button.classList.toggle('active', button.dataset.integrationFilter === state.filter));
@@ -789,7 +944,7 @@
         const match = item?.[provider];
         const candidate = match?.candidates?.[Number(candidateIndex)]?.track || match?.candidate;
         if (!candidate) return notifyError(new Error('当前来源没有可试听的候选'));
-        return previewCandidate(candidate);
+        return openCandidatePicker(index, { provider, localCandidate: candidate, previewLocal: true });
     }
 
     async function triggerScan() {
@@ -928,6 +1083,6 @@
         setFilter, toggleItem, toggleVisible, completeSelected, completeAll,
         triggerScan, refreshBothIndexes, refreshYinyunIndex, refreshSongloftIndex, resolveItem, updateSyncMode, syncPlaylist,
         deleteYinyunPlaylist, deleteSongloftPlaylist, openCandidatePicker, closeCandidatePicker,
-        previewCandidate, previewLocalCandidate, previewQueueItem, openQueueSourcePicker, setActive,
+        previewCandidate, previewLocalCandidate, previewQueueItem, openQueueSourcePicker, searchCandidates, closePreviewPlayer, setActive,
     };
 })();

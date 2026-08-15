@@ -29,6 +29,8 @@ export interface ServerDownloadTask {
   playlistName?: string
   playlistId?: string
   playlistImportId?: string
+  /** Explicit local-file replacement metadata for playlist completion. */
+  replacement?: any
   queuedAt: number
   startedAt?: number
   completedAt?: number
@@ -50,6 +52,7 @@ interface QueueInput {
   playlistName?: string
   playlistId?: string
   playlistImportId?: string
+  replacement?: any
   queuedAt?: number | string
 }
 
@@ -186,6 +189,7 @@ const loadTasks = () => {
         playlistName: raw.playlistName ? String(raw.playlistName) : undefined,
         playlistId: raw.playlistId ? String(raw.playlistId) : undefined,
         playlistImportId: raw.playlistImportId ? String(raw.playlistImportId) : undefined,
+        replacement: raw.replacement && typeof raw.replacement === 'object' ? raw.replacement : undefined,
         queuedAt: normalizeTimestamp(raw.queuedAt, normalizeTimestamp(raw.createdAt, now)),
         startedAt: raw.startedAt ? normalizeTimestamp(raw.startedAt, now) : undefined,
         completedAt: raw.completedAt ? normalizeTimestamp(raw.completedAt, now) : (['finished', 'exists'].includes(status) ? normalizeTimestamp(raw.updatedAt, now) : undefined),
@@ -224,6 +228,7 @@ const getPublicTask = (task: ServerDownloadTask) => {
     playlistName: task.playlistName || task.songInfo?.playlistName || task.songInfo?.playlist,
     playlistId: task.playlistId,
     playlistImportId: task.playlistImportId,
+    replacement: task.replacement,
     queuedAt: task.queuedAt || task.createdAt,
     startedAt: task.startedAt,
     completedAt: task.completedAt,
@@ -386,6 +391,7 @@ export const enqueue = (username: string, inputs: QueueInput[]) => {
       existing.playlistName = input.playlistName ? String(input.playlistName) : undefined
       existing.playlistId = input.playlistId ? String(input.playlistId) : undefined
       existing.playlistImportId = input.playlistImportId ? String(input.playlistImportId) : undefined
+      existing.replacement = input.replacement && typeof input.replacement === 'object' ? input.replacement : undefined
       existing.queuedAt = normalizeTimestamp(input.queuedAt, now)
       existing.startedAt = undefined
       existing.completedAt = undefined
@@ -412,6 +418,7 @@ export const enqueue = (username: string, inputs: QueueInput[]) => {
       playlistName: input.playlistName ? String(input.playlistName) : undefined,
       playlistId: input.playlistId ? String(input.playlistId) : undefined,
       playlistImportId: input.playlistImportId ? String(input.playlistImportId) : undefined,
+      replacement: input.replacement && typeof input.replacement === 'object' ? input.replacement : undefined,
       queuedAt: normalizeTimestamp(input.queuedAt, now),
       retryCount: 0,
       createdAt: now, updatedAt: now,

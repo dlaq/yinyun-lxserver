@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import fs from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { getUserSpace } from '@/user'
 import { tryNormalizeUsername } from '@/utils/username'
@@ -272,13 +273,41 @@ const toTrack = (item: any) => ({
 const getTrackItem = async (username: string, rawId: string) => {
   const decoded = decodeTrackId(rawId)
   if (!decoded) throw new ApiError(404, 'track_not_found', '歌曲不存在')
-  const items = await fileCache.getCacheList(username)
+  // Integration candidates may come from either configured storage root.  The
+  // normal library listing historically follows the active root only, but a
+  // preview token must resolve the exact shared music file selected by the
+  // matcher (including a file living on the alternate root).
+  const items = await fileCache.getDownloadedMusicItemsAcrossLocations(username)
   const item = items.find((candidate: any) => (
     candidate.filename === decoded.filename &&
     candidate.folder === decoded.folder &&
     (!decoded.location || candidate.storageLocation === decoded.location)
   ))
-  if (!item) throw new ApiError(404, 'track_not_found', '歌曲不存在或曲库索引已更新')
+  if (!item) {
+    // A freshly copied file can be playable before its secondary index has
+    // finished syncing.  The track id already carries a validated relative
+    // path and storage root, so use an existence check as a safe last resort
+    // instead of returning a transient 404 on the first preview click.
+    try {
+      const physicalPath = fileCache.getCacheFilePath(
+        username,
+        decoded.folder === 'music',
+        decoded.filename,
+        decoded.location,
+      )
+      if (fs.existsSync(physicalPath) && fs.statSync(physicalPath).isFile()) {
+        return {
+          item: {
+            filename: decoded.filename,
+            folder: decoded.folder,
+            storageLocation: decoded.location,
+          },
+          decoded,
+        }
+      }
+    } catch { /* keep the public 404 below for an actually missing file */ }
+    throw new ApiError(404, 'track_not_found', '歌曲不存在或曲库索引已更新')
+  }
   return { item, decoded }
 }
 
@@ -638,9 +667,23 @@ const publicIntegrationTrack = (track?: IntegrationTrack) => track ? ({
   duration: track.duration || null,
   artworkUrl: track.artworkUrl || null,
   relativePath: track.relativePath || null,
+  isLocal: Boolean(track.isLocal || track.folder || track.storageLocation || (track.raw && typeof track.raw === 'object' && ((track.raw as any).folder || (track.raw as any).filename))),
+  folder: track.folder || (track.raw && typeof track.raw === 'object' ? (track.raw as any).folder || null : null),
+  storageLocation: track.storageLocation || (track.raw && typeof track.raw === 'object' ? (track.raw as any).storageLocation || null : null),
+  localTrackId: (track.isLocal || track.folder || track.storageLocation || (track.raw && typeof track.raw === 'object' && ((track.raw as any).folder || (track.raw as any).filename))) && (track.relativePath || (track.raw && typeof track.raw === 'object' ? (track.raw as any).filename : ''))
+    ? encodeTrackId({
+      filename: track.relativePath || (track.raw as any)?.filename,
+      folder: track.folder || (track.raw as any)?.folder || 'music',
+      storageLocation: track.storageLocation || (track.raw as any)?.storageLocation || (track.raw as any)?._localStorageLocation,
+    })
+    : null,
   isrc: track.isrc || null,
   hasFingerprint: Boolean(track.fingerprint),
 }) : null
+
+const isLocalIntegrationTrack = (track?: IntegrationTrack | null) => Boolean(
+  track && (track.isLocal || track.folder || track.storageLocation || (track.raw && typeof track.raw === 'object' && ((track.raw as any).folder || (track.raw as any).filename))),
+)
 
 const publicTrackMatch = (match: ReturnType<typeof matchTracks>[number]) => ({
   status: match.status,
@@ -872,6 +915,7 @@ const getPlaylistImportMatches = async (
 }
 
 const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1Dependencies, username: string, source: string) => {
+  const replaceable = match.status === 'matched' && isLocalIntegrationTrack(match.candidate)
   return {
   index,
   ...publicTrackMatch(match),
@@ -882,7 +926,8 @@ const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1
     yinyun: (match.yinyun || match).status,
     songloft: (match.songloft || match).status,
   },
-  downloadable: match.status !== 'matched' && !isNonYinyunDownloadSource(match.source.source) && deps.isSourceSupported(String(match.source.source || source), username),
+  replaceable,
+  downloadable: (match.status !== 'matched' || replaceable) && !isNonYinyunDownloadSource(match.source.source) && deps.isSourceSupported(String(match.source.source || source), username),
   }
 }
 
@@ -908,6 +953,7 @@ const replaceConfirmedPlaylistTrack = async (
   record: PlaylistImportRecord,
   index: number,
   candidate: IntegrationTrack,
+  previousCandidate?: IntegrationTrack,
 ) => {
   const targetId = canonicalTrackId(record.tracks[index])
   const occurrence = record.tracks.slice(0, index + 1).filter(track => canonicalTrackId(track) === targetId).length
@@ -916,11 +962,17 @@ const replaceConfirmedPlaylistTrack = async (
   let seen = 0
   let targetIndex = -1
   const sourceId = String(record.tracks[index].sourceId ?? record.tracks[index].id ?? '').trim()
+  const previousPath = String(previousCandidate?.relativePath || '').replace(/\\/g, '/').toLocaleLowerCase()
   for (let itemIndex = 0; itemIndex < playlist.list.length; itemIndex++) {
     try {
       const itemId = canonicalTrackId(toIntegrationTrack(deps.normalizeSongInfo(playlist.list[itemIndex])))
       const raw = playlist.list[itemIndex] && typeof playlist.list[itemIndex] === 'object' ? playlist.list[itemIndex] as any : {}
       const itemSourceId = String(raw.sourceId ?? raw.songmid ?? raw.id ?? '').trim()
+      const itemPath = String(raw._localFilename || raw.relativePath || raw.filename || '').replace(/\\/g, '/').toLocaleLowerCase()
+      if (previousPath && itemPath && previousPath === itemPath) {
+        targetIndex = itemIndex
+        break
+      }
       if (itemSourceId && sourceId && itemSourceId === sourceId) {
         targetIndex = itemIndex
         break
@@ -959,16 +1011,188 @@ const replaceConfirmedPlaylistTrack = async (
   return true
 }
 
+const cacheItemToIntegrationTrack = (item: any): IntegrationTrack => toIntegrationTrack({
+  ...item,
+  id: item?.id,
+  title: item?.name,
+  artist: item?.singer,
+  album: item?.album,
+  duration: item?.interval,
+  relativePath: item?.filename,
+  isLocal: true,
+})
+
+const normalizedTrackPath = (track?: Pick<IntegrationTrack, 'relativePath'> | null) => String(track?.relativePath || '')
+  .replace(/\\/g, '/')
+  .replace(/^.*\/music\//i, '')
+  .replace(/^\/+/, '')
+  .toLocaleLowerCase()
+
+const findCompletedLocalTrack = async (username: string, task: any): Promise<any> => {
+  const items = await fileCache.getDownloadedMusicItemsAcrossLocations(username)
+  const activeSongKey = String(task?.activeSongKey || '')
+  const taskQuality = String(task?.quality || task?.requestedQuality || '')
+  const exact = items
+    .filter(item => item.folder === 'music')
+    .filter(item => {
+      const key = `${fileCache.normalizeSongId({ id: item.id, songmid: item.songmid, source: item.source })}_${item.quality}`
+      return (activeSongKey && key === activeSongKey) || (
+        !activeSongKey && taskQuality && String(item.quality) === taskQuality &&
+        String(item.id) === String(task?.songInfo?.id || task?.songInfo?.songmid || '')
+      )
+    })
+    .sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0))
+  if (exact[0]) return exact[0]
+
+  const sourceTrack = toIntegrationTrack(task?.songInfo || {})
+  const localTracks = items.filter(item => item.folder === 'music').map(cacheItemToIntegrationTrack)
+  const matches = matchTracks([sourceTrack], localTracks, { ...SHARED_LIBRARY_MATCH_OPTIONS, ambiguityMargin: 0 })
+  return matches[0]?.candidate?.raw && typeof matches[0].candidate.raw === 'object'
+    ? matches[0].candidate.raw
+    : matches[0]?.candidate
+}
+
+const syncSongloftReplacement = async (
+  deps: ApiV1Dependencies,
+  username: string,
+  playlistId: string,
+  playlistName: string,
+  previousTrack: IntegrationTrack,
+  nextTrack: IntegrationTrack,
+) => {
+  const client = deps.getSongloftClient?.()
+  if (!client?.configured) return { updated: false, reason: 'songloft_unavailable' }
+  const store = deps.getPlaylistSyncStore?.(username)
+  store?.load()
+  const mapped = store?.get(`${username}:${playlistId}`)
+  const remotePlaylists = await client.listPlaylists()
+  const remoteId = Number(mapped?.songloftPlaylistId || remotePlaylists.find(item => normalizePlaylistName(item.name) === normalizePlaylistName(playlistName))?.id)
+  if (!Number.isFinite(remoteId) || remoteId <= 2) return { updated: false, reason: 'songloft_playlist_not_mapped' }
+
+  let remoteLibrary = await client.listAllSongs()
+  const currentSongs = await client.getPlaylistSongs(remoteId)
+  const matchRemote = (track: IntegrationTrack) => matchTracks([track], remoteLibrary, { ...SHARED_LIBRARY_MATCH_OPTIONS, threshold: 0.82, ambiguityMargin: 0 })[0]?.candidate
+  let previousRemote = matchRemote(previousTrack)
+  let nextRemote = matchRemote(nextTrack)
+  // Songloft indexes asynchronously.  A replacement can therefore finish
+  // downloading before its new file is visible in the remote library.  Start
+  // one normal scan and poll the read-only library endpoint briefly so the
+  // playlist update is eventual instead of silently leaving the old song.
+  if (!nextRemote) {
+    try { await client.startScan(false) } catch (error: any) {
+      console.warn('[PlaylistReplacement] Songloft scan request failed:', error?.message || error)
+    }
+    for (const delayMs of [1500, 3000, 5000]) {
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      try {
+        remoteLibrary = await client.listAllSongs()
+        nextRemote = matchRemote(nextTrack)
+        previousRemote = matchRemote(previousTrack)
+        if (nextRemote) break
+      } catch (error: any) {
+        console.warn('[PlaylistReplacement] Songloft library retry failed:', error?.message || error)
+      }
+    }
+  }
+  const previousId = asRemoteSongId(previousRemote)
+  const nextId = asRemoteSongId(nextRemote)
+  if (!nextId) return { updated: false, reason: 'songloft_replacement_not_indexed' }
+  const currentIds = new Set(currentSongs.map(asRemoteSongId).filter((id): id is number => id !== null))
+  if (!currentIds.has(nextId)) await client.addPlaylistSongs(remoteId, [nextId])
+  if (previousId !== null && previousId !== nextId && currentIds.has(previousId)) await client.removePlaylistSong(remoteId, previousId)
+  return { updated: true, songloftPlaylistId: remoteId, removedSongId: previousId, addedSongId: nextId }
+}
+
+/**
+ * Apply an explicitly selected online replacement only after the queue task
+ * has materialized a new local file.  This is deliberately a completion hook:
+ * a failed download never removes the old file or changes either playlist.
+ */
+export const completePlaylistReplacement = async (deps: ApiV1Dependencies, task: any) => {
+  const replacement = task?.replacement
+  if (!replacement || !task?.username) return { updated: false, reason: 'not_a_replacement' }
+  const username = String(task.username)
+  const previousTrack = toIntegrationTrack(replacement.original || {})
+  const completedItem = await findCompletedLocalTrack(username, task)
+  if (!completedItem || completedItem.folder !== 'music' || !completedItem.filename) {
+    console.warn('[PlaylistReplacement] completed local file could not be identified', { taskId: task?.id, username })
+    return { updated: false, reason: 'completed_file_not_found' }
+  }
+  const nextTrack = cacheItemToIntegrationTrack(completedItem)
+  const nextPath = normalizedTrackPath(nextTrack)
+  const previousPath = normalizedTrackPath(previousTrack)
+  if (!nextPath || (previousPath && nextPath === previousPath)) {
+    console.warn('[PlaylistReplacement] replacement resolved to the original file', { taskId: task?.id, previousPath, nextPath })
+    return { updated: false, reason: 'same_file' }
+  }
+
+  const importStore = deps.getPlaylistImportStore?.(username)
+  importStore?.load()
+  const importRecord = replacement.importId ? importStore?.get(String(replacement.importId)) : undefined
+  let playlistUpdated = false
+  if (importRecord && Number.isInteger(Number(replacement.index))) {
+    playlistUpdated = await replaceConfirmedPlaylistTrack(
+      deps,
+      username,
+      importRecord,
+      Number(replacement.index),
+      nextTrack,
+      previousTrack,
+    )
+  } else if (replacement.playlistId) {
+    const playlist = await getPlaylist(username, String(replacement.playlistId))
+    const oldIndex = playlist.list.findIndex((item: any) => normalizedTrackPath(toIntegrationTrack(deps.normalizeSongInfo(item))) === previousPath)
+    if (oldIndex >= 0) {
+      const nextList = [...playlist.list]
+      nextList[oldIndex] = buildLocalSongInfo(nextTrack)
+      const manage = getUserSpace(username).listManage
+      await manage.listDataManage.listMusicOverwrite(String(replacement.playlistId), nextList as any)
+      await manage.createSnapshot()
+      playlistUpdated = true
+    }
+  }
+  if (!playlistUpdated) return { updated: false, reason: 'playlist_row_not_found' }
+
+  // The new playlist row is durable before deleting the old file.  This keeps
+  // a failed playlist write from causing data loss.
+  const previousItem: any = (await fileCache.getDownloadedMusicItemsAcrossLocations(username)).find(item => (
+    item.filename && normalizedTrackPath({ relativePath: item.filename }) === previousPath &&
+    item.folder === 'music'
+  ))
+  if (previousItem && previousItem.filename !== completedItem.filename) {
+    try {
+      fileCache.removeCacheFile(previousItem.filename, username, 'music', previousItem.storageLocation)
+    } catch (error: any) {
+      console.warn('[PlaylistReplacement] old file removal failed:', error?.message || error)
+    }
+  }
+
+  let songloft: any = null
+  try {
+    const playlist = await getPlaylist(username, String(replacement.playlistId || importRecord?.yinyunPlaylistId || ''))
+    songloft = await syncSongloftReplacement(deps, username, String(replacement.playlistId || importRecord?.yinyunPlaylistId || ''), playlist.name, previousTrack, nextTrack)
+  } catch (error: any) {
+    songloft = { updated: false, reason: error?.message || 'songloft_sync_failed' }
+    console.warn('[PlaylistReplacement] Songloft playlist update failed:', error?.message || error)
+  }
+  return { updated: true, playlistUpdated: true, removedFile: previousItem?.filename || null, songloft }
+}
+
 const getImportSelection = (body: any, record: PlaylistImportRecord, matches: ReturnType<typeof matchTracks>) => {
   const mode = body.mode === 'all' ? 'all' : 'selected'
   const indexes = new Set((Array.isArray(body.indexes) ? body.indexes : []).map((value: any) => Number(value)).filter((value: number) => Number.isInteger(value) && value >= 0))
   const ids = new Set((Array.isArray(body.trackIds) ? body.trackIds : body.trackId !== undefined ? [body.trackId] : []).map((value: any) => String(value)))
+  const overrides = body.selections && typeof body.selections === 'object' ? body.selections : {}
   return matches
     .map((match, index) => ({ match, index, track: record.tracks[index] }))
     .filter(({ match, index, track }) => {
-      if (match.status === 'matched') return false
+      const override = overrides[String(index)] && typeof overrides[String(index)] === 'object' ? overrides[String(index)] : null
+      const replacingLocal = Boolean(override?.replaceLocal)
       if (mode === 'all') return match.status === 'missing'
-      return indexes.has(index) || ids.has(String(track.id ?? track.sourceId ?? '')) || ids.has(canonicalTrackId(track))
+      if (!indexes.has(index) && !ids.has(String(track.id ?? track.sourceId ?? '')) && !ids.has(canonicalTrackId(track))) return false
+      // A matched row can only enter a manual completion batch when the user
+      // explicitly selected an online version as a replacement.
+      return match.status !== 'matched' || replacingLocal
     })
 }
 
@@ -985,6 +1209,7 @@ const enqueuePlaylistImportDownloads = async (
   const skipped: Array<{ index: number; reason: string }> = []
   const buildInput = async ({ match, index, track }: { match: any; index: number; track: IntegrationTrack }) => {
     const override = overrides[String(index)] && typeof overrides[String(index)] === 'object' ? overrides[String(index)] : null
+    const replacingLocal = Boolean(override?.replaceLocal && match.status === 'matched' && isLocalIntegrationTrack(match.candidate))
     // Manual completion may select a different online version.  Only accept a
     // compact public track object; raw/provider-private fields never become a
     // download source without passing through normalizeImportedSong.
@@ -1031,6 +1256,12 @@ const enqueuePlaylistImportDownloads = async (
         playlistName: record.name,
         playlistId: record.yinyunPlaylistId,
         playlistImportId: record.importId,
+        replacement: replacingLocal ? {
+          importId: record.importId,
+          playlistId: record.yinyunPlaylistId,
+          index,
+          original: publicIntegrationTrack(match.candidate),
+        } : undefined,
         queuedAt: new Date().toISOString(),
       }
     } catch {
@@ -1049,8 +1280,8 @@ const enqueuePlaylistImportDownloads = async (
   return { selected: selected.map(item => item.index), queued, skipped }
 }
 
-const asRemoteSongId = (track: IntegrationTrack) => {
-  const id = Number(track.id ?? track.sourceId)
+const asRemoteSongId = (track?: IntegrationTrack | null) => {
+  const id = Number(track?.id ?? track?.sourceId)
   return Number.isFinite(id) && id > 0 ? id : null
 }
 

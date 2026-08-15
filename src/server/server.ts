@@ -16,7 +16,7 @@ import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import * as serverDownloadQueue from './serverDownloadQueue'
 import * as remasterQueue from './remasterQueue'
-import { createApiV1Handler } from './apiV1'
+import { completePlaylistReplacement, createApiV1Handler } from './apiV1'
 import { PlaylistImportStore, PlaylistSyncStore } from './playlistIntegration'
 import { SongloftClient, SubsonicClient } from './songloftClient'
 import { APP_VERSION, APP_VERSION_TAG } from '@/version'
@@ -5744,7 +5744,33 @@ export const startServer = async (port: number, ip: string) => {
       })
     }, 5000)
   }
-  serverDownloadQueue.setCompletionHandler(() => { scheduleSongloftScan() })
+  serverDownloadQueue.setCompletionHandler(async task => {
+    try {
+      await completePlaylistReplacement({
+        serverVersion: APP_VERSION,
+        getAuthSecret: () => `${getServerId()}:${global.lx.config['frontend.password']}`,
+        getUsers: () => global.lx.config.users,
+        isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
+        musicSdk,
+        normalizeSongInfo,
+        resolveSong: resolveServerSong,
+        isSourceSupported,
+        getLoadedSources: getLoadedApis,
+        getLibrary: readUserLibrary,
+        saveLibrary: writeUserLibrary,
+        getLeaderboardBoards,
+        getLeaderboardList,
+        getSongloftClient: () => songloftClient,
+        getSongloftSubsonicClient: () => songloftSubsonicClient,
+        getPlaylistSyncStore,
+        getPlaylistImportStore,
+        getLegacyUser: verifyUserAuth,
+      }, task)
+    } catch (error: any) {
+      console.warn('[PlaylistReplacement] completion hook failed:', error?.message || error)
+    }
+    scheduleSongloftScan()
+  })
   serverDownloadQueue.initialize(async task => {
     const songInfo = normalizeSongInfo(task.songInfo)
     if (!isConfiguredUsername(task.username)) throw new Error('Download task user no longer exists')
