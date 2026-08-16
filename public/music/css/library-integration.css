@@ -72,11 +72,11 @@
 /* Health report matrix: keep every source/platform status in a real table and
    reserve the final column for the single source-level delete action. */
 .health-matrix-wrap { max-width:100%; overflow:auto; margin:12px 0 0; border:1px solid var(--border-main); border-radius:10px; }
-.health-matrix { width:100%; min-width:760px; table-layout:fixed; border-collapse:collapse; font-size:11px; }
+.health-matrix { width:100%; min-width:680px; table-layout:fixed; border-collapse:collapse; font-size:10px; }
 .health-matrix th,.health-matrix td { overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
-.health-matrix th:first-child { width:180px; }
-.health-matrix th:last-child,.health-matrix td:last-child { width:92px; }
-.health-matrix th:not(:first-child):not(:last-child),.health-matrix td:not(:first-child):not(:last-child) { width:76px; }
+.health-matrix th:first-child { width:140px; }
+.health-matrix th:last-child,.health-matrix td:last-child { width:76px; }
+.health-matrix th:not(:first-child):not(:last-child),.health-matrix td:not(:first-child):not(:last-child) { width:58px; }
 .health-matrix td { text-align:center; }
 .health-matrix td .health-matrix-cell { justify-content:center; max-width:100%; }
 .health-matrix-cell { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -84,6 +84,6 @@
 .health-matrix-action-head,.health-matrix-action { text-align:center!important; }
 .health-matrix-action-empty { color:var(--text-dim); }
 .health-matrix-action .health-source-delete { padding:5px 7px; font-size:10px; }
-@media (max-width:640px) { .health-report-dialog { width:100%; max-height:calc(100vh - 20px); padding:14px; }.health-report-recent { margin-left:0; width:100%; }.health-matrix { min-width:720px; }.health-matrix th:first-child { width:140px; } }
+@media (max-width:640px) { .health-report-dialog { width:100%; max-height:calc(100vh - 20px); padding:14px; }.health-report-recent { margin-left:0; width:100%; }.health-matrix { min-width:680px; }.health-matrix th:first-child { width:140px; }.health-matrix th:last-child,.health-matrix td:last-child { width:76px; } }
 @media (max-width:900px) { .integration-status-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.integration-two-column { grid-template-columns:1fr; } }
 @media (max-width:640px) { .integration-hero { align-items:flex-start; flex-direction:column; padding:17px 14px; }.integration-hero-actions { width:100%; }.integration-hero-actions button { flex:1 1 auto; min-width:0; }.integration-status-grid,.integration-count-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.integration-count-grid .count-card:last-child { grid-column:1/-1; }.integration-import-row,.integration-history-row { align-items:stretch; flex-direction:column; }.integration-import-row > button,.integration-history-actions,.integration-history-actions .integration-submit { width:100%; }.integration-sync-grid { grid-template-columns:1fr; }.integration-playlist-control { grid-template-columns:1fr; }.integration-playlist-control .btn-danger { width:100%; }.integration-result-toolbar { align-items:stretch; flex-direction:column; }.integration-toolbar-actions { justify-content:space-between; }.integration-complete-actions { width:100%; }.integration-complete-actions button { flex:1; }.queue-summary { grid-template-columns:repeat(3,minmax(0,1fr)); }.queue-row { grid-template-columns:minmax(0,1fr) auto; }.queue-progress { grid-column:1/-1; grid-row:2; }.queue-actions { grid-column:1/-1; grid-row:3; }.integration-candidate-dialog { max-height:92vh; padding:13px; }.integration-candidate-searchbar { align-items:stretch; flex-direction:column; }.integration-candidate-searchbar .btn-xs { width:100%; }.integration-candidate-toolbar { flex-wrap:wrap; }.integration-candidate-toolbar .integration-caption { margin-left:0; width:100%; }.integration-local-candidate-row { grid-template-columns:38px minmax(0,1fr); }.integration-local-candidate-row button { grid-column:1/-1; width:100%; }.integration-candidate-item { grid-template-columns:1fr; }.integration-candidate-actions { justify-content:flex-start; }.integration-candidate-actions button { flex:1; }.integration-preview-player { right:8px; left:8px; top:max(8px,env(safe-area-inset-top)); width:auto; } }
