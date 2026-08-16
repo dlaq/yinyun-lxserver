@@ -126,8 +126,12 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          # Enable multi-platform build
-          platforms: linux/amd64,linux/arm64
+          # The production NAS and the verified remote smoke-test host are
+          # x86_64. QEMU arm64 npm builds are not deterministic (Node/sharp
+          # can exit with SIGILL), so publish a reproducible amd64 image here.
+          # ARM images should be built on a native ARM runner instead of
+          # silently publishing a partially built manifest.
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
