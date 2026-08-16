@@ -18,6 +18,7 @@ window.SongListManager = (function () {
         tags: [],
         hotTags: []
     };
+    let initialized = false;
 
     let detailState = {
         id: '',
@@ -73,6 +74,13 @@ window.SongListManager = (function () {
     async function init() {
         console.log('[SongList] Initializing...');
 
+        // The shell can reach DOMContentLoaded before the required-login
+        // dialog has issued a user token. Avoid a 401 being mistaken for an
+        // empty remote playlist; refresh() initializes after login.
+        const auth = window.getUserAuthHeaders ? window.getUserAuthHeaders() : {};
+        if (!auth['x-user-token']) return;
+        initialized = true;
+
         // 优先从缓存读取
         const cachedSource = localStorage.getItem('songlist-source');
         if (cachedSource) {
@@ -95,6 +103,17 @@ window.SongListManager = (function () {
                 }
             }
         });
+    }
+
+    async function refresh() {
+        const auth = window.getUserAuthHeaders ? window.getUserAuthHeaders() : {};
+        if (!auth['x-user-token']) return;
+        if (!initialized) {
+            await init();
+            return;
+        }
+        await loadTags();
+        await loadList(1);
     }
 
     // --- UI Helpers ---
@@ -190,8 +209,12 @@ window.SongListManager = (function () {
     async function loadTags() {
         const source = currentState.source;
         try {
-            const res = await fetch(`${API_BASE}/songList/tags?source=${source}`);
+            const res = await fetch(`${API_BASE}/songList/tags?source=${source}`, {
+                headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {},
+                cache: 'no-store',
+            });
             const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
             currentState.tags = data.tags || [];
             currentState.hotTags = data.hotTags || [];
             currentState.sortList = data.sortList || [];
@@ -219,8 +242,12 @@ window.SongListManager = (function () {
 
         try {
             const url = `${API_BASE}/songList/list?source=${source}&tagId=${encodeURIComponent(tagId)}&sortId=${encodeURIComponent(sortId)}&page=${page}`;
-            const res = await fetch(url);
+            const res = await fetch(url, {
+                headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {},
+                cache: 'no-store',
+            });
             const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
 
             currentState.list = data.list || [];
             currentState.total = data.total || 0;
@@ -278,8 +305,12 @@ window.SongListManager = (function () {
 
         try {
             const url = `${API_BASE}/songList/detail?source=${source}&id=${encodeURIComponent(id)}&page=${page}`;
-            const res = await fetch(url);
+            const res = await fetch(url, {
+                headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {},
+                cache: 'no-store',
+            });
             const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
 
             detailState.info = data.info;
 
@@ -684,6 +715,7 @@ window.SongListManager = (function () {
 
     return {
         init,
+        refresh,
         selectTag: function (id, name) {
             currentState.tagId = id;
             currentState.tagName = name;
@@ -795,8 +827,12 @@ window.SongListManager = (function () {
 
             try {
                 const url = `${API_BASE}/songList/search?source=${currentState.source}&text=${encodeURIComponent(text)}&page=1`;
-                const res = await fetch(url);
+                const res = await fetch(url, {
+                    headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {},
+                    cache: 'no-store',
+                });
                 const data = await res.json();
+                if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
                 currentState.list = data.list || [];
                 currentState.total = data.total || 0;
                 renderList();
@@ -880,10 +916,13 @@ window.SongListManager = (function () {
             container.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
 
             try {
-                const res = await fetch(`${API_BASE}/songList/userPlaylist?source=tx&uid=${uid}`);
-                const data = await res.json();
+            const res = await fetch(`${API_BASE}/songList/userPlaylist?source=tx&uid=${uid}`, {
+                headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {},
+                cache: 'no-store',
+            });
+            const data = await res.json();
 
-                if (data.error) throw new Error(data.error);
+            if (!res.ok || data.error) throw new Error(data.error || data.message || `HTTP ${res.status}`);
 
                 title.innerText = `${data.nickname || uid} 的歌单`;
                 subtitle.innerText = `共发现 ${data.list.length} 个歌单`;

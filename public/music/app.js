@@ -267,8 +267,12 @@ async function checkNetworkListUpdates(manual = false) {
     for (const list of targetLists) {
         try {
             const url = `${API_BASE}/songList/detail?source=${encodeURIComponent(list.source)}&id=${encodeURIComponent(list.sourceListId)}&page=1`;
-            const res = await fetch(url);
+            const res = await fetch(url, {
+                headers: getUserAuthHeaders(),
+                cache: 'no-store',
+            });
             const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
             if (!data || !Array.isArray(data.list)) {
                 throw new Error('远端歌单数据不完整');
             }
@@ -787,7 +791,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Initialize SongList Manager
-    if (window.SongListManager) {
+    if (window.SongListManager && getUserAuthHeaders()['x-user-token']) {
         window.SongListManager.init();
     }
 
@@ -1094,13 +1098,6 @@ function showHealthReportDialog(report) {
     if (!report) return;
     document.getElementById('health-report-modal')?.remove();
     const checks = Array.isArray(report.checks) ? report.checks : [];
-    const failures = Array.isArray(report.failures) ? report.failures : [];
-    const problemChecks = checks.filter(item => item.status !== 'ok');
-    const failureItems = failures.length ? failures : problemChecks.map(item => ({
-        playlist: '冒烟测试', source: item.source, sourceId: item.sourceId, deletable: item.deletable,
-        platform: item.platform, status: item.status, index: 0, title: report.keyword || '测试关键词',
-        artist: item.platform, message: item.message || '检查失败',
-    }));
     const modal = document.createElement('div');
     modal.id = 'health-report-modal';
     modal.className = 'health-report-modal';
@@ -1109,20 +1106,25 @@ function showHealthReportDialog(report) {
     const checkByKey = new Map(checks.map(item => [`${String(item.source || '')}\u0000${String(item.platform || '')}`, item]));
     const statusCell = item => {
         if (!item) return '<span class="health-matrix-cell is-empty">—</span>';
-        const label = item.status === 'ok' ? '正常' : item.status === 'warn' ? '注意' : '失败';
-        return `<span class="health-matrix-cell is-${item.status}"><i class="fas fa-circle"></i>${label}</span>`;
+        const status = ['ok', 'warn', 'error'].includes(item.status) ? item.status : 'error';
+        const label = status === 'ok' ? '正常' : status === 'warn' ? '注意' : '失败';
+        const detail = item.message ? `${label}：${item.message}` : label;
+        return `<span class="health-matrix-cell is-${status}" title="${escapeHtmlText(detail)}" aria-label="${escapeHtmlText(detail)}"><i class="fas fa-circle"></i><span>${label}</span></span>`;
     };
-    const matrix = checks.length ? `<div class="health-matrix-wrap"><table class="health-matrix"><thead><tr><th>音源</th>${platforms.map(platform => `<th>${escapeHtmlText(platform)}</th>`).join('')}</tr></thead><tbody>${sourceNames.map(source => `<tr><th>${escapeHtmlText(source)}</th>${platforms.map(platform => statusCell(checkByKey.get(`${source}\u0000${platform}`))).join('')}</tr>`).join('')}</tbody></table></div>` : '<div class="health-report-empty">没有可检测的已启用音源。</div>';
-    const rows = failureItems.length ? failureItems.map(item => {
-        const source = String(item.source || '未知音源');
-        const sourceKey = encodeURIComponent(String(item.sourceId || source));
-        const deleteButton = `<button type="button" class="health-source-delete" data-health-source="${escapeHtmlText(sourceKey)}" ${item.deletable ? '' : 'disabled'} title="${item.deletable ? '删除这个账户自定义音源' : '内置或共享音源不能从这里删除'}"><i class="fas fa-trash"></i> 删除音源</button>`;
-        const stateLabel = item.status === 'warn' ? '注意' : '失败';
-        return `<li><div class="health-report-row-main"><strong>${escapeHtmlText(item.playlist || '冒烟测试')}</strong><span>${escapeHtmlText(source)} · ${escapeHtmlText(item.platform || '未知平台')} · ${escapeHtmlText(item.title || '未知歌曲')} · ${escapeHtmlText(item.artist || '')}</span><em><b class="health-row-status is-${item.status || 'error'}">${stateLabel}</b> ${escapeHtmlText(item.message || '解析失败')}</em></div><div class="health-report-row-action">${deleteButton}</div></li>`;
-    }).join('') : '<li class="health-report-empty">所有音源平台均正常。</li>';
+    const sourceAction = source => {
+        const sourceItems = platforms
+            .map(platform => checkByKey.get(`${source}\u0000${platform}`))
+            .filter(Boolean);
+        const problem = sourceItems.find(item => item.status !== 'ok');
+        const deletable = sourceItems.find(item => item.deletable && item.sourceId);
+        if (!problem || !deletable) return '<span class="health-matrix-action-empty">—</span>';
+        const sourceKey = encodeURIComponent(String(deletable.sourceId));
+        return `<button type="button" class="health-source-delete" data-health-source="${escapeHtmlText(sourceKey)}" title="删除这个账户自定义音源"><i class="fas fa-trash"></i> 删除</button>`;
+    };
+    const matrix = checks.length ? `<div class="health-matrix-wrap"><table class="health-matrix"><thead><tr><th scope="col">音源</th>${platforms.map(platform => `<th scope="col">${escapeHtmlText(platform)}</th>`).join('')}<th scope="col" class="health-matrix-action-head">操作</th></tr></thead><tbody>${sourceNames.map(source => `<tr><th scope="row" title="${escapeHtmlText(source)}">${escapeHtmlText(source)}</th>${platforms.map(platform => `<td>${statusCell(checkByKey.get(`${source}\u0000${platform}`))}</td>`).join('')}<td class="health-matrix-action">${sourceAction(source)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="health-report-empty">没有可检测的已启用音源。</div>';
     const errorCount = checks.filter(item => item.status === 'error').length;
     const warningCount = checks.filter(item => item.status === 'warn').length;
-    modal.innerHTML = `<div class="health-report-dialog" role="dialog" aria-modal="true" aria-labelledby="health-report-title"><div class="health-report-heading"><div><span class="health-report-kicker"><i class="fas fa-heart-pulse"></i> 曲源健康检查</span><h2 id="health-report-title">问题明细</h2></div><button type="button" class="btn-icon health-report-close" aria-label="关闭"><i class="fas fa-times"></i></button></div><div class="health-report-toolbar"><button type="button" class="health-report-action" data-health-run><i class="fas fa-stethoscope"></i>立即冒烟测试</button><button type="button" class="health-report-action" data-health-refresh><i class="fas fa-rotate"></i>刷新</button><span class="health-report-recent">最近：${report.checkedAt ? escapeHtmlText(new Date(report.checkedAt).toLocaleString('zh-CN')) : '—'}</span></div><div class="health-report-counters"><span class="health-counter is-ok"><i class="fas fa-circle"></i>${Number(report.healthyTracks || 0)}</span><span class="health-counter is-warn"><i class="fas fa-circle"></i>${warningCount}</span><span class="health-counter is-error"><i class="fas fa-circle"></i>${errorCount}</span></div><p class="health-report-summary">检查 ${Number(report.tracksChecked || checks.length || 0)} 个音源平台；${report.keyword ? `测试关键词“${escapeHtmlText(report.keyword)}”；` : ''}绿色为正常、黄色为需要关注、红色为失败。</p>${matrix}<ul class="health-report-list">${rows}</ul></div>`;
+    modal.innerHTML = `<div class="health-report-dialog" role="dialog" aria-modal="true" aria-labelledby="health-report-title"><div class="health-report-heading"><div><span class="health-report-kicker"><i class="fas fa-heart-pulse"></i> 曲源健康检查</span><h2 id="health-report-title">问题明细</h2></div><button type="button" class="btn-icon health-report-close" aria-label="关闭"><i class="fas fa-times"></i></button></div><div class="health-report-toolbar"><button type="button" class="health-report-action" data-health-run><i class="fas fa-stethoscope"></i>立即冒烟测试</button><button type="button" class="health-report-action" data-health-refresh><i class="fas fa-rotate"></i>刷新</button><span class="health-report-recent">最近：${report.checkedAt ? escapeHtmlText(new Date(report.checkedAt).toLocaleString('zh-CN')) : '—'}</span></div><div class="health-report-counters"><span class="health-counter is-ok"><i class="fas fa-circle"></i>${Number(report.healthyTracks || 0)}</span><span class="health-counter is-warn"><i class="fas fa-circle"></i>${warningCount}</span><span class="health-counter is-error"><i class="fas fa-circle"></i>${errorCount}</span></div><p class="health-report-summary">检查 ${Number(report.tracksChecked || checks.length || 0)} 个音源平台；${report.keyword ? `测试关键词“${escapeHtmlText(report.keyword)}”；` : ''}绿色为正常、黄色为需要关注、红色为失败。悬停状态可查看错误原因，操作列可删除账户自定义音源。</p>${matrix}</div>`;
     document.body.appendChild(modal);
     const close = () => modal.remove();
     modal.querySelector('.health-report-close')?.addEventListener('click', close);
@@ -1336,6 +1338,7 @@ function switchTab(tabId) {
 
     if (tabId === 'songlist') {
         document.getElementById('page-title').innerText = "歌单";
+        window.SongListManager?.refresh?.();
     }
 
     if (tabId === 'my-playlists') {
@@ -10173,8 +10176,12 @@ async function handleRefreshList(listId, event, silent = false) {
 
     try {
         const url = `${API_BASE}/songList/detail?source=${encodeURIComponent(list.source)}&id=${encodeURIComponent(list.sourceListId)}&page=1`;
-        const res = await fetch(url);
+        const res = await fetch(url, {
+            headers: getUserAuthHeaders(),
+            cache: 'no-store',
+        });
         const data = await res.json();
+        if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
 
         if (!data || !data.list) throw new Error('数据拉取失败');
 

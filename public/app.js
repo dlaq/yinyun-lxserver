@@ -109,8 +109,9 @@ class App {
         document.getElementById('add-user-btn')?.addEventListener('click', () => this.showAddUserModal());
         document.getElementById('refresh-users-btn')?.addEventListener('click', async () => {
             try {
-                // 在重载前先保存配置
-                await this.saveConfig(true);
+                // 用户管理重载不应隐式提交系统配置。旧逻辑会把尚未
+                // 加载完成的表单默认值写回 config.js，重启后表现为
+                // 服务器名称和管理密码被恢复成默认值。
                 await this.request('/api/v1/admin/reload', { method: 'POST' });
                 this.loadUsers();
                 this.loadDashboard();
@@ -150,8 +151,9 @@ class App {
             this.saveConfig();
         });
         document.getElementById('reload-config-btn')?.addEventListener('click', async () => {
-            await this.saveConfig(true);
-            this.loadConfig();
+            // “重新加载”只从服务端读取当前持久化配置，不提交表单。
+            // 保存配置必须由“保存设置”按钮显式触发。
+            await this.loadConfig();
         });
         // 日志查看
         document.getElementById('refresh-logs-btn')?.addEventListener('click', () => this.loadLogs());

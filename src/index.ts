@@ -424,8 +424,16 @@ if (webdavSync.isConfigured()) {
 // 导出 webdavSync 实例供 API 使用
 global.lx.webdavSync = webdavSync
 
-// 启动前最后保存一次合并后的配置，确保环境变量被固化到 config.js 中
-saveConfigToFile()
+// 只有在持久化配置不存在时才创建它。启动阶段无条件写回会把一个
+// 尚未完成合并/恢复的内存默认配置覆盖到数据卷，导致管理员设置在
+// 重启后回退。环境变量仍会在首次启动时固化；已有 config.js 由管理员
+// 保存接口显式更新。
+const persistedConfigPath = process.env.CONFIG_PATH || path.join(process.cwd(), 'config.js')
+if (!fs.existsSync(persistedConfigPath)) {
+  saveConfigToFile()
+} else {
+  lastConfigHash = getConfigHash(persistedConfigPath)
+}
 
 startServer(global.lx.config.port, global.lx.config.bindIP)
 

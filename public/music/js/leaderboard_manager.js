@@ -50,8 +50,12 @@ window.LeaderboardManager = (function () {
         showBoardsLoading(true);
 
         try {
-            const res = await fetch(`${API_BASE}/boards?source=${source}`);
+            const res = await fetch(`${API_BASE}/boards?source=${source}`, {
+                headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {},
+                cache: 'no-store',
+            });
             const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
             if (data.error) throw new Error(data.error);
             state.boards = data.list || [];
             renderBoards(state.boards);
@@ -83,8 +87,12 @@ window.LeaderboardManager = (function () {
 
         try {
             const url = `${API_BASE}/list?source=${source}&bangid=${encodeURIComponent(bangid)}&page=${page}`;
-            const res = await fetch(url);
+            const res = await fetch(url, {
+                headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {},
+                cache: 'no-store',
+            });
             const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
             if (data.error) throw new Error(data.error);
 
             if (page === 1) {
