@@ -8,7 +8,11 @@ const LOG_BACKUPS = 10
 // TZ environment variable (Asia/Shanghai in the published compose file).
 const LOG_LAYOUT = {
   type: 'pattern',
-  pattern: '%d{yyyy-MM-dd HH:mm:ss.SSS} [%p] %c - %m',
+  // date-format (used by log4js) uses `hh` for a 24-hour field.  `HH` is
+  // treated as literal text, which previously produced lines such as
+  // `2026-08-16 HH:08:41.896`.  Include the offset so container logs are
+  // unambiguous even when the Docker engine itself prefixes UTC timestamps.
+  pattern: '%d{yyyy-MM-dd hh:mm:ss.SSS O} [%p] %c - %m',
 } as const
 const REDACTED_VALUE = 'REDACTED'
 const SENSITIVE_QUERY_PARAMS = new Set([
