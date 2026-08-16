@@ -3,6 +3,13 @@ import log4js from 'log4js'
 
 const LOG_MAX_SIZE = 1024 * 1024 * 10
 const LOG_BACKUPS = 10
+// Keep application log timestamps explicit and consistent across file and
+// console appenders. The process timezone is supplied by the container's
+// TZ environment variable (Asia/Shanghai in the published compose file).
+const LOG_LAYOUT = {
+  type: 'pattern',
+  pattern: '%d{yyyy-MM-dd HH:mm:ss.SSS} [%p] %c - %m',
+} as const
 const REDACTED_VALUE = 'REDACTED'
 const SENSITIVE_QUERY_PARAMS = new Set([
   'access_token',
@@ -89,6 +96,7 @@ const createLogConfig = (logPath: string) => ({
       maxLogSize: LOG_MAX_SIZE,
       backups: LOG_BACKUPS,
       keepFileExt: true,
+      layout: LOG_LAYOUT,
     },
     app: {
       type: 'file',
@@ -96,6 +104,7 @@ const createLogConfig = (logPath: string) => ({
       maxLogSize: LOG_MAX_SIZE,
       backups: LOG_BACKUPS,
       keepFileExt: true,
+      layout: LOG_LAYOUT,
     },
     errorFile: {
       type: 'file',
@@ -103,6 +112,7 @@ const createLogConfig = (logPath: string) => ({
       maxLogSize: LOG_MAX_SIZE,
       backups: LOG_BACKUPS,
       keepFileExt: true,
+      layout: LOG_LAYOUT,
     },
     errors: {
       type: 'logLevelFilter',
@@ -111,6 +121,7 @@ const createLogConfig = (logPath: string) => ({
     },
     console: {
       type: 'console',
+      layout: LOG_LAYOUT,
     },
     login: {
       type: 'file',
@@ -118,6 +129,7 @@ const createLogConfig = (logPath: string) => ({
       maxLogSize: LOG_MAX_SIZE,
       backups: LOG_BACKUPS,
       keepFileExt: true,
+      layout: LOG_LAYOUT,
     },
     token: {
       type: 'file',
@@ -125,6 +137,7 @@ const createLogConfig = (logPath: string) => ({
       maxLogSize: LOG_MAX_SIZE,
       backups: LOG_BACKUPS,
       keepFileExt: true,
+      layout: LOG_LAYOUT,
     },
   },
   categories: {

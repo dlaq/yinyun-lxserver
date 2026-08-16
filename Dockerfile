@@ -26,6 +26,8 @@ COPY --from=builder ./source-code/build-output ./
 VOLUME /server/data
 ENV DATA_PATH='/server/data'
 ENV LOG_PATH='/server/data/logs'
+ENV CONFIG_PATH='/server/data/config.js'
+ENV TZ='Asia/Shanghai'
 
 EXPOSE 9527
 ENV NODE_ENV='production'

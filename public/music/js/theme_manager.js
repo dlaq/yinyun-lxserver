@@ -25,6 +25,7 @@ function setTheme(themeName, save = true) {
     if (save) {
         localStorage.setItem('lx_theme', themeName);
         console.log(`[Theme] Color scheme applied: ${themeName}`);
+        if (typeof window.pushSettingsToServer === 'function') void window.pushSettingsToServer();
     }
 
     // 更新可视化颜色 (如果加载了可视化脚本)
@@ -63,6 +64,7 @@ function setAppearance(mode, save = true) {
     if (save) {
         localStorage.setItem('lx_appearance', mode);
         console.log(`[Theme] Appearance mode applied: ${mode}`);
+        if (typeof window.pushSettingsToServer === 'function') void window.pushSettingsToServer();
     }
 
     // Update UI in settings

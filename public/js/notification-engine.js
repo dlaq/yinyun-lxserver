@@ -1,16 +1,20 @@
 /**
  * LX Server 通用通知与版本检查引擎
  * 核心特性：
- * 1. 从 bobcc4/yinyun-lxserver 获取版本与系统通知
+ * 1. 从 dlaq/yinyun-lxserver 获取版本与系统通知
  * 2. 队列系统：FIFO 队列处理
  * 3. 智能样式：根据 type 和 title 自动匹配图标与配色 (版本火箭、警告三角、广播铃铛)
  */
 (function () {
     // ================= 1. 基础配置与资源 =================
     const CONFIG = {
-        LATEST_RELEASE_URL: 'https://api.github.com/repos/bobcc4/yinyun-lxserver/releases/latest',
+        LATEST_RELEASE_URL: 'https://api.github.com/repos/dlaq/yinyun-lxserver/releases/latest',
         getLocalVersion: () => (window.CONFIG && window.CONFIG.version) ? window.CONFIG.version : '0.0.0'
     };
+    const RELEASE_CACHE_KEY = 'lx_github_release_cache';
+    const RELEASE_RETRY_KEY = 'lx_github_release_retry_after';
+    const RELEASE_CACHE_TTL = 6 * 60 * 60 * 1000;
+    const RELEASE_RETRY_TTL = 60 * 60 * 1000;
 
     // 图标库 (SVG Path)
     const ICONS = {
@@ -342,12 +346,25 @@
     // ================= 4. GitHub Release 检查 =================
     async function fetchLatestRelease(isManual = false, force = false) {
         try {
-            const res = await fetch(CONFIG.LATEST_RELEASE_URL, {
-                cache: 'no-store',
-                headers: { Accept: 'application/vnd.github+json' }
-            });
-            if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-            const release = await res.json();
+            let release = null;
+            if (!force) {
+                try {
+                    const cached = JSON.parse(localStorage.getItem(RELEASE_CACHE_KEY) || 'null');
+                    if (cached?.release && Date.now() - Number(cached.savedAt || 0) < RELEASE_CACHE_TTL) release = cached.release;
+                    const retryAfter = Number(localStorage.getItem(RELEASE_RETRY_KEY) || 0);
+                    if (!release && !isManual && retryAfter > Date.now()) return;
+                } catch { /* malformed browser cache is ignored */ }
+            }
+            if (!release) {
+                const res = await fetch(CONFIG.LATEST_RELEASE_URL, {
+                    cache: 'no-store',
+                    headers: { Accept: 'application/vnd.github+json' }
+                });
+                if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                release = await res.json();
+                localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), release }));
+                localStorage.removeItem(RELEASE_RETRY_KEY);
+            }
             const latestVersion = release.tag_name;
             if (!latestVersion || !/^v?\d+\.\d+\.\d+/.test(latestVersion)) {
                 throw new Error('GitHub Release did not return a valid version');
@@ -377,7 +394,7 @@
                 },
                 action: {
                     type: 'link',
-                    url: release.html_url || 'https://github.com/bobcc4/yinyun-lxserver/releases/latest'
+                    url: release.html_url || 'https://github.com/dlaq/yinyun-lxserver/releases/latest'
                 }
             };
             const hasUpdate = processItem(releaseItem, isManual, force);
@@ -399,9 +416,12 @@
             }
         } catch (e) {
             console.error('[Notification] Check failed:', e);
+            if (!isManual) {
+                try { localStorage.setItem(RELEASE_RETRY_KEY, String(Date.now() + RELEASE_RETRY_TTL)); } catch { /* ignore */ }
+            }
             if (isManual) {
                 let errorTitle = '检查更新失败';
-                let errorMessage = '无法连接到更新服务器，请检查网络连接或稍后重试。';
+                let errorMessage = '无法连接到 GitHub Release 更新接口。它只负责检查项目发布版本，不影响登录、播放、歌单或曲库联动。';
 
                 if (e.message.includes('404')) {
                     errorMessage = 'GitHub 暂未发布正式版本，请稍后重试。';
@@ -440,7 +460,7 @@
                     type: 'warning',
                     ui: {
                         title: '检查更新已禁用',
-                        message: '当前配置已禁用匿名统计与在线更新检查，请前往 bobcc4/yinyun-lxserver 的 GitHub 发布页面查看最新版本。',
+                        message: '当前配置已禁用匿名统计与在线更新检查，请前往 dlaq/yinyun-lxserver 的 GitHub 发布页面查看最新版本。',
                         confirm_text: '确定',
                         cancel_text: ''
                     },

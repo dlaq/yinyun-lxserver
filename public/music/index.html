@@ -43,7 +43,7 @@
             class="w-64 t-bg-panel shadow-lg flex flex-col z-[60] fixed inset-y-0 left-0 transform -translate-x-full md:relative md:translate-x-0 md:z-30 h-full pb-28 transition-all duration-300">
             <div class="h-16 flex items-center justify-center border-b t-border-main relative">
                 <img src="/_player/assets/logo.svg" class="w-8 h-8 mr-2 rounded-lg shadow-sm" alt="Yinyun">
-                <h1 class="text-xl font-bold text-emerald-600 tracking-wider">音云 YINYUN</h1>
+                <h1 id="player-brand-name" class="text-xl font-bold text-emerald-600 tracking-wider">音云 YINYUN</h1>
                 <!-- Close button for mobile -->
                 <button onclick="toggleSidebar()" class="md:hidden absolute right-4 text-gray-500 hover:text-red-500">
                     <i class="fas fa-times"></i>
@@ -1510,20 +1510,20 @@
                                         </button>
                                         <button id="settings-custom-source-toggle" type="button" onclick="toggleCustomSourceSection()"
                                             class="shrink-0 px-3 py-1.5 t-bg-main border t-border-main rounded-lg text-xs t-text-muted hover:text-emerald-500 transition-colors flex items-center gap-1.5"
-                                            aria-expanded="true" aria-controls="settings-custom-sources-list">
-                                            <i class="fas fa-chevron-up"></i><span>收起</span>
+                                            aria-expanded="false" aria-controls="settings-custom-sources-list">
+                                            <i class="fas fa-chevron-down"></i><span>展开</span>
                                         </button>
                                     </div>
 
                                     <!-- 已上传的源列表 -->
-                                    <div id="settings-custom-sources-list" class="space-y-2 transition-all duration-200">
+                                    <div id="settings-custom-sources-list" class="hidden space-y-2 transition-all duration-200">
                                         <div class="text-xs t-text-muted text-center py-2">暂无数据 (JS未加载)</div>
                                     </div>
                                 </div>
 
                                 <div class="t-bg-panel rounded-xl border t-border-main p-4 hover:shadow-sm transition-shadow">
                                     <div class="flex flex-wrap items-center justify-between gap-3">
-                                        <div><h3 class="font-bold text-emerald-500 flex items-center gap-2"><i class="fas fa-heart-pulse"></i> 曲源健康检查</h3><p class="text-xs t-text-muted mt-1">按输入的歌曲总数抽查已导入歌单的音源解析，不下载文件；问题报表会列出歌单、音源和歌曲，并允许删除本账户的自定义错误音源。</p></div>
+                                        <div><h3 class="font-bold text-emerald-500 flex items-center gap-2"><i class="fas fa-heart-pulse"></i> 曲源健康检查</h3><p class="text-xs t-text-muted mt-1">使用测试关键词逐个检查已启用音源的平台，验证搜索和解析链路；问题报表会列出音源、平台和错误，并允许删除本账户的自定义错误音源。</p></div>
                                         <div class="flex items-center gap-2">
                                             <button id="health-refresh-btn" type="button" onclick="loadHealthSettings()" class="px-3 py-2 rounded-lg t-bg-main border t-border-main t-text-main text-xs font-bold"><i class="fas fa-rotate mr-1"></i>刷新</button>
                                             <button id="health-test-btn" type="button" onclick="runHealthCheckNow()" class="px-3 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold"><i class="fas fa-stethoscope mr-1"></i>立即冒烟测试</button>
@@ -1534,12 +1534,11 @@
                                         <label class="flex items-center gap-2 t-text-muted">Cron 表达式<input id="health-cron" type="text" value="0 6 * * *" placeholder="例如：0 6 * * *" onchange="saveHealthSettings()" class="w-full sm:w-48 px-2 py-1 rounded border t-border-main t-bg-main"></label>
                                         <label class="flex items-center gap-2 t-text-muted">测试关键词<input id="health-test-keyword" type="text" value="周杰伦" placeholder="例如：周杰伦" onchange="saveHealthSettings()" class="w-full sm:w-48 px-2 py-1 rounded border t-border-main t-bg-main"></label>
                                         <label class="flex items-center gap-2 t-text-muted">连续失败告警阈值<input id="health-failure-threshold" type="number" min="1" max="20" value="2" onchange="saveHealthSettings()" class="w-20 px-2 py-1 rounded border t-border-main t-bg-main"></label>
-                                        <label class="flex items-center gap-2 t-text-muted">抽查歌曲总数<input id="health-sample-size" type="number" min="1" max="100" value="20" onchange="saveHealthSettings()" class="w-20 px-2 py-1 rounded border t-border-main t-bg-main">首</label>
-                                        <label class="flex items-center gap-2 t-text-main"><input id="health-notify" type="checkbox" onchange="saveHealthSettings()" class="accent-emerald-500">异常时推送</label>
                                     </div>
                                     <details class="mt-4" open>
                                         <summary class="cursor-pointer text-xs font-bold t-text-main">告警渠道 · message-pusher / Bark / Server酱</summary>
                                         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3 text-xs">
+                                            <label class="flex items-center gap-2 t-text-main"><input id="health-pusher-enabled" type="checkbox" onchange="saveHealthSettings()" class="accent-emerald-500">message-pusher 启用</label>
                                             <input id="health-pusher-url" placeholder="message-pusher URL（可选）" onchange="saveHealthSettings()" class="px-2 py-1.5 rounded border t-border-main t-bg-main">
                                             <input id="health-pusher-token" type="password" placeholder="Token（留空保持不变）" onchange="saveHealthSettings()" class="px-2 py-1.5 rounded border t-border-main t-bg-main">
                                             <input id="health-pusher-channel" placeholder="channel（可选）" onchange="saveHealthSettings()" class="px-2 py-1.5 rounded border t-border-main t-bg-main">
@@ -4964,7 +4963,7 @@
             <p id="integration-candidate-query" class="integration-caption"></p>
             <div class="integration-candidate-searchbar"><label class="integration-candidate-query-field"><span>搜索关键字</span><input id="integration-candidate-query-input" class="form-input" type="search" autocomplete="off" placeholder="歌曲名 歌手"></label><button id="integration-candidate-search-btn" type="button" class="btn-primary btn-xs" onclick="LibraryIntegration.searchCandidates()"><i class="fas fa-search"></i> 搜索</button></div>
             <div class="integration-candidate-toolbar"><label for="integration-candidate-source">搜索音源</label><select id="integration-candidate-source" class="form-input cs-native"></select><span id="integration-candidate-source-status" class="integration-caption"></span></div>
-            <section id="integration-local-candidate" class="integration-local-candidate hidden" aria-live="polite"><div class="integration-candidate-section-title"><span><i class="fas fa-hard-drive"></i> 本地曲库</span><small>当前文件，试听不会触发下载</small></div><div class="integration-local-candidate-row"><div class="integration-local-candidate-cover"><img id="integration-local-candidate-cover" src="/_player/assets/logo.svg" alt="本地歌曲封面"></div><div class="integration-local-candidate-copy"><strong id="integration-local-candidate-title">未找到本地歌曲</strong><small id="integration-local-candidate-meta">将直接搜索在线版本</small></div><button id="integration-local-preview-btn" type="button" class="btn-secondary btn-xs"><i class="fas fa-headphones"></i> 试听本地</button></div></section>
+            <section id="integration-local-candidate" class="integration-local-candidate hidden" aria-live="polite"><div class="integration-candidate-section-title"><span><i class="fas fa-hard-drive"></i> 本地曲库</span><small>当前文件，试听不会触发下载</small></div><div class="integration-local-candidate-row"><div class="integration-local-candidate-cover"><img id="integration-local-candidate-cover" src="/_player/assets/logo.svg" alt="本地歌曲封面"></div><div class="integration-local-candidate-copy"><strong id="integration-local-candidate-title">未找到本地歌曲</strong><small id="integration-local-candidate-meta">将直接搜索在线版本</small></div><div class="integration-local-candidate-actions"><button id="integration-local-preview-btn" type="button" class="btn-secondary btn-xs"><i class="fas fa-headphones"></i> 试听本地</button><button id="integration-local-adopt-btn" type="button" class="btn-primary btn-xs"><i class="fas fa-check"></i> 采用本地</button></div></div></section>
             <div id="integration-online-candidate-divider" class="integration-candidate-divider"><span><i class="fas fa-cloud-arrow-down"></i> 在线搜索候选</span><small>点击搜索后加载；采用后会下载并替换本地文件</small></div>
             <div id="integration-candidate-list" class="integration-candidate-list"><div class="integration-empty">请点击“搜索”加载候选版本。</div></div>
         </div>

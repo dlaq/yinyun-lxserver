@@ -183,8 +183,12 @@ export const metadataAgreement = (source: IntegrationTrack, candidate: Integrati
   const left = trackFeatures(source)
   const right = trackFeatures(candidate)
   const title = Boolean(left.title.key && left.title.key === right.title.key)
+  const artistAlias = left.artists.some(value => right.artists.some(candidateArtist => {
+    const shorter = Math.min(value.length, candidateArtist.length)
+    return shorter >= 2 && (value.includes(candidateArtist) || candidateArtist.includes(value))
+  }))
   const artist = Boolean(left.artists.length && right.artists.length && (
-    sameValues(left.artists, right.artists) || left.artists.some(value => right.artists.includes(value))
+    sameValues(left.artists, right.artists) || left.artists.some(value => right.artists.includes(value)) || artistAlias
   ))
   const album = Boolean(left.album && right.album && left.album === right.album)
   const duration = Boolean(source.duration && candidate.duration && Math.abs(source.duration - candidate.duration) <= 3)
@@ -217,6 +221,11 @@ const artistScore = (left: string[], right: string[]) => {
   if (left.join('|') === right.join('|')) return { score: 1, method: 'artist_exact' }
   const overlap = left.filter(value => right.includes(value)).length
   if (overlap > 0) return { score: Math.max(0.78, overlap / Math.max(left.length, right.length)), method: 'artist_overlap' }
+  const prefixAlias = left.some(value => right.some(candidate => {
+    const shorter = Math.min(value.length, candidate.length)
+    return shorter >= 2 && (value.includes(candidate) || candidate.includes(value))
+  }))
+  if (prefixAlias) return { score: 0.92, method: 'artist_alias' }
   const pair = left.map(value => Math.max(...right.map(candidate => similarity(value, candidate))))
   const score = pair.reduce((sum, value) => sum + value, 0) / pair.length
   return { score, method: score >= 0.86 ? 'artist_fuzzy' : 'artist_mismatch' }
@@ -421,7 +430,7 @@ export type PlaylistImportRecord = {
   yinyunPlaylistId: string
   tracks: IntegrationTrack[]
   /** User-confirmed provider for an ambiguous row, keyed by source index. */
-  resolutions?: Record<string, 'yinyun' | 'songloft'>
+  resolutions?: Record<string, 'yinyun' | 'songloft' | 'local'>
   /** Snapshot of the candidate selected by the user, keyed by source index. */
   resolvedCandidates?: Record<string, IntegrationTrack>
   createdAt: string

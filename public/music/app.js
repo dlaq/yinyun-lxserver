@@ -192,6 +192,23 @@ function escapeHtmlText(value) {
     })[ch]);
 }
 
+// The administrator's serverName is injected by /js/config.js. Apply it to
+// the player shell as soon as the config and DOM are available; this also
+// makes a persisted name survive a container restart instead of leaving the
+// hard-coded “音云 YINYUN” label in the sidebar.
+function applyServerBranding() {
+    const configured = String(window.CONFIG?.serverName || '').trim();
+    if (!configured) return;
+    const isDefault = ['yinyun', 'lxserver', '音云'].includes(configured.toLocaleLowerCase());
+    const label = isDefault ? '音云 YINYUN' : configured;
+    const brand = document.getElementById('player-brand-name');
+    if (brand) brand.textContent = label;
+    document.title = isDefault ? '音云 Yinyun' : `${label} · 音云`;
+    document.querySelectorAll('img[alt="Yinyun"]').forEach(image => { image.alt = label; });
+}
+window.applyServerBranding = applyServerBranding;
+applyServerBranding();
+
 function parseNetworkListAutoCheckInterval(value) {
     const minIntervalMs = 30 * 1000;
     if (value === undefined || value === null) return 0;
@@ -1059,10 +1076,14 @@ function renderHealthReport(report) {
     target.title = '';
     if (!report) { target.textContent = '尚未测试'; return; }
     const when = report.checkedAt ? new Date(report.checkedAt).toLocaleString('zh-CN') : '—';
-    const stateText = report.ok ? '通过' : `发现 ${report.failures?.length || 0} 个问题`;
+    const checks = Array.isArray(report.checks) ? report.checks : [];
     const failures = Array.isArray(report.failures) ? report.failures : [];
-    target.innerHTML = `<span class="${report.ok ? 'text-emerald-500' : 'text-red-400'}"><i class="fas ${report.ok ? 'fa-check-circle' : 'fa-triangle-exclamation'} mr-1"></i>${stateText}</span> · ${report.healthyTracks || 0}/${report.tracksChecked || 0} 首可解析 · ${when}${failures.length ? ' · <button type="button" class="health-report-link">查看问题明细</button>' : ''}`;
-    if (failures.length) {
+    const errorCount = checks.filter(item => item.status === 'error').length || failures.filter(item => item.status !== 'warn').length;
+    const warningCount = checks.filter(item => item.status === 'warn').length || failures.filter(item => item.status === 'warn').length;
+    const problemCount = errorCount + warningCount;
+    const stateText = report.ok ? '通过' : `发现 ${problemCount} 个问题`;
+    target.innerHTML = `<span class="${report.ok ? 'text-emerald-500' : errorCount ? 'text-red-400' : 'text-amber-500'}"><i class="fas ${report.ok ? 'fa-check-circle' : 'fa-triangle-exclamation'} mr-1"></i>${stateText}</span> · <span class="text-emerald-500">● ${Number(report.healthyTracks || 0)}</span> <span class="text-amber-500">● ${warningCount}</span> <span class="text-red-400">● ${errorCount}</span> · ${when}${problemCount ? ' · <button type="button" class="health-report-link">查看问题明细</button>' : ''}`;
+    if (problemCount) {
         target.style.cursor = 'pointer';
         target.title = '点击查看健康检查问题明细';
         target.onclick = () => showHealthReportDialog(window.__lastHealthReport);
@@ -1072,24 +1093,36 @@ function renderHealthReport(report) {
 function showHealthReportDialog(report) {
     if (!report) return;
     document.getElementById('health-report-modal')?.remove();
+    const checks = Array.isArray(report.checks) ? report.checks : [];
     const failures = Array.isArray(report.failures) ? report.failures : [];
+    const problemChecks = checks.filter(item => item.status !== 'ok');
+    const failureItems = failures.length ? failures : problemChecks.map(item => ({
+        playlist: '冒烟测试', source: item.source, sourceId: item.sourceId, deletable: item.deletable,
+        platform: item.platform, status: item.status, index: 0, title: report.keyword || '测试关键词',
+        artist: item.platform, message: item.message || '检查失败',
+    }));
     const modal = document.createElement('div');
     modal.id = 'health-report-modal';
     modal.className = 'health-report-modal';
-    const sourceSummary = failures.reduce((map, item) => {
-        const source = String(item.source || '未知音源');
-        map[source] = (map[source] || 0) + 1;
-        return map;
-    }, {});
-    const sourceNames = Object.keys(sourceSummary);
-    const rows = failures.length ? failures.map(item => {
+    const sourceNames = [...new Set(checks.map(item => String(item.source || '未知音源')))];
+    const platforms = [...new Set(checks.map(item => String(item.platform || '未知平台')))];
+    const checkByKey = new Map(checks.map(item => [`${String(item.source || '')}\u0000${String(item.platform || '')}`, item]));
+    const statusCell = item => {
+        if (!item) return '<span class="health-matrix-cell is-empty">—</span>';
+        const label = item.status === 'ok' ? '正常' : item.status === 'warn' ? '注意' : '失败';
+        return `<span class="health-matrix-cell is-${item.status}"><i class="fas fa-circle"></i>${label}</span>`;
+    };
+    const matrix = checks.length ? `<div class="health-matrix-wrap"><table class="health-matrix"><thead><tr><th>音源</th>${platforms.map(platform => `<th>${escapeHtmlText(platform)}</th>`).join('')}</tr></thead><tbody>${sourceNames.map(source => `<tr><th>${escapeHtmlText(source)}</th>${platforms.map(platform => statusCell(checkByKey.get(`${source}\u0000${platform}`))).join('')}</tr>`).join('')}</tbody></table></div>` : '<div class="health-report-empty">没有可检测的已启用音源。</div>';
+    const rows = failureItems.length ? failureItems.map(item => {
         const source = String(item.source || '未知音源');
         const sourceKey = encodeURIComponent(String(item.sourceId || source));
         const deleteButton = `<button type="button" class="health-source-delete" data-health-source="${escapeHtmlText(sourceKey)}" ${item.deletable ? '' : 'disabled'} title="${item.deletable ? '删除这个账户自定义音源' : '内置或共享音源不能从这里删除'}"><i class="fas fa-trash"></i> 删除音源</button>`;
-        return `<li><div class="health-report-row-main"><strong>${escapeHtmlText(item.playlist || '未命名歌单')}</strong><span>${escapeHtmlText(source)} · 第 ${Number(item.index ?? 0) + 1} 首 · ${escapeHtmlText(item.title || '未知歌曲')} · ${escapeHtmlText(item.artist || '')}</span><em>${escapeHtmlText(item.message || '解析失败')}</em></div><div class="health-report-row-action">${deleteButton}</div></li>`;
-    }).join('') : '<li class="health-report-empty">抽查歌曲全部可以解析。</li>';
-    const sourceBadges = sourceNames.map(source => `<span class="health-report-source-badge"><i class="fas fa-circle"></i>${escapeHtmlText(source)} · ${sourceSummary[source]} 个问题</span>`).join('');
-    modal.innerHTML = `<div class="health-report-dialog" role="dialog" aria-modal="true" aria-labelledby="health-report-title"><div class="health-report-heading"><div><span class="health-report-kicker"><i class="fas fa-heart-pulse"></i> 曲源健康检查</span><h2 id="health-report-title">问题明细</h2></div><button type="button" class="btn-icon health-report-close" aria-label="关闭"><i class="fas fa-times"></i></button></div><div class="health-report-toolbar"><button type="button" class="health-report-action" data-health-run><i class="fas fa-stethoscope"></i>立即冒烟测试</button><button type="button" class="health-report-action" data-health-refresh><i class="fas fa-rotate"></i>刷新</button><span class="health-report-recent">最近：${report.checkedAt ? escapeHtmlText(new Date(report.checkedAt).toLocaleString('zh-CN')) : '—'}</span></div><div class="health-report-counters"><span class="health-counter is-ok"><i class="fas fa-circle"></i>${Number(report.healthyTracks || 0)}</span><span class="health-counter is-warn"><i class="fas fa-circle"></i>${Math.max(0, Number(report.tracksChecked || 0) - Number(report.healthyTracks || 0))}</span><span class="health-counter is-error"><i class="fas fa-circle"></i>${failures.length}</span></div><p class="health-report-summary">抽查 ${Number(report.tracksChecked || 0)} 首歌曲，${Number(report.healthyTracks || 0)} 首可解析；${report.keyword ? `测试关键词“${escapeHtmlText(report.keyword)}”；` : ''}发现 ${failures.length} 个问题。</p><div class="health-report-source-summary">${sourceBadges || '<span class="health-report-empty">没有异常音源</span>'}</div><ul class="health-report-list">${rows}</ul></div>`;
+        const stateLabel = item.status === 'warn' ? '注意' : '失败';
+        return `<li><div class="health-report-row-main"><strong>${escapeHtmlText(item.playlist || '冒烟测试')}</strong><span>${escapeHtmlText(source)} · ${escapeHtmlText(item.platform || '未知平台')} · ${escapeHtmlText(item.title || '未知歌曲')} · ${escapeHtmlText(item.artist || '')}</span><em><b class="health-row-status is-${item.status || 'error'}">${stateLabel}</b> ${escapeHtmlText(item.message || '解析失败')}</em></div><div class="health-report-row-action">${deleteButton}</div></li>`;
+    }).join('') : '<li class="health-report-empty">所有音源平台均正常。</li>';
+    const errorCount = checks.filter(item => item.status === 'error').length;
+    const warningCount = checks.filter(item => item.status === 'warn').length;
+    modal.innerHTML = `<div class="health-report-dialog" role="dialog" aria-modal="true" aria-labelledby="health-report-title"><div class="health-report-heading"><div><span class="health-report-kicker"><i class="fas fa-heart-pulse"></i> 曲源健康检查</span><h2 id="health-report-title">问题明细</h2></div><button type="button" class="btn-icon health-report-close" aria-label="关闭"><i class="fas fa-times"></i></button></div><div class="health-report-toolbar"><button type="button" class="health-report-action" data-health-run><i class="fas fa-stethoscope"></i>立即冒烟测试</button><button type="button" class="health-report-action" data-health-refresh><i class="fas fa-rotate"></i>刷新</button><span class="health-report-recent">最近：${report.checkedAt ? escapeHtmlText(new Date(report.checkedAt).toLocaleString('zh-CN')) : '—'}</span></div><div class="health-report-counters"><span class="health-counter is-ok"><i class="fas fa-circle"></i>${Number(report.healthyTracks || 0)}</span><span class="health-counter is-warn"><i class="fas fa-circle"></i>${warningCount}</span><span class="health-counter is-error"><i class="fas fa-circle"></i>${errorCount}</span></div><p class="health-report-summary">检查 ${Number(report.tracksChecked || checks.length || 0)} 个音源平台；${report.keyword ? `测试关键词“${escapeHtmlText(report.keyword)}”；` : ''}绿色为正常、黄色为需要关注、红色为失败。</p>${matrix}<ul class="health-report-list">${rows}</ul></div>`;
     document.body.appendChild(modal);
     const close = () => modal.remove();
     modal.querySelector('.health-report-close')?.addEventListener('click', close);
@@ -1140,10 +1173,10 @@ async function loadHealthSettings() {
             const enabled = document.getElementById('health-enabled'); if (enabled) enabled.checked = value.enabled === true;
             const interval = document.getElementById('health-interval'); if (interval) interval.value = value.intervalMinutes || 360;
             const cron = document.getElementById('health-cron'); if (cron) cron.value = value.cronExpression || '0 6 * * *';
-            const sample = document.getElementById('health-sample-size'); if (sample) sample.value = value.sampleSize || 20;
             const keyword = document.getElementById('health-test-keyword'); if (keyword) keyword.value = value.testKeyword || '周杰伦';
             const threshold = document.getElementById('health-failure-threshold'); if (threshold) threshold.value = value.consecutiveFailureThreshold || 2;
             const notify = document.getElementById('health-notify'); if (notify) notify.checked = value.notify === true;
+            const pusherEnabled = document.getElementById('health-pusher-enabled'); if (pusherEnabled) pusherEnabled.checked = value.messagePusherEnabled === true;
             const url = document.getElementById('health-pusher-url'); if (url) url.value = value.messagePusherUrl || '';
             const channel = document.getElementById('health-pusher-channel'); if (channel) channel.value = value.messagePusherChannel || '';
             const barkEnabled = document.getElementById('health-bark-enabled'); if (barkEnabled) barkEnabled.checked = value.barkEnabled === true;
@@ -1159,10 +1192,9 @@ async function saveHealthSettings() {
         enabled: document.getElementById('health-enabled')?.checked === true,
         intervalMinutes: Number(document.getElementById('health-interval')?.value || 360),
         cronExpression: document.getElementById('health-cron')?.value || '0 6 * * *',
-        sampleSize: Number(document.getElementById('health-sample-size')?.value || 20),
         testKeyword: document.getElementById('health-test-keyword')?.value || '',
         consecutiveFailureThreshold: Number(document.getElementById('health-failure-threshold')?.value || 2),
-        notify: document.getElementById('health-notify')?.checked === true,
+        messagePusherEnabled: document.getElementById('health-pusher-enabled')?.checked === true,
         messagePusherUrl: document.getElementById('health-pusher-url')?.value || '',
         messagePusherChannel: document.getElementById('health-pusher-channel')?.value || '',
         barkEnabled: document.getElementById('health-bark-enabled')?.checked === true,
@@ -1413,6 +1445,7 @@ async function loadAboutContent() {
 
 // Set Version on Load
 document.addEventListener('DOMContentLoaded', () => {
+    applyServerBranding();
     if (window.CONFIG && window.CONFIG.version) {
         const versionEl = document.getElementById('app-version');
         if (versionEl) {
@@ -8738,10 +8771,14 @@ async function pushSettingsToServer(force = false) {
         const adminPass = localStorage.getItem('lx_admin_password');
         if (adminPass) headers['x-frontend-auth'] = adminPass;
 
+        const themePreferences = {
+            _theme: localStorage.getItem('lx_theme') || '',
+            _appearance: localStorage.getItem('lx_appearance') || 'system',
+        };
         const res = await fetch('/api/v1/player/user/settings', {
             method: 'POST',
             headers: headers,
-            body: JSON.stringify(settings)
+            body: JSON.stringify({ ...settings, ...themePreferences })
         });
         if (res.ok) {
             console.log('[Settings] 已成功同步到服务器');
@@ -8756,6 +8793,7 @@ async function pushSettingsToServer(force = false) {
         if (force) throw e;
     }
 }
+window.pushSettingsToServer = pushSettingsToServer;
 
 async function manualSaveSettings(btn) {
     const originalText = btn.innerHTML;
@@ -8826,6 +8864,18 @@ async function fetchSettingsFromServer() {
             }
             // Merge settings
             settings = normalizeStoredSettings({ ...settings, ...serverSettings });
+            // Theme and appearance are account preferences too.  Older
+            // snapshots may not contain them, so only apply valid values.
+            const serverTheme = String(serverSettings._theme || '').trim();
+            const serverAppearance = String(serverSettings._appearance || '').trim();
+            if (['emerald', 'blue', 'amber', 'violet', 'rose'].includes(serverTheme)) {
+                localStorage.setItem('lx_theme', serverTheme);
+                if (typeof window.setTheme === 'function') window.setTheme(serverTheme, false);
+            }
+            if (['light', 'dark', 'system'].includes(serverAppearance)) {
+                localStorage.setItem('lx_appearance', serverAppearance);
+                if (typeof window.setAppearance === 'function') window.setAppearance(serverAppearance, false);
+            }
             // 用户刚在本机修改的入口不能被账户中较旧的设置覆盖。
             if (localDefaultEntry) settings.defaultEntry = localDefaultEntry;
             // Save to local
@@ -8878,14 +8928,15 @@ async function handleSyncLogout(skipConfirm = false) {
     try {
         stopPlaylistSharePolling();
 
-        // 1. 服务端注销 Token
-        if (userToken) {
-            try {
-                await fetch('/api/v1/player/user/logout', {
-                    method: 'POST',
-                    headers: { 'x-user-token': userToken }
-                });
-            } catch (e) { console.warn('[Auth] Token 注销失败:', e); }
+        // 1. 服务端注销 Token 不应阻塞退出。旧实现等待远端响应，局域网
+        // 上游超时会把“退出”卡到一分钟；keepalive 让浏览器在后台完成注销。
+        const tokenToRevoke = userToken;
+        if (tokenToRevoke) {
+            void fetch('/api/v1/player/user/logout', {
+                method: 'POST',
+                headers: { 'x-user-token': tokenToRevoke },
+                keepalive: true,
+            }).catch(error => console.warn('[Auth] Token 注销失败:', error));
             userToken = null;
         }
 
@@ -8917,28 +8968,20 @@ async function handleSyncLogout(skipConfirm = false) {
         window.currentListData = null;
         window.myPersonalListData = null;
 
-        // 5. 清理 IndexedDB 数据
+        // 5. 清理账户歌单缓存，但不删除主题/外观/默认入口等浏览器设置。
+        // 清理在后台执行，退出动作只做本地凭证失效和页面重置。
         if (window.ListStore && typeof window.ListStore.remove === 'function') {
-            await window.ListStore.remove().catch(e => console.warn('[IDBStore] 清除失败:', e));
+            void window.ListStore.remove().catch(e => console.warn('[IDBStore] 清除失败:', e));
         }
-
-        // 6. 清理 CacheStorage 物理缓存 (如 Service Worker / Audio Cache)
         if ('caches' in window) {
-            try {
-                const keys = await caches.keys();
-                await Promise.all(keys.map(key => caches.delete(key)));
-            } catch (e) {
-                console.warn('[Cache] 物理缓存删除失败:', e);
-            }
+            void caches.keys().then(keys => Promise.all(keys.map(key => caches.delete(key))))
+                .catch(e => console.warn('[Cache] 物理缓存删除失败:', e));
         }
 
-        // 7. 彻底清空 localStorage & sessionStorage
-        const agreementAccepted = localStorage.getItem('lx_agreement_accepted');
-        localStorage.clear();
-        sessionStorage.clear();
-        if (agreementAccepted) {
-            localStorage.setItem('lx_agreement_accepted', agreementAccepted);
-        }
+        // 6. 只移除认证和账户会话项；lx_settings 等用户偏好跨账户保留。
+        ['lx_sync_user', 'lx_sync_pass', 'lx_user_token', 'lx_admin_password'].forEach(key => localStorage.removeItem(key));
+        ['yinyun.integration.access_token', 'yinyun.integration.username'].forEach(key => sessionStorage.removeItem(key));
+        sessionStorage.removeItem('yinyun.integration.access_token');
 
         // Clear forms if they exist in DOM
         const localUser = document.getElementById('sync-local-user');
@@ -8947,7 +8990,7 @@ async function handleSyncLogout(skipConfirm = false) {
         if (localPass) localPass.value = '';
 
         if (typeof showSuccess === 'function') {
-            showSuccess('已安全退出登录并清除所有缓存，正在刷新页面...');
+            showSuccess('已退出登录，正在刷新页面…');
         }
 
         // 8. 自动刷新网页
@@ -8983,8 +9026,18 @@ async function handleLocalLogin(options = {}) {
         if (success) {
             statusEl.innerHTML = '<i class="fas fa-check-circle text-emerald-500"></i> 登录成功，正在同步...';
 
+            // /verify now returns the session token together with the
+            // credential result, so a normal login does not perform a second
+            // password login request.  Keep the old fallback below for an
+            // older server that has not been upgraded yet.
+            const issuedToken = syncManager.client?.token;
+            if (issuedToken) {
+                userToken = issuedToken;
+                localStorage.setItem('lx_user_token', userToken);
+            }
+
             let hasMatchingToken = false;
-            if (userToken) {
+            if (userToken && !issuedToken) {
                 try {
                     const verifyRes = await fetch('/api/v1/player/user/auth/verify', {
                         headers: { 'x-user-token': userToken }
@@ -9003,7 +9056,7 @@ async function handleLocalLogin(options = {}) {
                 }
             }
 
-            if (!hasMatchingToken) {
+            if (!hasMatchingToken && !issuedToken) {
                 try {
                     const tokenRes = await fetch('/api/v1/player/user/login', {
                         method: 'POST',
@@ -9060,26 +9113,17 @@ async function handleLocalLogin(options = {}) {
                 console.warn('[Cache] 登录前恢复歌单失败:', error);
             }
 
-            // Fetch List
-            const listData = await syncManager.sync();
-            currentListData = listData;
-            if (currentListData) currentListData.username = user; // Attach username
-            window.myPersonalListData = currentListData; // [个人数据缓存]
-            // Show the account's playlists as soon as the sync payload arrives.
-            // Artwork hydration and secondary integrations continue in the
-            // background so LAN users do not remain on “正在同步” for every
-            // cover/index request.
-            renderMyLists(listData);
-
-            // [Cache] Save list data immediately for offline availability / quick load
-            await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
-
-            updateSyncStatus(`<i class="fas fa-check-circle text-emerald-500"></i> 已同步 (用户: ${user})`);
-            if (requiredLoginVisible) hideRequiredLoginModal();
-            // Secondary account work is deliberately detached from the fast
-            // login path.  Each task is isolated so one slow Songloft or
-            // artwork request cannot make the whole account look unlogged in.
-            void (async () => {
+            const finishListSync = async (listData, background = false) => {
+                currentListData = listData;
+                if (currentListData) currentListData.username = user;
+                window.myPersonalListData = currentListData;
+                renderMyLists(listData);
+                await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
+                updateSyncStatus(`<i class="fas fa-check-circle text-emerald-500"></i> ${background ? '已同步' : '已同步'} (用户: ${user})`);
+                if (requiredLoginVisible) hideRequiredLoginModal();
+                // Artwork/index work is deliberately detached from the fast
+                // login path so a slow NAS never makes authentication appear stuck.
+                void (async () => {
                 try {
                     await hydratePersonalPlaylistArtwork(listData);
                     renderMyLists(listData);
@@ -9100,7 +9144,27 @@ async function handleLocalLogin(options = {}) {
                 if (document.getElementById('view-search')?.classList.contains('active') && !searchInputAfterLogin?.value.trim()) {
                     showInitialSearchState();
                 }
-            })();
+                })();
+            };
+
+            // Fetch the account list, but cap the foreground wait. A cached
+            // list is already rendered above; when the NAS/API is slow we let
+            // the request finish in the background and return to the player.
+            const syncPromise = syncManager.sync();
+            const listData = await Promise.race([
+                syncPromise,
+                new Promise(resolve => setTimeout(() => resolve(null), 3000)),
+            ]).catch(error => { console.warn('[Sync] 首次歌单同步失败:', error); return null; });
+            if (listData) {
+                await finishListSync(listData, false);
+            } else {
+                updateSyncStatus(`<i class="fas fa-cloud-arrow-up text-emerald-500"></i> 已登录，歌单正在后台同步 (用户: ${user})`);
+                if (requiredLoginVisible) hideRequiredLoginModal();
+                void syncPromise.then(fresh => fresh && finishListSync(fresh, true)).catch(error => {
+                    console.warn('[Sync] 后台歌单同步失败:', error);
+                    updateSyncStatus(`<i class="fas fa-exclamation-circle text-amber-500"></i> 已登录，歌单同步稍后重试 (用户: ${user})`);
+                });
+            }
             return true;
 
         } else {

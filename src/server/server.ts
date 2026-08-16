@@ -1791,9 +1791,14 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             const normalizedUsername = tryNormalizeUsername(username)
             const user = global.lx.config.users.find(u => u.name === normalizedUsername && u.password === password)
             if (user) {
+              // The credential probe also issues the short-lived player session
+              // used by the rest of the web player.  Returning it here avoids
+              // a second identical password request immediately after login.
+              const token = generateSessionId()
+              userSessions.set(token, { username: user.name, createdAt: Date.now() })
               loginLog.info(`User login success user=${user.name} ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ success: true, username: user.name }))
+              res.end(JSON.stringify({ success: true, username: user.name, token }))
             } else {
               loginLog.warn(`User login failed user=${username} ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(401, { 'Content-Type': 'application/json' })

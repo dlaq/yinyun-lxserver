@@ -33,6 +33,7 @@ import {
 import { normalizeLyricsResponse } from './utils/apiLyrics'
 import {
   canonicalTrackId,
+  metadataAgreement,
   matchTracks,
   mergePlaylistIds,
   playlistSyncConflicts,
@@ -111,10 +112,10 @@ type HealthSettings = {
   enabled: boolean
   intervalMinutes: number
   cronExpression: string
-  sampleSize: number
   testKeyword: string
   consecutiveFailureThreshold: number
   notify: boolean
+  messagePusherEnabled: boolean
   messagePusherUrl: string
   messagePusherToken: string
   messagePusherChannel: string
@@ -131,12 +132,23 @@ type HealthReport = {
   playlists: number
   tracksChecked: number
   healthyTracks: number
+  warningTracks?: number
   keyword?: string
+  checks?: Array<{
+    source: string
+    sourceId?: string
+    platform: string
+    status: 'ok' | 'warn' | 'error'
+    message?: string
+    deletable?: boolean
+  }>
   failures: Array<{
     playlist: string
     source: string
     sourceId?: string
     deletable?: boolean
+    platform?: string
+    status?: 'warn' | 'error'
     index: number
     title: string
     artist: string
@@ -150,10 +162,10 @@ const DEFAULT_HEALTH_SETTINGS: HealthSettings = {
   enabled: false,
   intervalMinutes: 360,
   cronExpression: '0 6 * * *',
-  sampleSize: 20,
   testKeyword: '周杰伦',
   consecutiveFailureThreshold: 2,
   notify: false,
+  messagePusherEnabled: false,
   messagePusherUrl: '',
   messagePusherToken: '',
   messagePusherChannel: '',
@@ -204,10 +216,10 @@ const publicHealthSettings = (settings: HealthSettings) => ({
   enabled: settings.enabled,
   intervalMinutes: settings.intervalMinutes,
   cronExpression: settings.cronExpression,
-  sampleSize: settings.sampleSize,
   testKeyword: settings.testKeyword,
   consecutiveFailureThreshold: settings.consecutiveFailureThreshold,
   notify: settings.notify,
+  messagePusherEnabled: settings.messagePusherEnabled,
   messagePusherUrl: settings.messagePusherUrl,
   messagePusherChannel: settings.messagePusherChannel,
   messagePusherTokenConfigured: Boolean(settings.messagePusherToken),
@@ -219,7 +231,12 @@ const publicHealthSettings = (settings: HealthSettings) => ({
 })
 
 const postHealthNotification = async (settings: HealthSettings, report: HealthReport, force = false) => {
-  if (!force && !settings.notify) return
+  const hasChannel = Boolean(
+    (settings.messagePusherEnabled && settings.messagePusherUrl)
+    || (settings.barkEnabled && settings.barkDeviceKey)
+    || (settings.serverChanEnabled && settings.serverChanSendKey),
+  )
+  if (!force && !hasChannel) return
   const content = report.ok
     ? `曲源健康检查通过：检查 ${report.tracksChecked} 首，全部可解析。`
     : `曲源健康检查发现 ${report.failures.length} 个问题（${report.healthyTracks}/${report.tracksChecked} 首正常）。`
@@ -231,7 +248,7 @@ const postHealthNotification = async (settings: HealthSettings, report: HealthRe
       console.warn('[Health] notification failed:', error?.message || error)
     }).finally(() => clearTimeout(timer)))
   }
-  if (settings.messagePusherUrl) {
+  if (settings.messagePusherEnabled && settings.messagePusherUrl) {
     send(settings.messagePusherUrl, {
       method: 'POST',
       headers: {
@@ -306,69 +323,85 @@ const runHealthCheck = async (deps: ApiV1Dependencies, username: string): Promis
   const state = readHealthState(username)
   const store = deps.getPlaylistImportStore?.(username)
   const records = store ? store.load() : []
-  const sampleSize = Math.min(100, Math.max(1, Number(state.settings.sampleSize) || DEFAULT_HEALTH_SETTINGS.sampleSize))
+  const keyword = String(state.settings.testKeyword || '').trim() || DEFAULT_HEALTH_SETTINGS.testKeyword
   const failures: HealthReport['failures'] = []
-  // sampleSize is a global budget, not a per-playlist multiplier.  Select
-  // evenly-spaced entries so one large playlist cannot hide other sources.
-  const entries = records.flatMap(record => (Array.isArray(record.tracks) ? record.tracks : []).map((track, index) => ({ record, track, index })))
-  const sample = entries.length <= sampleSize
-    ? entries
-    : Array.from({ length: sampleSize }, (_, position) => entries[Math.floor(position * entries.length / sampleSize)])
-  let tracksChecked = 0
-  let healthyTracks = 0
-  for (const entry of sample) {
-    const { record, track, index } = entry
-    tracksChecked++
+  const sourceInfos = (deps.getLoadedSources?.() || []).filter(source => {
+    if (source?.enabled === false) return false
+    const owner = String(source?.owner || '')
+    return owner === username || isSourceSharedWithUser(owner, String(source?.id || ''), username)
+  })
+  const sourceChecks = sourceInfos.flatMap(source => Object.keys(source.sources || {}).map(platform => ({ source, platform })))
+
+  // The reference UI tests each configured source/platform with one fixed
+  // keyword. It does not sample imported songs or multiply work by playlist
+  // size. Search once, then resolve the first result to verify the complete
+  // source path (search + playable URL).
+  const checks = await Promise.all(sourceChecks.map(async ({ source, platform }) => {
+    const sourceName = String(source.name || source.id || '未知音源')
+    const sourceId = String(source.id || '') || undefined
+    const base = { source: sourceName, sourceId, platform, deletable: Boolean(sourceId && source.owner === username) }
     try {
-      const song = normalizeImportedSong(deps, track, String(record.source || track.source || ''))
-      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('解析超时')), 15000))
+      if (!deps.isSourceSupported(platform, username)) {
+        return { ...base, status: 'warn' as const, message: '该平台在当前账户中未启用' }
+      }
+      const sdk = deps.musicSdk?.[platform]
+      if (typeof sdk?.musicSearch?.search !== 'function') {
+        return { ...base, status: 'error' as const, message: '该平台没有可用的歌曲搜索接口' }
+      }
+      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('检测超时')), 12000))
+      const raw = await Promise.race([awaitSdkRequest(sdk.musicSearch.search(keyword, 1, 1)), timeout])
+      const items = normalizeSearchResult(raw, platform).items
+      if (!items.length) return { ...base, status: 'warn' as const, message: `关键词“${keyword}”没有返回歌曲` }
+      const song = deps.normalizeSongInfo(items[0])
       await Promise.race([
         deps.resolveSong(song, '128k', username, true, { allowPlatformSwitch: false, allowApiSwitch: false }),
         timeout,
       ])
-      healthyTracks++
+      return { ...base, status: 'ok' as const }
     } catch (error: any) {
-      if (failures.length < 100) failures.push({
-        playlist: String(record.name || record.sourcePlaylistName || '未命名歌单'),
-        ...(() => {
-          const platform = String(record.source || track.source || '未知音源').trim()
-          let sourceInfo: any
-          try {
-            sourceInfo = deps.getLoadedSources?.().find(source => (
-              source.owner === username
-              && source.enabled !== false
-              && Object.prototype.hasOwnProperty.call(source.sources || {}, platform)
-            ))
-          } catch { sourceInfo = undefined }
-          return {
-            // Keep the platform visible while identifying the concrete custom
-            // source that can actually be removed from the account.
-            source: sourceInfo ? `${String(sourceInfo.name || sourceInfo.id)} · ${platform}` : platform,
-            sourceId: sourceInfo?.id || undefined,
-            deletable: Boolean(sourceInfo?.id),
-          }
-        })(),
-        index,
-        title: String(track.title || ''),
-        artist: String(track.artist || ''),
-        message: String(error?.message || '解析失败'),
-      })
+      return { ...base, status: 'error' as const, message: String(error?.message || '解析失败') }
     }
+  }))
+  for (const check of checks) {
+    if (check.status === 'ok') continue
+    if (failures.length >= 100) break
+    failures.push({
+      playlist: '冒烟测试',
+      source: check.source,
+      sourceId: check.sourceId,
+      deletable: check.deletable,
+      platform: check.platform,
+      status: check.status,
+      index: 0,
+      title: keyword,
+      artist: check.platform,
+      message: check.message || (check.status === 'warn' ? '检查结果需要关注' : '解析失败'),
+    })
   }
+  const tracksChecked = checks.length
+  const healthyTracks = checks.filter(check => check.status === 'ok').length
+  const warningTracks = checks.filter(check => check.status === 'warn').length
   const report: HealthReport = {
     checkedAt: new Date().toISOString(),
-    ok: failures.length === 0,
+    ok: checks.every(check => check.status === 'ok'),
     playlists: records.length,
     tracksChecked,
     healthyTracks,
-    keyword: String(state.settings.testKeyword || '').trim() || undefined,
+    warningTracks,
+    keyword,
+    checks,
     failures,
   }
   state.report = report
   state.consecutiveFailures = report.ok ? 0 : state.consecutiveFailures + 1
   writeHealthState(username, state)
   const threshold = Math.max(1, Number(state.settings.consecutiveFailureThreshold) || DEFAULT_HEALTH_SETTINGS.consecutiveFailureThreshold)
-  if (state.settings.notify && (report.ok || state.consecutiveFailures >= threshold)) {
+  const hasNotificationChannel = Boolean(
+    (state.settings.messagePusherEnabled && state.settings.messagePusherUrl)
+    || (state.settings.barkEnabled && state.settings.barkDeviceKey)
+    || (state.settings.serverChanEnabled && state.settings.serverChanSendKey),
+  )
+  if ((state.settings.notify || hasNotificationChannel) && (report.ok || state.consecutiveFailures >= threshold)) {
     await postHealthNotification(state.settings, report)
   }
   return report
@@ -1146,9 +1179,10 @@ const dedupeSongs = (songs: any[]) => {
 }
 
 type PlaylistImportMatch = ReturnType<typeof matchTracks>[number] & {
-  matchedBy?: 'yinyun' | 'songloft'
+  matchedBy?: 'yinyun' | 'songloft' | 'local'
   yinyun?: ReturnType<typeof matchTracks>[number]
   songloft?: ReturnType<typeof matchTracks>[number]
+  local?: ReturnType<typeof matchTracks>[number]
 }
 
 const choosePlaylistImportMatch = (
@@ -1171,6 +1205,36 @@ const anchorSongloftSources = (
   return relativePath ? { ...track, relativePath: String(relativePath).replace(/^music\//i, '') } : track
 })
 
+/**
+ * Find a physical shared-library file even when one provider has not finished
+ * indexing it yet. The candidate must still pass the same metadata sanity rule
+ * used by relative-path matching; a filename alone is never enough.
+ */
+const bestSharedLocalCandidate = (
+  source: IntegrationTrack,
+  matches: Array<ReturnType<typeof matchTracks>[number] | undefined>,
+) => matches.flatMap(match => [
+  ...(match?.candidates || []).map(item => ({ track: item.track, score: Number(item.score || 0) })),
+  ...(match?.candidate ? [{ track: match.candidate, score: Number(match.score || 0) }] : []),
+])
+  .filter((item): item is { track: IntegrationTrack; score: number } => Boolean(item.track && isLocalIntegrationTrack(item.track)))
+  .filter(item => metadataAgreement(source, item.track).strong)
+  .sort((left, right) => right.score - left.score)[0] || null
+
+const promoteSharedLocalMatch = (
+  match: ReturnType<typeof matchTracks>[number],
+  candidate: IntegrationTrack,
+  score: number,
+) => ({
+  ...match,
+  status: 'matched' as const,
+  candidate,
+  score: Math.max(score, Number(match.score || 0), 0.82),
+  method: 'shared_local_file',
+  candidates: [{ track: candidate, score: Math.max(score, 0.82), method: 'shared_local_file' }, ...(match.candidates || [])]
+    .filter((item, index, list) => index === list.findIndex(other => String(other.track.relativePath || '') === String(item.track.relativePath || ''))),
+})
+
 const getPlaylistMatches = async (
   deps: ApiV1Dependencies,
   username: string,
@@ -1189,8 +1253,23 @@ const getPlaylistMatches = async (
   const songloftSources = anchorSongloftSources(tracks, yinyunMatches)
   const songloftMatches = matchTracks(songloftSources, songloftTracks, SHARED_LIBRARY_MATCH_OPTIONS)
   return tracks.map((_, index) => {
-    const effective = choosePlaylistImportMatch(yinyunMatches[index], songloftMatches[index])
-    return { ...effective, yinyun: yinyunMatches[index], songloft: songloftMatches[index] }
+    let yinyun = yinyunMatches[index]
+    let songloft = songloftMatches[index]
+    const shared = bestSharedLocalCandidate(tracks[index], [yinyun, songloft])
+    // A shared file is a valid match for both views once metadata agrees,
+    // even if either provider's scan database is one refresh behind. This
+    // prevents a known local file from entering the download queue again.
+    if (shared) {
+      yinyun = promoteSharedLocalMatch(yinyun, shared.track, shared.score)
+      songloft = promoteSharedLocalMatch(songloft, shared.track, shared.score)
+    }
+    const effective = shared
+      ? { ...promoteSharedLocalMatch(choosePlaylistImportMatch(yinyun, songloft), shared.track, shared.score), matchedBy: 'local' as const }
+      : choosePlaylistImportMatch(yinyun, songloft)
+    const local = shared
+      ? promoteSharedLocalMatch({ ...yinyun, source: tracks[index] }, shared.track, shared.score)
+      : undefined
+    return { ...effective, yinyun, songloft, local }
   })
 }
 
@@ -1203,7 +1282,7 @@ const getPlaylistImportMatches = async (
   return matches.map((match, index) => {
     const provider = record.resolutions?.[String(index)]
     if (!provider) return match
-    const selected = match[provider]
+    const selected = provider === 'local' ? match.local : match[provider]
     const markProviderMatched = (providerMatch: ReturnType<typeof matchTracks>[number], candidate: IntegrationTrack) => ({
       ...providerMatch,
       status: 'matched' as const,
@@ -1220,8 +1299,8 @@ const getPlaylistImportMatches = async (
       // regressing the row to “需确认”.
       const persisted = record.resolvedCandidates?.[String(index)]
       if (!persisted?.title) return match
-      const yinyun = provider === 'yinyun' ? markProviderMatched(match.yinyun || match, persisted) : match.yinyun
-      const songloft = provider === 'songloft' ? markProviderMatched(match.songloft || match, persisted) : match.songloft
+      const yinyun = provider === 'yinyun' || provider === 'local' ? markProviderMatched(match.yinyun || match, persisted) : match.yinyun
+      const songloft = provider === 'songloft' || provider === 'local' ? markProviderMatched(match.songloft || match, persisted) : match.songloft
       return {
         ...match,
         status: 'matched' as const,
@@ -1237,8 +1316,8 @@ const getPlaylistImportMatches = async (
     // An ambiguous match still exposes its best candidate.  The explicit
     // user choice turns that candidate into the effective matched result;
     // without this conversion the confirmation button would have no effect.
-    const yinyun = provider === 'yinyun' ? markProviderMatched(match.yinyun || match, selected.candidate) : match.yinyun
-    const songloft = provider === 'songloft' ? markProviderMatched(match.songloft || match, selected.candidate) : match.songloft
+    const yinyun = provider === 'yinyun' || provider === 'local' ? markProviderMatched(match.yinyun || match, selected.candidate) : match.yinyun
+    const songloft = provider === 'songloft' || provider === 'local' ? markProviderMatched(match.songloft || match, selected.candidate) : match.songloft
     return { ...selected, status: 'matched' as const, yinyun, songloft, matchedBy: provider }
   })
 }
@@ -1250,7 +1329,7 @@ const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1
   // is rescanning).  Keep that physical-file evidence explicit so the UI can
   // show the local match without inflating either provider's authoritative
   // indexed count.
-  const providerMatches = [match.yinyun, match.songloft, match]
+  const providerMatches = [match.yinyun, match.songloft, match.local, match]
   const localCandidate = providerMatches
     .flatMap(item => [
       ...(item?.candidates || []).map(candidate => ({ track: candidate.track, score: candidate.score })),
@@ -1812,10 +1891,10 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         enabled: body.enabled === undefined ? current.settings.enabled : Boolean(body.enabled),
         intervalMinutes: Math.min(7 * 24 * 60, Math.max(15, Number(body.intervalMinutes) || current.settings.intervalMinutes)),
         cronExpression: String(body.cronExpression ?? current.settings.cronExpression).trim().slice(0, 100),
-        sampleSize: Math.min(100, Math.max(1, Number(body.sampleSize) || current.settings.sampleSize)),
         testKeyword: String(body.testKeyword ?? current.settings.testKeyword).trim().slice(0, 100),
         consecutiveFailureThreshold: Math.min(20, Math.max(1, Number(body.consecutiveFailureThreshold) || current.settings.consecutiveFailureThreshold)),
         notify: body.notify === undefined ? current.settings.notify : Boolean(body.notify),
+        messagePusherEnabled: body.messagePusherEnabled === undefined ? current.settings.messagePusherEnabled : Boolean(body.messagePusherEnabled),
         messagePusherUrl: String(body.messagePusherUrl ?? current.settings.messagePusherUrl).trim().slice(0, 1000),
         messagePusherToken: body.messagePusherToken === undefined
           ? current.settings.messagePusherToken
@@ -1856,10 +1935,19 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         playlists: 0,
         tracksChecked: 1,
         healthyTracks: 0,
+        warningTracks: 0,
         keyword: String(state.settings.testKeyword || '').trim() || undefined,
+        checks: [{
+          source: 'message-pusher',
+          platform: '推送',
+          status: 'error',
+          message: '这是一次手动推送测试，不代表真实音源故障。',
+        }],
         failures: [{
           playlist: '推送测试',
           source: 'message-pusher',
+          platform: '推送',
+          status: 'error',
           index: 0,
           title: '曲源健康检查推送测试',
           artist: username,
@@ -1868,7 +1956,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       }
       await postHealthNotification(state.settings, report, true)
       success(res, { sent: Boolean(
-        state.settings.messagePusherUrl
+        (state.settings.messagePusherEnabled && state.settings.messagePusherUrl)
         || (state.settings.barkEnabled && state.settings.barkDeviceKey)
         || (state.settings.serverChanEnabled && state.settings.serverChanSendKey),
       ) })
@@ -2135,9 +2223,13 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       const body = await readJson(req)
       const importId = String(body.importId || '').trim()
       const index = Number(body.index)
-      const provider: 'yinyun' | 'songloft' | '' = body.provider === 'songloft' ? 'songloft' : body.provider === 'yinyun' ? 'yinyun' : ''
+      const provider: 'yinyun' | 'songloft' | 'local' | '' = body.provider === 'songloft'
+        ? 'songloft'
+        : body.provider === 'local'
+          ? 'local'
+          : body.provider === 'yinyun' ? 'yinyun' : ''
       if (!importId || !Number.isInteger(index) || index < 0 || !provider) {
-        throw new ApiError(400, 'invalid_playlist_resolution', '需要导入记录 ID、歌曲序号和候选来源（yinyun 或 songloft）')
+        throw new ApiError(400, 'invalid_playlist_resolution', '需要导入记录 ID、歌曲序号和候选来源（local、yinyun 或 songloft）')
       }
       const store = deps.getPlaylistImportStore?.(username)
       if (!store) throw new ApiError(503, 'playlist_import_store_unavailable', '导入歌单存储尚未配置')
@@ -2146,7 +2238,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (!record || record.username !== username) throw new ApiError(404, 'playlist_import_not_found', '导入歌单记录不存在')
       if (!record.tracks[index]) throw new ApiError(404, 'playlist_track_not_found', '导入记录中不存在该歌曲序号')
       const rawMatches = await getPlaylistMatches(deps, username, record.tracks)
-      const selected = rawMatches[index]?.[provider]
+      const selected = provider === 'local' ? rawMatches[index]?.local : rawMatches[index]?.[provider]
       if (!selected?.candidate || !['matched', 'ambiguous'].includes(selected.status)) {
         throw new ApiError(409, 'playlist_candidate_unavailable', '所选来源当前没有可确认的本地候选，请先刷新两个曲库索引')
       }

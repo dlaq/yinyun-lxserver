@@ -15,6 +15,10 @@ services:
       - ./music:/server/music/${LX_MUSIC_USER:-admin}
     environment:
       NODE_ENV: production
+      TZ: Asia/Shanghai
+      DATA_PATH: /server/data
+      LOG_PATH: /server/data/logs
+      CONFIG_PATH: /server/data/config.js
       # Optional Songloft playlist integration (keep credentials in .env or
       # the deployment secret store, never commit them here).
       # SONGLOFT_API_URL: http://songloft-host:58091/api/v1

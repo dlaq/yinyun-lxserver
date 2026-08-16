@@ -6,6 +6,7 @@ class LocalClient {
         this.password = password;
         this.baseUrl = '/api/v1/player/user';
         this.isConnected = false;
+        this.token = null;
     }
 
     async login() {
@@ -17,9 +18,11 @@ class LocalClient {
             });
             const data = await res.json();
             this.isConnected = data.success === true;
+            this.token = this.isConnected && data.token ? data.token : null;
             return this.isConnected;
         } catch {
             this.isConnected = false;
+            this.token = null;
             return false;
         }
     }

@@ -585,6 +585,7 @@
     function findLocalCandidate(item, preferredProvider = '') {
         const matches = [
             preferredProvider ? item?.[preferredProvider] : null,
+            item?.localCandidate ? { candidate: item.localCandidate } : null,
             item?.yinyun,
             item?.songloft,
         ].filter(Boolean);
@@ -626,6 +627,12 @@
         if (button) {
             button.onclick = () => previewCandidate(candidate);
             button.disabled = false;
+        }
+        const adopt = el('integration-local-adopt-btn');
+        if (adopt) {
+            adopt.onclick = () => selectLocalCandidate(state.candidateIndex, candidate);
+            adopt.disabled = state.candidateContext === 'queue';
+            adopt.title = state.candidateContext === 'queue' ? '下载队列任务不能直接采用本地文件' : '使用共享曲库中的本地文件，不会下载';
         }
         if (divider) {
             const note = divider.querySelector('small');
@@ -767,6 +774,21 @@
             : `第 ${Number(index) + 1} 首已选择下载版本，可点击手工补齐加入队列`);
     }
 
+    async function selectLocalCandidate(index, track) {
+        if (state.candidateContext === 'queue') return notifyError(new Error('下载队列任务请使用在线候选换源'));
+        if (!state.importId || !track) return notifyError(new Error('当前导入记录没有可采用的本地文件'));
+        try {
+            const data = await api('/api/v1/integration/playlist/resolve-item', {
+                method: 'POST',
+                body: JSON.stringify({ importId: state.importId, index, provider: 'local' }),
+            });
+            state.importData = { ...state.importData, items: data.items, counts: data.counts };
+            closeCandidatePicker();
+            renderImport(state.importData);
+            if (typeof showSuccess === 'function') showSuccess(`已确认第 ${Number(index) + 1} 首使用本地文件，不会重复下载`);
+        } catch (error) { notifyError(error); }
+    }
+
     function sourceLabel(source) {
         return ({ aggregate: '聚合', local: '本地曲库', wy: '网易云', tx: 'QQ音乐', kw: '酷我', kg: '酷狗', mg: '咪咕', bd: '百度' })[source] || String(source || '').toUpperCase();
     }
@@ -904,27 +926,29 @@
         const items = state.importData?.items || [];
         const visible = state.filter === 'all' ? items : items.filter(item => item.status === state.filter);
         const body = el('integration-result-body');
-        const statusLabel = status => status === 'matched' ? '已找到' : status === 'missing' ? '未找到' : '需确认';
+        const statusLabel = (status, match) => match?.method === 'shared_local_file' ? '已找到（共享本地）' : status === 'matched' ? '已找到' : status === 'missing' ? '未找到' : '需确认';
         const statusCell = (match, label, index, provider, localFallback) => {
             const fallback = !match?.candidate && localFallback ? localFallback : null;
             const effectiveStatus = match?.status || (fallback ? 'matched' : 'missing');
             const title = match?.candidate || fallback;
-            return `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(effectiveStatus)}">${label}: ${statusLabel(effectiveStatus)}${fallback ? '（共享本地文件）' : ''}</span>${title ? `<small>${escapeHtml(title.title || '')} · ${escapeHtml(title.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
+            const displayMatch = fallback ? { ...match, method: 'shared_local_file' } : match;
+            return `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(effectiveStatus)}">${label}: ${statusLabel(effectiveStatus, displayMatch)}</span>${title ? `<small>${escapeHtml(title.title || '')} · ${escapeHtml(title.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
         };
         body.innerHTML = visible.length ? visible.map(item => {
             const source = item.source || {};
             const checked = state.selected.has(Number(item.index));
             const selected = state.downloadSelections.get(Number(item.index));
-            const canSelect = item.downloadable !== false && (item.status === 'missing' || (item.status === 'ambiguous' && Boolean(selected)));
-            const decision = item.status === 'matched' ? (item.matchedBy === 'songloft' ? '共享文件已存在，等待音云索引' : '音云已收录') : item.status === 'ambiguous' ? '需要人工确认' : '可加入音云下载';
-            const confirmButtons = item.status === 'ambiguous' ? `<div class="integration-confirm-actions">${item.yinyun?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'yinyun')" title="使用音云候选">采用音云</button>` : ''}${item.songloft?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'songloft')" title="使用 Songloft 候选">采用 Songloft</button>` : ''}</div>` : '';
+            const localOnly = item.status === 'missing' && Boolean(item.localCandidate);
+            const canSelect = !localOnly && item.downloadable !== false && (item.status === 'missing' || (item.status === 'ambiguous' && Boolean(selected)));
+            const decision = item.status === 'matched' || localOnly ? (item.matchedBy === 'local' || localOnly ? '共享本地文件，无需下载' : item.matchedBy === 'songloft' ? '共享文件已存在，等待音云索引' : '音云已收录') : item.status === 'ambiguous' ? '需要人工确认' : '可加入音云下载';
+            const confirmButtons = item.status === 'ambiguous' ? `<div class="integration-confirm-actions">${item.localCandidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'local')" title="使用共享曲库中的本地文件">采用本地</button>` : ''}${item.yinyun?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'yinyun')" title="使用音云候选">采用音云</button>` : ''}${item.songloft?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'songloft')" title="使用 Songloft 候选">采用 Songloft</button>` : ''}</div>` : '';
             const manualButton = item.status !== 'matched' || item.replaceable ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.openCandidatePicker(${Number(item.index)})"><i class="fas fa-headphones"></i> ${selected ? '更换版本' : item.replaceable ? '替换版本' : '选择版本'}</button>` : '';
             const selectionText = selected ? `<small class="integration-match-source">${selected.replaceLocal ? '已选替换：' : '已选：'}${escapeHtml(selected.title)} · ${escapeHtml(selected.artist)}</small>` : '';
             return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun', item.localCandidate)}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft', item.localCandidate)}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${item.localCandidate && item.status !== 'matched' ? '<small class="integration-match-source">共享曲库已有本地文件，可试听；索引状态可能正在刷新</small>' : ''}${selectionText}${manualButton}${confirmButtons}</td></tr>`;
         }).join('') : '<tr><td colspan="6" class="integration-empty">当前筛选没有歌曲</td></tr>';
         document.querySelectorAll('[data-integration-filter]').forEach(button => button.classList.toggle('active', button.dataset.integrationFilter === state.filter));
         el('integration-selected-count').textContent = `已选 ${state.selected.size} 首`;
-        const selectable = visible.filter(item => item.status === 'missing' && item.downloadable !== false);
+        const selectable = visible.filter(item => item.status === 'missing' && !item.localCandidate && item.downloadable !== false);
         el('integration-select-visible').checked = selectable.length > 0 && selectable.every(item => state.selected.has(Number(item.index)));
     }
 
@@ -933,7 +957,7 @@
     function toggleVisible(checked) {
         const items = state.importData?.items || [];
         const visible = state.filter === 'all' ? items : items.filter(item => item.status === state.filter);
-        visible.filter(item => item.status === 'missing' && item.downloadable !== false).forEach(item => checked ? state.selected.add(Number(item.index)) : state.selected.delete(Number(item.index)));
+        visible.filter(item => item.status === 'missing' && !item.localCandidate && item.downloadable !== false).forEach(item => checked ? state.selected.add(Number(item.index)) : state.selected.delete(Number(item.index)));
         renderRows();
     }
 
@@ -966,7 +990,7 @@
 
     async function resolveItem(index, provider) {
         if (!state.importId) return notifyError(new Error('请先导入或打开歌单记录'));
-        const label = provider === 'songloft' ? 'Songloft' : '音云';
+        const label = provider === 'songloft' ? 'Songloft' : provider === 'local' ? '本地曲库' : '音云';
         try {
             const data = await api('/api/v1/integration/playlist/resolve-item', {
                 method: 'POST',
@@ -1203,6 +1227,6 @@
         setFilter, toggleItem, toggleVisible, completeSelected, completeAll,
         triggerScan, refreshBothIndexes, refreshYinyunIndex, refreshSongloftIndex, resolveItem, updateSyncMode, syncPlaylist,
         deleteYinyunPlaylist, deleteSongloftPlaylist, openCandidatePicker, closeCandidatePicker,
-        previewCandidate, previewLocalCandidate, previewQueueItem, openQueueSourcePicker, searchCandidates, closePreviewPlayer, setActive,
+        previewCandidate, previewLocalCandidate, selectLocalCandidate, previewQueueItem, openQueueSourcePicker, searchCandidates, closePreviewPlayer, setActive,
     };
 })();

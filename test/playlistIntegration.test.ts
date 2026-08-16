@@ -29,6 +29,15 @@ test('playlist matching normalizes versions, artists, and mm:ss durations', () =
   assert.equal(match.candidate?.id, 10)
 })
 
+test('playlist matching accepts a compact artist alias when title, album, and duration agree', () => {
+  const source = toIntegrationTrack({ title: '勝利', artist: '六三四Musashi', album: 'NARUTO -ナルト- オリジナルサウンドトラック', duration: 107 })
+  const candidate = toIntegrationTrack({ id: 1604, title: '勝利', artist: '六三四', album: 'NARUTO -ナルト- オリジナルサウンドトラック', duration: 107 })
+  const match = matchTrack(source, [candidate])
+  assert.equal(match.status, 'matched')
+  assert.equal(match.candidate?.id, 1604)
+  assert.equal(match.method, 'title_artist_exact')
+})
+
 test('playlist matching refuses low-confidence and tied candidates', () => {
   const source = toIntegrationTrack({ title: '同名歌曲', artist: '歌手甲' })
   const tied = [
