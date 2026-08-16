@@ -43,6 +43,11 @@
         const adminPassword = window.app?.password || localStorage.getItem('lx_auth') || '';
         const response = await fetch(path, {
             ...options,
+            // Match/index/queue responses are mutable and must not be served
+            // from the browser HTTP cache.  A cached pre-scan response made
+            // the refresh button appear ineffective (for example 7/6 after
+            // the Songloft index had already reached 7/7).
+            cache: options.cache || 'no-store',
             headers: {
                 'Content-Type': 'application/json',
                 ...(nativeToken ? { Authorization: `Bearer ${nativeToken}` } : {}),
