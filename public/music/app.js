@@ -1076,15 +1076,56 @@ function showHealthReportDialog(report) {
     const modal = document.createElement('div');
     modal.id = 'health-report-modal';
     modal.className = 'health-report-modal';
-    const rows = failures.length ? failures.map(item => `<li><strong>${escapeHtmlText(item.playlist || '未命名歌单')}</strong><span>${escapeHtmlText(item.source || '未知音源')} · 第 ${Number(item.index ?? 0) + 1} 首 · ${escapeHtmlText(item.title || '未知歌曲')} · ${escapeHtmlText(item.artist || '')}</span><em>${escapeHtmlText(item.message || '解析失败')}</em></li>`).join('') : '<li class="health-report-empty">抽查歌曲全部可以解析。</li>';
-    modal.innerHTML = `<div class="health-report-dialog" role="dialog" aria-modal="true" aria-labelledby="health-report-title"><div class="health-report-heading"><div><span class="health-report-kicker"><i class="fas fa-heart-pulse"></i> 曲源健康检查</span><h2 id="health-report-title">问题明细</h2></div><button type="button" class="btn-icon health-report-close" aria-label="关闭"><i class="fas fa-times"></i></button></div><p class="health-report-summary">检查 ${Number(report.tracksChecked || 0)} 首歌曲，${Number(report.healthyTracks || 0)} 首可解析；发现 ${failures.length} 个问题。</p><ul class="health-report-list">${rows}</ul></div>`;
+    const sourceSummary = failures.reduce((map, item) => {
+        const source = String(item.source || '未知音源');
+        map[source] = (map[source] || 0) + 1;
+        return map;
+    }, {});
+    const sourceNames = Object.keys(sourceSummary);
+    const rows = failures.length ? failures.map(item => {
+        const source = String(item.source || '未知音源');
+        const sourceKey = encodeURIComponent(String(item.sourceId || source));
+        const deleteButton = `<button type="button" class="health-source-delete" data-health-source="${escapeHtmlText(sourceKey)}" ${item.deletable ? '' : 'disabled'} title="${item.deletable ? '删除这个账户自定义音源' : '内置或共享音源不能从这里删除'}"><i class="fas fa-trash"></i> 删除音源</button>`;
+        return `<li><div class="health-report-row-main"><strong>${escapeHtmlText(item.playlist || '未命名歌单')}</strong><span>${escapeHtmlText(source)} · 第 ${Number(item.index ?? 0) + 1} 首 · ${escapeHtmlText(item.title || '未知歌曲')} · ${escapeHtmlText(item.artist || '')}</span><em>${escapeHtmlText(item.message || '解析失败')}</em></div><div class="health-report-row-action">${deleteButton}</div></li>`;
+    }).join('') : '<li class="health-report-empty">抽查歌曲全部可以解析。</li>';
+    const sourceBadges = sourceNames.map(source => `<span class="health-report-source-badge"><i class="fas fa-circle"></i>${escapeHtmlText(source)} · ${sourceSummary[source]} 个问题</span>`).join('');
+    modal.innerHTML = `<div class="health-report-dialog" role="dialog" aria-modal="true" aria-labelledby="health-report-title"><div class="health-report-heading"><div><span class="health-report-kicker"><i class="fas fa-heart-pulse"></i> 曲源健康检查</span><h2 id="health-report-title">问题明细</h2></div><button type="button" class="btn-icon health-report-close" aria-label="关闭"><i class="fas fa-times"></i></button></div><div class="health-report-toolbar"><button type="button" class="health-report-action" data-health-run><i class="fas fa-stethoscope"></i>立即冒烟测试</button><button type="button" class="health-report-action" data-health-refresh><i class="fas fa-rotate"></i>刷新</button><span class="health-report-recent">最近：${report.checkedAt ? escapeHtmlText(new Date(report.checkedAt).toLocaleString('zh-CN')) : '—'}</span></div><div class="health-report-counters"><span class="health-counter is-ok"><i class="fas fa-circle"></i>${Number(report.healthyTracks || 0)}</span><span class="health-counter is-warn"><i class="fas fa-circle"></i>${Math.max(0, Number(report.tracksChecked || 0) - Number(report.healthyTracks || 0))}</span><span class="health-counter is-error"><i class="fas fa-circle"></i>${failures.length}</span></div><p class="health-report-summary">抽查 ${Number(report.tracksChecked || 0)} 首歌曲，${Number(report.healthyTracks || 0)} 首可解析；${report.keyword ? `测试关键词“${escapeHtmlText(report.keyword)}”；` : ''}发现 ${failures.length} 个问题。</p><div class="health-report-source-summary">${sourceBadges || '<span class="health-report-empty">没有异常音源</span>'}</div><ul class="health-report-list">${rows}</ul></div>`;
     document.body.appendChild(modal);
     const close = () => modal.remove();
     modal.querySelector('.health-report-close')?.addEventListener('click', close);
     modal.addEventListener('click', event => { if (event.target === modal) close(); });
     modal.querySelector('.health-report-dialog')?.addEventListener('click', event => event.stopPropagation());
+    modal.querySelector('[data-health-run]')?.addEventListener('click', async () => { close(); await runHealthCheckNow(); });
+    modal.querySelector('[data-health-refresh]')?.addEventListener('click', async () => { close(); await loadHealthSettings(); });
+    modal.querySelectorAll('[data-health-source]').forEach(button => button.addEventListener('click', async () => {
+        if (button.disabled) return;
+        const source = decodeURIComponent(button.dataset.healthSource || '');
+        await deleteHealthSource(source, close);
+    }));
 }
 window.showHealthReportDialog = showHealthReportDialog;
+
+async function deleteHealthSource(source, closeDialog) {
+    const sourceId = String(source || '').trim();
+    if (!sourceId) return;
+    const confirmed = typeof showSelect === 'function'
+        ? await showSelect('删除错误音源', `确定删除账户自定义音源“${sourceId}”？只删除音源脚本和配置，不删除音乐文件。`, { danger: true })
+        : window.confirm(`确定删除账户自定义音源“${sourceId}”？`);
+    if (!confirmed) return;
+    try {
+        const response = await fetch('/api/v1/player/custom-source/delete', {
+            method: 'POST',
+            headers: healthAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ id: sourceId, sourceId }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.success === false) throw new Error(payload.error || payload?.error?.message || '删除音源失败');
+        closeDialog?.();
+        if (typeof renderCustomSources === 'function') await renderCustomSources();
+        showSuccess?.(`已删除音源“${sourceId}”，音乐文件未删除`);
+        await runHealthCheckNow();
+    } catch (error) { showError?.(error.message || String(error)); }
+}
 async function loadHealthSettings() {
     if (!isUserLoggedIn()) return;
     try {
@@ -1098,10 +1139,16 @@ async function loadHealthSettings() {
         if (value && settingsResponse.ok) {
             const enabled = document.getElementById('health-enabled'); if (enabled) enabled.checked = value.enabled === true;
             const interval = document.getElementById('health-interval'); if (interval) interval.value = value.intervalMinutes || 360;
+            const cron = document.getElementById('health-cron'); if (cron) cron.value = value.cronExpression || '0 6 * * *';
             const sample = document.getElementById('health-sample-size'); if (sample) sample.value = value.sampleSize || 20;
+            const keyword = document.getElementById('health-test-keyword'); if (keyword) keyword.value = value.testKeyword || '周杰伦';
+            const threshold = document.getElementById('health-failure-threshold'); if (threshold) threshold.value = value.consecutiveFailureThreshold || 2;
             const notify = document.getElementById('health-notify'); if (notify) notify.checked = value.notify === true;
             const url = document.getElementById('health-pusher-url'); if (url) url.value = value.messagePusherUrl || '';
             const channel = document.getElementById('health-pusher-channel'); if (channel) channel.value = value.messagePusherChannel || '';
+            const barkEnabled = document.getElementById('health-bark-enabled'); if (barkEnabled) barkEnabled.checked = value.barkEnabled === true;
+            const barkUrl = document.getElementById('health-bark-url'); if (barkUrl) barkUrl.value = value.barkServerUrl || 'https://api.day.app';
+            const serverChanEnabled = document.getElementById('health-serverchan-enabled'); if (serverChanEnabled) serverChanEnabled.checked = value.serverChanEnabled === true;
         }
         renderHealthReport((statusPayload.data || statusPayload).report || null);
     } catch (error) { console.warn('[Health] 加载设置失败:', error); }
@@ -1111,19 +1158,39 @@ async function saveHealthSettings() {
     const body = {
         enabled: document.getElementById('health-enabled')?.checked === true,
         intervalMinutes: Number(document.getElementById('health-interval')?.value || 360),
+        cronExpression: document.getElementById('health-cron')?.value || '0 6 * * *',
         sampleSize: Number(document.getElementById('health-sample-size')?.value || 20),
+        testKeyword: document.getElementById('health-test-keyword')?.value || '',
+        consecutiveFailureThreshold: Number(document.getElementById('health-failure-threshold')?.value || 2),
         notify: document.getElementById('health-notify')?.checked === true,
         messagePusherUrl: document.getElementById('health-pusher-url')?.value || '',
         messagePusherChannel: document.getElementById('health-pusher-channel')?.value || '',
+        barkEnabled: document.getElementById('health-bark-enabled')?.checked === true,
+        barkServerUrl: document.getElementById('health-bark-url')?.value || 'https://api.day.app',
+        serverChanEnabled: document.getElementById('health-serverchan-enabled')?.checked === true,
     };
     const token = document.getElementById('health-pusher-token')?.value || '';
     if (token) body.messagePusherToken = token;
+    const barkKey = document.getElementById('health-bark-key')?.value || '';
+    if (barkKey) body.barkDeviceKey = barkKey;
+    const serverChanKey = document.getElementById('health-serverchan-key')?.value || '';
+    if (serverChanKey) body.serverChanSendKey = serverChanKey;
     try {
         const response = await fetch('/api/v1/health/settings', { method: 'PUT', headers: healthAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload?.error?.message || '健康检查设置保存失败');
         if (typeof showSuccess === 'function') showSuccess('健康检查设置已保存');
     } catch (error) { if (typeof showError === 'function') showError(error.message || String(error)); }
+}
+async function testHealthNotification() {
+    if (!isUserLoggedIn()) return showRequiredLoginModal();
+    try {
+        await saveHealthSettings();
+        const response = await fetch('/api/v1/health/notify-test', { method: 'POST', headers: healthAuthHeaders({ 'Content-Type': 'application/json' }) });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload?.error?.message || '推送测试失败');
+        showSuccess?.(payload?.data?.sent ? '测试推送已提交' : '尚未配置可用的推送渠道');
+    } catch (error) { showError?.(error.message || String(error)); }
 }
 async function runHealthCheckNow() {
     if (!isUserLoggedIn()) return showRequiredLoginModal();
@@ -1136,11 +1203,12 @@ async function runHealthCheckNow() {
         renderHealthReport(payload.data || payload);
         if (typeof showSuccess === 'function') showSuccess('曲源健康检查完成');
     } catch (error) { if (typeof showError === 'function') showError(error.message || String(error)); }
-    finally { if (button) { button.disabled = false; button.innerHTML = '<i class="fas fa-stethoscope mr-1"></i>立即测试'; } }
+    finally { if (button) { button.disabled = false; button.innerHTML = '<i class="fas fa-stethoscope mr-1"></i>立即冒烟测试'; } }
 }
 window.loadHealthSettings = loadHealthSettings;
 window.saveHealthSettings = saveHealthSettings;
 window.runHealthCheckNow = runHealthCheckNow;
+window.testHealthNotification = testHealthNotification;
 
 
 // Tab Switching
@@ -8698,10 +8766,13 @@ async function manualSaveSettings(btn) {
         // 1. Sync to localStorage
         localStorage.setItem('lx_settings', JSON.stringify(settings));
 
-        // 2. Force push to server (settings.json)
-        await pushSettingsToServer(true);
+        // 2. Push to the account file when a user is logged in.  Without a
+        // login the browser copy is still a valid saved configuration; do
+        // not report a false server-sync failure.
+        const synced = isUserLoggedIn();
+        if (synced) await pushSettingsToServer(true);
 
-        btn.innerHTML = '<i class="fas fa-check mr-2"></i> 保存成功 (已同步到服务器)';
+        btn.innerHTML = `<i class="fas fa-check mr-2"></i> 保存成功${synced ? '（已同步到服务器）' : '（已保存到本机）'}`;
         btn.classList.add('bg-emerald-50', 'dark:bg-emerald-500/10', 'text-emerald-600', 'dark:text-emerald-400', 'border-emerald-200');
         btn.classList.remove('bg-blue-50', 'dark:bg-blue-500/10', 'text-blue-600', 'dark:text-blue-400', 'border-blue-100');
 
@@ -8711,7 +8782,7 @@ async function manualSaveSettings(btn) {
             btn.classList.add('bg-blue-50', 'dark:bg-blue-500/10', 'text-blue-600', 'dark:text-blue-400', 'border-blue-100');
             btn.disabled = false;
         }, 2000);
-        showSuccess('配置已成功保存并同步至服务器');
+        showSuccess(synced ? '配置已成功保存并同步至服务器' : '配置已保存到本机；登录后可同步到服务器');
     } catch (e) {
         console.error('[Settings] 手动保存失败:', e);
         btn.innerHTML = '<i class="fas fa-times mr-2"></i> 保存失败';
@@ -8958,12 +9029,10 @@ async function handleLocalLogin(options = {}) {
             localStorage.setItem('lx_sync_pass', pass);
             if (!userToken) await ensureUserAuthToken();
             if (typeof updateUserUI === 'function') updateUserUI();
+            // Custom-source metadata can involve several script/status reads.
+            // It must not hold the account's first playlist response hostage.
             if (typeof renderCustomSources === 'function') {
-                try {
-                    await renderCustomSources();
-                } catch (error) {
-                    console.warn('[CustomSource] 登录后刷新失败:', error);
-                }
+                Promise.resolve(renderCustomSources()).catch(error => console.warn('[CustomSource] 登录后刷新失败:', error));
             }
 
             // [新增] 显示并加载 Token 管理面板
@@ -8973,40 +9042,65 @@ async function handleLocalLogin(options = {}) {
                 loadTokenConfig();
             }
 
+            // Restore the last account-scoped snapshot before the network
+            // request.  The list endpoint may need to read a large account
+            // file on a LAN NAS; showing a verified, same-account cache keeps
+            // the player usable while the fresh snapshot is fetched below.
+            try {
+                const cachedList = await window.ListStore?.get?.();
+                const cachedOwner = String(cachedList?.username || '').trim();
+                if (cachedList && (!cachedOwner || cachedOwner === user)) {
+                    currentListData = { ...cachedList, username: user };
+                    window.myPersonalListData = currentListData;
+                    renderMyLists(currentListData);
+                    updateSyncStatus(`<i class="fas fa-cloud-arrow-up text-emerald-500"></i> 已登录，正在后台同步 (用户: ${user})`);
+                    if (requiredLoginVisible) hideRequiredLoginModal();
+                }
+            } catch (error) {
+                console.warn('[Cache] 登录前恢复歌单失败:', error);
+            }
+
             // Fetch List
             const listData = await syncManager.sync();
             currentListData = listData;
             if (currentListData) currentListData.username = user; // Attach username
             window.myPersonalListData = currentListData; // [个人数据缓存]
-            await hydratePersonalPlaylistArtwork(listData);
+            // Show the account's playlists as soon as the sync payload arrives.
+            // Artwork hydration and secondary integrations continue in the
+            // background so LAN users do not remain on “正在同步” for every
+            // cover/index request.
             renderMyLists(listData);
-
-            // [Library] 登录后加载收藏歌手/专辑
-            loadLibraryData();
 
             // [Cache] Save list data immediately for offline availability / quick load
             await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
 
             updateSyncStatus(`<i class="fas fa-check-circle text-emerald-500"></i> 已同步 (用户: ${user})`);
-
-            // [New] Fetch settings from server if enabled
-            if (settings.saveAccountSettingsToFile) {
-                fetchSettingsFromServer();
-            }
-
-            await loadPlaylistSharingSetting();
-            startPlaylistSharePolling();
-
-            if (typeof loadHealthSettings === 'function') loadHealthSettings().catch(() => {});
-            if (window.LibraryIntegration) window.LibraryIntegration.activate();
-            // A login can happen while the search tab is already visible.  In
-            // that case the initial unauthenticated request has already
-            // failed; reload hot search after the user token is available.
-            const searchInputAfterLogin = document.getElementById('search-input');
-            if (document.getElementById('view-search')?.classList.contains('active') && !searchInputAfterLogin?.value.trim()) {
-                setTimeout(() => showInitialSearchState(), 0);
-            }
             if (requiredLoginVisible) hideRequiredLoginModal();
+            // Secondary account work is deliberately detached from the fast
+            // login path.  Each task is isolated so one slow Songloft or
+            // artwork request cannot make the whole account look unlogged in.
+            void (async () => {
+                try {
+                    await hydratePersonalPlaylistArtwork(listData);
+                    renderMyLists(listData);
+                    await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 封面缓存失败:', e));
+                } catch (error) {
+                    console.warn('[Artwork] 登录后封面补全失败:', error);
+                }
+                try { await loadLibraryData(); } catch (error) { console.warn('[Library] 登录后加载失败:', error); }
+                try {
+                    if (settings.saveAccountSettingsToFile) await fetchSettingsFromServer();
+                    await loadPlaylistSharingSetting();
+                    startPlaylistSharePolling();
+                } catch (error) { console.warn('[Account] 登录后附加同步失败:', error); }
+                if (typeof loadHealthSettings === 'function') loadHealthSettings().catch(() => {});
+                if (window.LibraryIntegration) window.LibraryIntegration.activate();
+                // A login can happen while the search tab is already visible.
+                const searchInputAfterLogin = document.getElementById('search-input');
+                if (document.getElementById('view-search')?.classList.contains('active') && !searchInputAfterLogin?.value.trim()) {
+                    showInitialSearchState();
+                }
+            })();
             return true;
 
         } else {

@@ -110,11 +110,19 @@ const SONGLOFT_MATCHING_CACHE_TTL = 60_000
 type HealthSettings = {
   enabled: boolean
   intervalMinutes: number
+  cronExpression: string
   sampleSize: number
+  testKeyword: string
+  consecutiveFailureThreshold: number
   notify: boolean
   messagePusherUrl: string
   messagePusherToken: string
   messagePusherChannel: string
+  barkEnabled: boolean
+  barkServerUrl: string
+  barkDeviceKey: string
+  serverChanEnabled: boolean
+  serverChanSendKey: string
 }
 
 type HealthReport = {
@@ -123,19 +131,37 @@ type HealthReport = {
   playlists: number
   tracksChecked: number
   healthyTracks: number
-  failures: Array<{ playlist: string; source: string; index: number; title: string; artist: string; message: string }>
+  keyword?: string
+  failures: Array<{
+    playlist: string
+    source: string
+    sourceId?: string
+    deletable?: boolean
+    index: number
+    title: string
+    artist: string
+    message: string
+  }>
 }
 
-type HealthState = { settings: HealthSettings; report: HealthReport | null }
+type HealthState = { settings: HealthSettings; report: HealthReport | null; consecutiveFailures: number }
 
 const DEFAULT_HEALTH_SETTINGS: HealthSettings = {
   enabled: false,
   intervalMinutes: 360,
+  cronExpression: '0 6 * * *',
   sampleSize: 20,
+  testKeyword: '周杰伦',
+  consecutiveFailureThreshold: 2,
   notify: false,
   messagePusherUrl: '',
   messagePusherToken: '',
   messagePusherChannel: '',
+  barkEnabled: false,
+  barkServerUrl: 'https://api.day.app',
+  barkDeviceKey: '',
+  serverChanEnabled: false,
+  serverChanSendKey: '',
 }
 const healthStateCache = new Map<string, HealthState>()
 let healthScheduler: NodeJS.Timeout | null = null
@@ -154,7 +180,11 @@ const readHealthState = (username: string): HealthState => {
     if (fs.existsSync(filename)) persisted = JSON.parse(fs.readFileSync(filename, 'utf8'))
   } catch { /* a corrupt health report should not prevent the player from logging in */ }
   const settings = { ...DEFAULT_HEALTH_SETTINGS, ...(persisted.settings || {}) }
-  const state: HealthState = { settings, report: persisted.report || null }
+  const state: HealthState = {
+    settings,
+    report: persisted.report || null,
+    consecutiveFailures: Math.max(0, Number((persisted as any).consecutiveFailures) || 0),
+  }
   healthStateCache.set(username, state)
   return state
 }
@@ -173,22 +203,36 @@ const writeHealthState = (username: string, state: HealthState) => {
 const publicHealthSettings = (settings: HealthSettings) => ({
   enabled: settings.enabled,
   intervalMinutes: settings.intervalMinutes,
+  cronExpression: settings.cronExpression,
   sampleSize: settings.sampleSize,
+  testKeyword: settings.testKeyword,
+  consecutiveFailureThreshold: settings.consecutiveFailureThreshold,
   notify: settings.notify,
   messagePusherUrl: settings.messagePusherUrl,
   messagePusherChannel: settings.messagePusherChannel,
   messagePusherTokenConfigured: Boolean(settings.messagePusherToken),
+  barkEnabled: settings.barkEnabled,
+  barkServerUrl: settings.barkServerUrl,
+  barkDeviceKeyConfigured: Boolean(settings.barkDeviceKey),
+  serverChanEnabled: settings.serverChanEnabled,
+  serverChanSendKeyConfigured: Boolean(settings.serverChanSendKey),
 })
 
-const postHealthNotification = async (settings: HealthSettings, report: HealthReport) => {
-  if (!settings.notify || !settings.messagePusherUrl) return
+const postHealthNotification = async (settings: HealthSettings, report: HealthReport, force = false) => {
+  if (!force && !settings.notify) return
   const content = report.ok
     ? `曲源健康检查通过：检查 ${report.tracksChecked} 首，全部可解析。`
     : `曲源健康检查发现 ${report.failures.length} 个问题（${report.healthyTracks}/${report.tracksChecked} 首正常）。`
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 5000)
-  try {
-    await fetch(settings.messagePusherUrl, {
+  const requests: Promise<unknown>[] = []
+  const send = (url: string, init: RequestInit) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+    requests.push(fetch(url, { ...init, signal: controller.signal }).catch((error: any) => {
+      console.warn('[Health] notification failed:', error?.message || error)
+    }).finally(() => clearTimeout(timer)))
+  }
+  if (settings.messagePusherUrl) {
+    send(settings.messagePusherUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -204,13 +248,58 @@ const postHealthNotification = async (settings: HealthSettings, report: HealthRe
         token: settings.messagePusherToken || undefined,
         report,
       }),
-      signal: controller.signal,
     })
-  } catch (error: any) {
-    console.warn('[Health] message-pusher notification failed:', error?.message || error)
-  } finally {
-    clearTimeout(timer)
   }
+  if (settings.barkEnabled && settings.barkDeviceKey) {
+    const base = String(settings.barkServerUrl || 'https://api.day.app').replace(/\/+$/, '')
+    send(`${base}/push`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_key: settings.barkDeviceKey,
+        title: '音云曲源健康检查',
+        body: content,
+        group: 'yinyun-health',
+      }),
+    })
+  }
+  if (settings.serverChanEnabled && settings.serverChanSendKey) {
+    send(`https://sctapi.ftqq.com/${encodeURIComponent(settings.serverChanSendKey)}.send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ title: '音云曲源健康检查', desp: content }).toString(),
+    })
+  }
+  await Promise.all(requests)
+}
+
+const cronFieldMatches = (field: string, value: number, min: number, max: number) => {
+  const raw = String(field || '').trim()
+  if (!raw || raw === '*') return true
+  return raw.split(',').some(part => {
+    const text = part.trim()
+    if (!text) return false
+    const [base, stepText] = text.split('/')
+    const step = stepText ? Number(stepText) : 1
+    if (!Number.isInteger(step) || step < 1) return false
+    if (base === '*') return (value - min) % step === 0
+    if (base.includes('-')) {
+      const [start, end] = base.split('-').map(Number)
+      return Number.isInteger(start) && Number.isInteger(end) && value >= start && value <= end && (value - start) % step === 0
+    }
+    const exact = Number(base)
+    return Number.isInteger(exact) && exact >= min && exact <= max && value === exact
+  })
+}
+
+const cronMatches = (expression: string, date = new Date()) => {
+  const fields = String(expression || '').trim().split(/\s+/)
+  if (fields.length !== 5) return false
+  return cronFieldMatches(fields[0], date.getMinutes(), 0, 59)
+    && cronFieldMatches(fields[1], date.getHours(), 0, 23)
+    && cronFieldMatches(fields[2], date.getDate(), 1, 31)
+    && cronFieldMatches(fields[3], date.getMonth() + 1, 1, 12)
+    && cronFieldMatches(fields[4], date.getDay(), 0, 6)
 }
 
 const runHealthCheck = async (deps: ApiV1Dependencies, username: string): Promise<HealthReport> => {
@@ -241,7 +330,24 @@ const runHealthCheck = async (deps: ApiV1Dependencies, username: string): Promis
     } catch (error: any) {
       if (failures.length < 100) failures.push({
         playlist: String(record.name || record.sourcePlaylistName || '未命名歌单'),
-        source: String(record.source || track.source || '未知音源'),
+        ...(() => {
+          const platform = String(record.source || track.source || '未知音源').trim()
+          let sourceInfo: any
+          try {
+            sourceInfo = deps.getLoadedSources?.().find(source => (
+              source.owner === username
+              && source.enabled !== false
+              && Object.prototype.hasOwnProperty.call(source.sources || {}, platform)
+            ))
+          } catch { sourceInfo = undefined }
+          return {
+            // Keep the platform visible while identifying the concrete custom
+            // source that can actually be removed from the account.
+            source: sourceInfo ? `${String(sourceInfo.name || sourceInfo.id)} · ${platform}` : platform,
+            sourceId: sourceInfo?.id || undefined,
+            deletable: Boolean(sourceInfo?.id),
+          }
+        })(),
         index,
         title: String(track.title || ''),
         artist: String(track.artist || ''),
@@ -255,14 +361,20 @@ const runHealthCheck = async (deps: ApiV1Dependencies, username: string): Promis
     playlists: records.length,
     tracksChecked,
     healthyTracks,
+    keyword: String(state.settings.testKeyword || '').trim() || undefined,
     failures,
   }
   state.report = report
+  state.consecutiveFailures = report.ok ? 0 : state.consecutiveFailures + 1
   writeHealthState(username, state)
-  await postHealthNotification(state.settings, report)
+  const threshold = Math.max(1, Number(state.settings.consecutiveFailureThreshold) || DEFAULT_HEALTH_SETTINGS.consecutiveFailureThreshold)
+  if (state.settings.notify && (report.ok || state.consecutiveFailures >= threshold)) {
+    await postHealthNotification(state.settings, report)
+  }
   return report
 }
 
+const healthLastCronRun = new Map<string, string>()
 const startHealthScheduler = (deps: ApiV1Dependencies) => {
   if (healthScheduler) return
   healthScheduler = setInterval(() => {
@@ -271,6 +383,15 @@ const startHealthScheduler = (deps: ApiV1Dependencies) => {
       if (!username) continue
       const state = readHealthState(username)
       if (!state.settings.enabled) continue
+      const now = new Date()
+      const minuteKey = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`
+      if (state.settings.cronExpression && cronMatches(state.settings.cronExpression, now)) {
+        const key = `${username}:${minuteKey}`
+        if (healthLastCronRun.get(username) === minuteKey) continue
+        healthLastCronRun.set(username, minuteKey)
+        runHealthCheck(deps, username).catch(error => console.warn('[Health] scheduled check failed:', error?.message || error))
+        continue
+      }
       const last = Date.parse(state.report?.checkedAt || '')
       const interval = Math.max(15, Number(state.settings.intervalMinutes) || DEFAULT_HEALTH_SETTINGS.intervalMinutes) * 60_000
       if (Number.isFinite(last) && Date.now() - last < interval) continue
@@ -1083,12 +1204,24 @@ const getPlaylistImportMatches = async (
     const provider = record.resolutions?.[String(index)]
     if (!provider) return match
     const selected = match[provider]
+    const markProviderMatched = (providerMatch: ReturnType<typeof matchTracks>[number], candidate: IntegrationTrack) => ({
+      ...providerMatch,
+      status: 'matched' as const,
+      candidate,
+      score: Math.max(Number(providerMatch.score || 0), 1),
+      method: providerMatch.method || 'confirmed',
+      candidates: providerMatch.candidates?.length
+        ? providerMatch.candidates
+        : [{ track: candidate, score: 1, method: 'confirmed' }],
+    })
     if (!selected?.candidate) {
       // The provider can temporarily reorder or omit a candidate while its
       // index is rescanning.  Reuse the persisted user choice instead of
       // regressing the row to “需确认”.
       const persisted = record.resolvedCandidates?.[String(index)]
       if (!persisted?.title) return match
+      const yinyun = provider === 'yinyun' ? markProviderMatched(match.yinyun || match, persisted) : match.yinyun
+      const songloft = provider === 'songloft' ? markProviderMatched(match.songloft || match, persisted) : match.songloft
       return {
         ...match,
         status: 'matched' as const,
@@ -1097,12 +1230,16 @@ const getPlaylistImportMatches = async (
         method: 'confirmed_snapshot',
         candidates: [{ track: persisted, score: 1, method: 'confirmed_snapshot' }],
         matchedBy: provider,
+        yinyun,
+        songloft,
       }
     }
     // An ambiguous match still exposes its best candidate.  The explicit
     // user choice turns that candidate into the effective matched result;
     // without this conversion the confirmation button would have no effect.
-    return { ...selected, status: 'matched' as const, yinyun: match.yinyun, songloft: match.songloft, matchedBy: provider }
+    const yinyun = provider === 'yinyun' ? markProviderMatched(match.yinyun || match, selected.candidate) : match.yinyun
+    const songloft = provider === 'songloft' ? markProviderMatched(match.songloft || match, selected.candidate) : match.songloft
+    return { ...selected, status: 'matched' as const, yinyun, songloft, matchedBy: provider }
   })
 }
 
@@ -1566,6 +1703,7 @@ export const apiV1OpenApi = {
     '/api/v1/health/settings': { get: { summary: '查询曲源健康检查设置' }, put: { summary: '更新曲源健康检查设置' } },
     '/api/v1/health/status': { get: { summary: '查询最近一次曲源健康检查' } },
     '/api/v1/health/test': { post: { summary: '立即测试导入音源解析能力' } },
+    '/api/v1/health/notify-test': { post: { summary: '测试健康检查告警推送' } },
     '/api/v1/downloads': { get: { summary: '查询服务端下载队列' }, post: { summary: '加入服务端下载队列' } },
     '/api/v1/replacement': { get: { summary: '查询洗版任务' }, post: { summary: '启动洗版任务' } },
     '/api/v1/sources': { get: { summary: '查询可用音源及平台开关' } },
@@ -1673,13 +1811,25 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         ...current.settings,
         enabled: body.enabled === undefined ? current.settings.enabled : Boolean(body.enabled),
         intervalMinutes: Math.min(7 * 24 * 60, Math.max(15, Number(body.intervalMinutes) || current.settings.intervalMinutes)),
+        cronExpression: String(body.cronExpression ?? current.settings.cronExpression).trim().slice(0, 100),
         sampleSize: Math.min(100, Math.max(1, Number(body.sampleSize) || current.settings.sampleSize)),
+        testKeyword: String(body.testKeyword ?? current.settings.testKeyword).trim().slice(0, 100),
+        consecutiveFailureThreshold: Math.min(20, Math.max(1, Number(body.consecutiveFailureThreshold) || current.settings.consecutiveFailureThreshold)),
         notify: body.notify === undefined ? current.settings.notify : Boolean(body.notify),
         messagePusherUrl: String(body.messagePusherUrl ?? current.settings.messagePusherUrl).trim().slice(0, 1000),
         messagePusherToken: body.messagePusherToken === undefined
           ? current.settings.messagePusherToken
           : String(body.messagePusherToken || '').trim().slice(0, 1000),
         messagePusherChannel: String(body.messagePusherChannel ?? current.settings.messagePusherChannel).trim().slice(0, 200),
+        barkEnabled: body.barkEnabled === undefined ? current.settings.barkEnabled : Boolean(body.barkEnabled),
+        barkServerUrl: String(body.barkServerUrl ?? current.settings.barkServerUrl).trim().replace(/\/+$/, '').slice(0, 500),
+        barkDeviceKey: body.barkDeviceKey === undefined
+          ? current.settings.barkDeviceKey
+          : String(body.barkDeviceKey || '').trim().slice(0, 500),
+        serverChanEnabled: body.serverChanEnabled === undefined ? current.settings.serverChanEnabled : Boolean(body.serverChanEnabled),
+        serverChanSendKey: body.serverChanSendKey === undefined
+          ? current.settings.serverChanSendKey
+          : String(body.serverChanSendKey || '').trim().slice(0, 500),
       }
       current.settings = next
       writeHealthState(username, current)
@@ -1695,6 +1845,33 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 
     if (pathname === `${API_PREFIX}/health/test` && req.method === 'POST') {
       success(res, await runHealthCheck(deps, username))
+      return true
+    }
+
+    if (pathname === `${API_PREFIX}/health/notify-test` && req.method === 'POST') {
+      const state = readHealthState(username)
+      const report: HealthReport = {
+        checkedAt: new Date().toISOString(),
+        ok: false,
+        playlists: 0,
+        tracksChecked: 1,
+        healthyTracks: 0,
+        keyword: String(state.settings.testKeyword || '').trim() || undefined,
+        failures: [{
+          playlist: '推送测试',
+          source: 'message-pusher',
+          index: 0,
+          title: '曲源健康检查推送测试',
+          artist: username,
+          message: '这是一次手动推送测试，不代表真实音源故障。',
+        }],
+      }
+      await postHealthNotification(state.settings, report, true)
+      success(res, { sent: Boolean(
+        state.settings.messagePusherUrl
+        || (state.settings.barkEnabled && state.settings.barkDeviceKey)
+        || (state.settings.serverChanEnabled && state.settings.serverChanSendKey),
+      ) })
       return true
     }
 
@@ -2013,14 +2190,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         yinyunPlaylistId: record.yinyunPlaylistId,
         mode: body.all === true ? 'all' : body.mode === 'all' ? 'all' : 'selected',
         items: matches.map((match, index) => publicImportItem(match, index, deps, username, record.source)),
-        counts: {
-          total: matches.length,
-          localMatched: matches.filter(item => item.status === 'matched').length,
-          yinyunMatched: matches.filter(item => item.status === 'matched' && item.matchedBy === 'yinyun').length,
-          songloftMatched: matches.filter(item => item.status === 'matched' && item.matchedBy === 'songloft').length,
-          missing: matches.filter(item => item.status === 'missing').length,
-          ambiguous: matches.filter(item => item.status === 'ambiguous').length,
-        },
+        counts: playlistImportCounts(matches),
         download,
       }, 202)
       return true

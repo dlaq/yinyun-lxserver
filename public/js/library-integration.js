@@ -718,6 +718,11 @@
     }
 
     function closeCandidatePicker() {
+        // The preview player floats above both the admin shell and the player
+        // page.  Closing the version dialog must also stop that audio; leaving
+        // it alive made the dialog appear closed while the song continued in
+        // the background.
+        closePreviewPlayer();
         const modal = el('integration-candidate-modal');
         if (modal) modal.classList.add('hidden');
         state.candidateIndex = -1;
@@ -1098,7 +1103,32 @@
         } else if (document.visibilityState !== 'visible') stopPolling();
     });
 
-    function activate() {
+    async function restoreSavedUserSession() {
+        const savedUser = String(localStorage.getItem('lx_sync_user') || sessionStorage.getItem('yinyun.integration.username') || '').trim();
+        const savedPass = localStorage.getItem('lx_sync_pass') || '';
+        if (!savedUser || !savedPass) return false;
+        try {
+            const response = await fetch('/api/v1/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: savedUser, password: savedPass }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) return false;
+            const data = unwrap(payload);
+            if (!data?.accessToken) return false;
+            state.token = data.accessToken;
+            state.username = savedUser;
+            sessionStorage.setItem('yinyun.integration.username', savedUser);
+            updateAuth(true);
+            return true;
+        } catch (error) {
+            console.warn('[LibraryIntegration] 恢复保存的音云登录失败:', error);
+            return false;
+        }
+    }
+
+    async function activate() {
         const savedUser = sessionStorage.getItem('yinyun.integration.username');
         const legacyUser = localStorage.getItem('lx_sync_user') || savedUser || '';
         const legacyToken = localStorage.getItem('lx_user_token') || '';
@@ -1108,8 +1138,13 @@
             state.username = legacyUser;
             updateAuth(true);
         }
+        // The legacy token can be expired while the account password is still
+        // present.  Refresh to a native access token before loading playlists;
+        // otherwise the badge says “已连接” but both playlist requests are
+        // rejected and the selects stay empty.
+        if (!state.token || state.token === 'legacy') await restoreSavedUserSession();
         if (state.token) {
-            refreshAll().catch(notifyError);
+            await refreshAll().catch(notifyError);
             setActive(true);
         }
     }
