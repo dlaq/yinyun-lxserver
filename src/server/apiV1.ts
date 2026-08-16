@@ -238,8 +238,8 @@ const postHealthNotification = async (settings: HealthSettings, report: HealthRe
   )
   if (!force && !hasChannel) return
   const content = report.ok
-    ? `曲源健康检查通过：检查 ${report.tracksChecked} 首，全部可解析。`
-    : `曲源健康检查发现 ${report.failures.length} 个问题（${report.healthyTracks}/${report.tracksChecked} 首正常）。`
+    ? `曲源健康检查通过：检查 ${report.tracksChecked} 个音源平台，全部可解析。`
+    : `曲源健康检查发现 ${report.failures.length} 个问题（${report.healthyTracks}/${report.tracksChecked} 个音源平台正常）。`
   const requests: Promise<unknown>[] = []
   const send = (url: string, init: RequestInit) => {
     const controller = new AbortController()
