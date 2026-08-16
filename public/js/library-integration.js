@@ -156,6 +156,10 @@
             state.importData = null;
             updateAuth(true);
             sessionStorage.setItem('yinyun.integration.username', username);
+            // Keep the short-lived native token in the tab session so the
+            // admin shell can be revisited without asking for the password
+            // again.  Passwords are deliberately never persisted here.
+            sessionStorage.setItem('yinyun.integration.access_token', state.token);
             if (typeof showSuccess === 'function') showSuccess(`已连接用户 ${username}`);
             await refreshAll();
             // 登录按钮位于曲库联动面板内；无论导航事件是否在脚本加载前触发，
@@ -1052,8 +1056,18 @@
 
     async function refreshAll() {
         if (!state.token) return;
-        await Promise.allSettled([loadStatus(), loadQueue(), loadPlaylists(), loadImportRecords()]);
+        const results = await Promise.allSettled([loadStatus(), loadQueue(), loadPlaylists(), loadImportRecords()]);
+        // Promise.allSettled keeps status/queue outages from blanking the
+        // panel, but both playlist requests failing means the credential is
+        // stale/invalid.  Surface that failure so activate() can refresh the
+        // native token (or clear the misleading connected badge).
+        const playlistResults = results.slice(2, 4);
+        const playlistFailure = playlistResults.find(result => result.status === 'rejected');
+        if (playlistResults.length === 2 && playlistResults.every(result => result.status === 'rejected')) {
+            throw playlistFailure?.reason || new Error('歌单加载失败');
+        }
         if (state.importId) await openImport().catch(console.error);
+        return results;
     }
 
     async function refreshStatus() {
@@ -1105,6 +1119,13 @@
 
     async function restoreSavedUserSession() {
         const savedUser = String(localStorage.getItem('lx_sync_user') || sessionStorage.getItem('yinyun.integration.username') || '').trim();
+        const persistedToken = String(sessionStorage.getItem('yinyun.integration.access_token') || '').trim();
+        if (persistedToken) {
+            state.token = persistedToken;
+            state.username = savedUser || String(sessionStorage.getItem('yinyun.integration.username') || '').trim();
+            updateAuth(Boolean(state.username));
+            return Boolean(state.username);
+        }
         const savedPass = localStorage.getItem('lx_sync_pass') || '';
         if (!savedUser || !savedPass) return false;
         try {
@@ -1120,6 +1141,7 @@
             state.token = data.accessToken;
             state.username = savedUser;
             sessionStorage.setItem('yinyun.integration.username', savedUser);
+            sessionStorage.setItem('yinyun.integration.access_token', state.token);
             updateAuth(true);
             return true;
         } catch (error) {
@@ -1144,8 +1166,34 @@
         // rejected and the selects stay empty.
         if (!state.token || state.token === 'legacy') await restoreSavedUserSession();
         if (state.token) {
-            await refreshAll().catch(notifyError);
-            setActive(true);
+            try {
+                await refreshAll();
+                setActive(true);
+            } catch (error) {
+                const message = String(error?.message || error || '');
+                const authFailure = /401|403|登录状态无效|过期|unauthori[sz]ed|token/i.test(message);
+                if (authFailure) {
+                    // Discard a stale tab token and make one password-backed
+                    // recovery attempt when the normal player has a saved
+                    // sync credential.  Never leave a false “已连接” badge.
+                    sessionStorage.removeItem('yinyun.integration.access_token');
+                    state.token = '';
+                    updateAuth(false);
+                    if (await restoreSavedUserSession()) {
+                        try {
+                            await refreshAll();
+                            setActive(true);
+                            return;
+                        } catch (retryError) {
+                            state.token = '';
+                            updateAuth(false);
+                            notifyError(retryError);
+                            return;
+                        }
+                    }
+                }
+                notifyError(error);
+            }
         }
     }
 
