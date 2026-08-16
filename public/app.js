@@ -17,6 +17,21 @@
 
 const API_BASE = '';
 
+function applyAdminBranding(config = {}) {
+    const configured = String(config.serverName || '').trim();
+    if (!configured) return;
+    const isDefault = ['yinyun', 'lxserver', '音云'].includes(configured.toLocaleLowerCase());
+    const label = isDefault ? '音云 Yinyun' : configured;
+    const shortLabel = isDefault ? '音云' : configured;
+    const loginBrand = document.getElementById('admin-login-brand');
+    const sidebarBrand = document.getElementById('admin-brand-name');
+    const logo = document.getElementById('admin-brand-logo') || document.querySelector('.sidebar-header .logo-icon');
+    if (loginBrand) loginBrand.textContent = label;
+    if (sidebarBrand) sidebarBrand.textContent = shortLabel;
+    if (logo) logo.alt = label;
+    document.title = `${label} - 管理控制台`;
+}
+
 function stringToColor(str) {
     if (!str) return 'var(--accent-primary)';
     let hash = 0;
@@ -1713,6 +1728,7 @@ class App {
         try {
             const config = await this.request('/api/v1/admin/config');
             this.configLoaded = true;
+            applyAdminBranding(config);
             const form = document.getElementById('config-form');
 
             form.elements['serverName'].value = config.serverName || '';
@@ -1841,6 +1857,7 @@ class App {
                 method: 'POST',
                 body: JSON.stringify(config)
             });
+            applyAdminBranding(config);
 
             // 如果密码改了，更新本地存储
             if (config['frontend.password'] && config['frontend.password'] !== this.password) {
