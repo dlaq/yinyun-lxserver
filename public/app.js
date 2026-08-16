@@ -31,6 +31,10 @@ function applyAdminBranding(config = {}) {
     if (logo) logo.alt = label;
     document.title = `${label} - 管理控制台`;
 }
+// config.js is dynamically populated by the server and is available before
+// this script at the bottom of the admin document, so the login screen also
+// reflects a custom server name before authentication.
+applyAdminBranding(window.CONFIG || {});
 
 function stringToColor(str) {
     if (!str) return 'var(--accent-primary)';
