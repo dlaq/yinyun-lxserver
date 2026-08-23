@@ -22,7 +22,7 @@
   </p>
 </div>
 
-[帮助文档 Documentation](https://dlaq.github.io/yinyun-lxserver/) | [同步服务器 SyncServer](md/lxserver.md) | [Songloft 曲库联动说明](docs/songloft-playlist-integration.md) | [更新日志 Changelog](changelog.md) | [English](README_EN.md)
+[帮助文档 Documentation](https://dlaq.github.io/yinyun-lxserver/) | [项目交接与维护手册](PROJECT_HANDOFF.md) | [同步服务器 SyncServer](md/lxserver.md) | [Songloft 曲库联动说明](docs/songloft-playlist-integration.md) | [更新日志 Changelog](changelog.md) | [English](README_EN.md)
 
 ---
 
