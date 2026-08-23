@@ -44,10 +44,14 @@
             });
             window.addEventListener('load', async () => {
                 // 使用相对路径，它会自动基于 <base> 路径解析
-                const currentRegistration = await navigator.serviceWorker.getRegistration(document.baseURI);
-                const workerUrl = new URL(currentRegistration?.active?.scriptURL || 'sw.js', document.baseURI);
+                const adminScope = new URL('./', document.baseURI).href;
+                const currentRegistration = await navigator.serviceWorker.getRegistration(adminScope);
+                const currentAdminScript = currentRegistration?.scope === adminScope
+                    ? currentRegistration.active?.scriptURL
+                    : null;
+                const workerUrl = new URL(currentAdminScript || 'sw.js', document.baseURI);
                 if (window.CONFIG?.buildHash) workerUrl.searchParams.set('v', window.CONFIG.buildHash);
-                navigator.serviceWorker.register(workerUrl.href, { updateViaCache: 'none' })
+                navigator.serviceWorker.register(workerUrl.href, { scope: adminScope, updateViaCache: 'none' })
                     .then(registration => registration.update())
                     .catch(err => console.error('[Admin PWA] Service Worker registration failed:', err));
             });
