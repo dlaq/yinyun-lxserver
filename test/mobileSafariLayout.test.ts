@@ -65,3 +65,34 @@ test('an empty GitHub release collection is handled as a normal state', () => {
   assert.match(notifications, /payload\[0\] \|\| \{ noRelease: true \}/)
   assert.match(notifications, /if \(release\.noRelease\)/)
 })
+
+test('production pages use precompiled Tailwind styles instead of the browser compiler', () => {
+  const playerHtml = read('public/music/index.html')
+  const adminHtml = read('public/index.html')
+  const playerWorker = read('public/music/sw.js')
+  const adminWorker = read('public/sw.js')
+  const playerStyles = read('public/music/css/tailwind.generated.css')
+  const adminStyles = read('public/tailwind.generated.css')
+
+  for (const source of [playerHtml, adminHtml, playerWorker, adminWorker]) {
+    assert.doesNotMatch(source, /tailwindcss\.js/)
+  }
+  assert.match(playerHtml, /tailwind\.generated\.css/)
+  assert.match(adminHtml, /tailwind\.generated\.css/)
+  assert.match(playerWorker, /tailwind\.generated\.css/)
+  assert.match(adminWorker, /tailwind\.generated\.css/)
+  assert.match(playerStyles, /@media \(min-width:1025px\)/)
+  assert.match(playerStyles, /var\(--c-500\)/)
+  assert.match(adminStyles, /\.hidden\{display:none\}/)
+  assert.doesNotMatch(adminStyles, /\*,:after,:before\{box-sizing:border-box/)
+})
+
+test('lyric cache misses are normal responses and download tasks read the cache contract', () => {
+  const server = read('src/server/server.ts')
+  const downloadManager = read('public/music/js/download_manager.js')
+
+  assert.match(server, /success: false, cached: false, data: null/)
+  assert.match(server, /'Cache-Control': 'no-store'/)
+  assert.doesNotMatch(server, /writeHead\(404[\s\S]{0,160}Not found in cache/)
+  assert.match(downloadManager, /payload\?\.success === true[\s\S]*?payload\?\.cached !== false[\s\S]*?payload\?\.data/)
+})

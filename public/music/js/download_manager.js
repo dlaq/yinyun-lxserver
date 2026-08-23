@@ -570,8 +570,10 @@ class DownloadManager {
 
             const resp = await fetch(url, { headers });
             if (resp.ok) {
-                task.hasLyric = true;
+                const payload = await resp.json();
+                task.hasLyric = payload?.success === true && payload?.cached !== false && Boolean(payload?.data);
             } else if (resp.status === 404) {
+                // Backward compatibility with servers older than v1.6.1-r2.
                 task.hasLyric = false;
             } else {
                 // 发生非 404 错误（如 401/500/网络错误）时才重置状态以便下次重试（受次数限制）

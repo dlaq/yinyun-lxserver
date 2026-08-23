@@ -3648,10 +3648,10 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         const result = fileCache.checkLyricCache({ source, songmid, id: songId, name, singer }, username)
         if (result.exists) {
           res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ success: true, data: result.content }))
+          res.end(JSON.stringify({ success: true, cached: true, data: result.content }))
         } else {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ success: false, message: 'Not found in cache' }))
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ success: false, cached: false, data: null }))
         }
         return
       }

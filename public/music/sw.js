@@ -1,10 +1,13 @@
-const CACHE_NAME = 'yinyun-player-v1.5.4';
+const CACHE_NAME = 'yinyun-player-v1.6.1-r2';
 const ASSETS_TO_CACHE = [
     '/',
     '/manifest.json',
     '/_player/app.js',
     // CSS
     '/_player/css/theme_variables.css',
+    '/_player/css/tailwind.generated.css',
+    '/_player/css/app.css',
+    '/_player/css/library-integration.css',
     '/_player/assets/fontawesome/css/all.min.css',
     // 核心 JS
     '/_player/js/lyric-parser.js',
@@ -21,11 +24,9 @@ const ASSETS_TO_CACHE = [
     '/_player/js/download_manager.js',
     '/_player/js/pwa.js',
     '/_player/js/theme_manager.js',
-    '/_player/js/tailwind_setup.js',
     '/_player/js/log_viewer.js',
     '/_player/js/ios-background-audio.js',
     // 第三方库
-    '/_player/assets/tailwindcss.js',
     '/_player/js/crypto-js.min.js',
     '/_player/js/NoSleep.min.js',
     '/_player/js/Sortable.min.js',

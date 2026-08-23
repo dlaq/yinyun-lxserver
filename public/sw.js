@@ -1,8 +1,9 @@
-const CACHE_NAME = 'yinyun-admin-v1.5.4';
+const CACHE_NAME = 'yinyun-admin-v1.6.1-r2';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
     './style.css',
+    './tailwind.generated.css',
     './app.js',
     './js/ui-utils.js',
     './js/notification-engine.js',
@@ -10,7 +11,6 @@ const ASSETS_TO_CACHE = [
     './manifest.json',
     './vendor/js/marked.min.js',
     './vendor/fonts/inter.css',
-    '/_player/assets/tailwindcss.js',
     '/_player/assets/fontawesome/css/all.min.css'
 ];
 
