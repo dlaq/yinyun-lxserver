@@ -28,3 +28,11 @@ test('local track identifiers reject malformed payloads', () => {
   assert.equal(decodeTrackId(traversalShape), null)
   assert.equal(decodeTrackId('not-base64-json'), null)
 })
+
+test('local track identifiers preserve a safe shared-library owner', () => {
+  const shared = Buffer.from(JSON.stringify({ f: 'album/song.flac', d: 'music', u: '用户-a' })).toString('base64url')
+  const invalidOwner = Buffer.from(JSON.stringify({ f: 'album/song.flac', d: 'music', u: '../admin' })).toString('base64url')
+
+  assert.deepEqual(decodeTrackId(shared), { filename: 'album/song.flac', folder: 'music', owner: '用户-a' })
+  assert.equal(decodeTrackId(invalidOwner), null)
+})

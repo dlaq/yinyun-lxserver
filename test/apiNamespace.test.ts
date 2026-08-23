@@ -29,3 +29,20 @@ test('background lyric fetching accepts numeric platform song IDs', () => {
   const source = fs.readFileSync(path.join(process.cwd(), 'src/server/server.ts'), 'utf8')
   assert.match(source, /let songmid = String\(songInfo\.songmid \|\| songInfo\.songId \|\| songInfo\.id \|\| ''\)/)
 })
+
+test('deleting a playlist sync mapping cannot cascade into Songloft', () => {
+  const source = fs.readFileSync(path.join(process.cwd(), 'src/server/apiV1.ts'), 'utf8')
+  const mappingRouteStart = source.indexOf('const syncDeleteMatch = pathname.match')
+  const nextRouteStart = source.indexOf("if (pathname === `${API_PREFIX}/auth/me`", mappingRouteStart)
+  assert.notEqual(mappingRouteStart, -1)
+  assert.notEqual(nextRouteStart, -1)
+  const mappingRoute = source.slice(mappingRouteStart, nextRouteStart)
+  assert.doesNotMatch(mappingRoute, /deletePlaylist\(/)
+  assert.match(mappingRoute, /remoteDeleted:\s*false/)
+
+  const explicitDeleteStart = source.indexOf('if (songloftPlaylistDeleteMatch')
+  const explicitDeleteEnd = source.indexOf("if (pathname === `${API_PREFIX}/integration/songloft/scan`", explicitDeleteStart)
+  const explicitDeleteRoute = source.slice(explicitDeleteStart, explicitDeleteEnd)
+  assert.match(explicitDeleteRoute, /requireIntegrationAdmin\(req, deps\)/)
+  assert.match(explicitDeleteRoute, /deletePlaylist\(playlistId\)/)
+})

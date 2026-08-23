@@ -6819,7 +6819,10 @@ async function refreshCacheList() {
         // 刷新前先强制触发服务器端的磁盘同步/索引重建
         await fetch('/api/v1/player/music/cache/sync', { method: 'POST', headers });
 
-        const res = await fetch('/api/v1/player/music/cache/list', { headers });
+        // The cache drawer is a mutation-oriented view. Keep it scoped to the
+        // authenticated user's own cache/music trees; the Local Music page uses
+        // the default shared-library view for read-only cross-user playback.
+        const res = await fetch('/api/v1/player/music/cache/list?scope=own', { headers });
         const data = await res.json();
 
         if (data.success) {
@@ -9190,7 +9193,8 @@ async function handleRemoveList(listId, event) {
             currentListData.userList.splice(index, 1);
             try {
                 await pushDataChange();
-                // 删除本地用户歌单后同步删除已经映射的 Songloft 歌单。
+                // 删除本地用户歌单后只移除同步映射。远端 Songloft 删除是
+                // 独立的管理员动作，不能由普通的本地歌单清理隐式触发。
                 const syncResponse = await fetch(`/api/v1/integration/playlists/sync/${encodeURIComponent(listId)}`, {
                     method: 'DELETE', headers: getUserAuthHeaders()
                 });
@@ -11368,9 +11372,18 @@ async function openPlaylistAddModal(batchSongs = null) {
         return;
     }
 
-    // 本地歌曲必须先关联真实平台 ID，避免把文件名回退 ID 同步到其他客户端。
+    // 平台缓存必须有真实平台 ID；已进入共享本地曲库的歌曲则使用稳定的
+    // localTrackId + 文件所有者身份，允许跨用户收藏和播放。
+    const hasDurableLocalIdentity = (song) => {
+        const localId = String(song?.localTrackId || song?.id || song?.songmid || '').trim();
+        const filename = String(song?._localFilename || '').trim();
+        const owner = String(song?._localOwner || '').trim();
+        const folder = String(song?._localFolder || 'music').trim();
+        return /^local_[a-f0-9]{32}$/i.test(localId) && !!filename && !!owner && folder === 'music';
+    };
     const isUnboundLocalSong = (song) => {
         if (!song?.isLocal && !song?._localLibraryItem) return false;
+        if (hasDurableLocalIdentity(song)) return false;
         return !window.LocalMusicManager?.isPlaylistCollectable(song);
     };
 
@@ -11378,18 +11391,18 @@ async function openPlaylistAddModal(batchSongs = null) {
         const collectableSongs = batchSongs.filter(song => !isUnboundLocalSong(song));
         const unavailableCount = batchSongs.length - collectableSongs.length;
         if (collectableSongs.length === 0) {
-            showError('歌曲不在曲库中，无法收藏到歌单。请先使用“手动关联”绑定平台歌曲 ID。');
+            showError('所选歌曲既没有平台歌曲 ID，也没有可共享的本地曲库身份，无法收藏到歌单。');
             window.batchCollectSongs = null;
             return;
         }
         if (unavailableCount > 0) {
-            showInfo(`已跳过 ${unavailableCount} 首未绑定平台 ID 的歌曲；歌曲不在曲库中，无法收藏到歌单。`);
+            showInfo(`已跳过 ${unavailableCount} 首既未绑定平台 ID、也未进入共享本地曲库的歌曲。`);
         }
         window.batchCollectSongs = collectableSongs;
     } else {
         window.batchCollectSongs = null;
         if (isUnboundLocalSong(currentPlayingSong)) {
-            showError('歌曲不在曲库中，无法收藏到歌单。请先使用“手动关联”绑定平台歌曲 ID。');
+            showError('歌曲既没有平台歌曲 ID，也没有可共享的本地曲库身份，无法收藏到歌单。');
             return;
         }
     }

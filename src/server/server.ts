@@ -14,6 +14,13 @@ const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis } from './userApi'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
+import { canReadLibraryOwner, getSharedCacheList } from './sharedLocalLibrary'
+import {
+  AdminUserSyncError,
+  getAdminUserSyncInventory,
+  syncAdminPlaylist,
+  syncAdminSources,
+} from './adminUserSync'
 import * as serverDownloadQueue from './serverDownloadQueue'
 import * as remasterQueue from './remasterQueue'
 import { completePlaylistReplacement, createApiV1Handler } from './apiV1'
@@ -1175,6 +1182,40 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           'Expires': '0'
         })
         res.end(JSON.stringify(status))
+        return
+      }
+
+      if (pathname.startsWith('/api/v1/admin/user-sync/')) {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['frontend.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        try {
+          let result: unknown
+          if (pathname === '/api/v1/admin/user-sync/inventory' && req.method === 'GET') {
+            result = await getAdminUserSyncInventory(urlObj.searchParams.get('user'))
+          } else if (pathname === '/api/v1/admin/user-sync/sources' && req.method === 'POST') {
+            result = await syncAdminSources(JSON.parse(await readBody(req)))
+          } else if (pathname === '/api/v1/admin/user-sync/playlist' && req.method === 'POST') {
+            result = await syncAdminPlaylist(JSON.parse(await readBody(req)))
+          } else {
+            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ success: false, message: 'Not Found' }))
+            return
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ success: true, data: result }))
+        } catch (error: any) {
+          const statusCode = error instanceof AdminUserSyncError ? error.statusCode : 400
+          res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({
+            success: false,
+            code: error instanceof AdminUserSyncError ? error.code : 'admin_user_sync_failed',
+            message: error?.message || '跨用户同步失败',
+          }))
+        }
         return
       }
 
@@ -2914,22 +2955,23 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           }
           if (!req.headers['x-user-name']) (req.headers as any)['x-user-name'] = reqUsername
           const username = getCacheRequestUsername(req)
-          if (!username || username !== reqUsername) {
-            res.writeHead(401)
-            res.end('Unauthorized')
-            return
-          }
           const requestedFolder = urlObj.searchParams.get('folder')
           if (requestedFolder !== null && requestedFolder !== 'cache' && requestedFolder !== 'music') {
             res.writeHead(400)
             res.end('Invalid cache folder')
             return
           }
+          const folder = (requestedFolder || 'cache') as fileCache.CacheFolder
+          if (!username || !canReadLibraryOwner(username, reqUsername, folder)) {
+            res.writeHead(401)
+            res.end('Unauthorized')
+            return
+          }
           fileCache.serveCacheFile(
             req,
             res,
             decodeURIComponent(filename),
-            username,
+            reqUsername,
             requestedFolder as fileCache.CacheFolder | undefined,
           )
           return
@@ -3026,7 +3068,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
           return
         }
-        void fileCache.getCacheList(username).then(list => {
+        const ownOnly = urlObj.searchParams.get('scope') === 'own'
+        void (ownOnly ? fileCache.getCacheList(username) : getSharedCacheList(username)).then(list => {
           res.writeHead(200, {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -3040,17 +3083,27 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // 8. Get Cache Cover
       if (pathname === '/api/v1/player/music/cache/cover' && req.method === 'GET') {
-        const requestedValue = (req.headers['x-user-name'] as string) || urlObj.searchParams.get('user')
+        const requestedValue = urlObj.searchParams.get('user') || (req.headers['x-user-name'] as string) || null
         const requestedUsername = requestedValue == null ? null : getConfiguredUsername(requestedValue)
         const urlToken = urlObj.searchParams.get('token')
         if (urlToken && !req.headers['x-user-token']) {
           (req.headers as any)['x-user-token'] = urlToken
         }
-        if (requestedUsername && !req.headers['x-user-name']) {
-          (req.headers as any)['x-user-name'] = requestedUsername
-        }
         const username = getCacheRequestUsername(req)
-        if (!username || (requestedValue != null && requestedUsername !== username)) {
+        const requestedFolder = urlObj.searchParams.get('folder')
+        if (requestedValue != null && !requestedUsername) {
+          res.writeHead(400)
+          res.end('Invalid library owner')
+          return
+        }
+        if (requestedFolder !== null && requestedFolder !== 'cache' && requestedFolder !== 'music') {
+          res.writeHead(400)
+          res.end('Invalid cache folder')
+          return
+        }
+        const folder = (requestedFolder || 'cache') as fileCache.CacheFolder
+        const owner = requestedUsername || username
+        if (!username || !owner || !canReadLibraryOwner(username, owner, folder)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -3061,7 +3114,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           res.end('Missing filename')
           return
         }
-        const cover = await fileCache.getCacheCover(filename, username) as any
+        const cover = await fileCache.getCacheCover(filename, owner) as any
         if (cover && cover.data) {
           res.writeHead(200, {
             'Content-Type': cover.mime || 'image/jpeg',

@@ -943,7 +943,7 @@ export async function initUserApis(targetUser?: string) {
     }
 
     // 尝试启动监控 (只会在第一次调用且无 watcher 时启动)
-    if (!fsWatcher) {
+    if (!fsWatcher && process.env.NODE_ENV !== 'test') {
         startWatcher(sourceRoot)
     }
 

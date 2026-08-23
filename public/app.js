@@ -731,6 +731,126 @@ class App {
         }
     }
 
+    async getUserSyncInventory(username) {
+        if (!username) return { sources: [], playlists: [] };
+        const response = await this.request(`/api/v1/admin/user-sync/inventory?user=${encodeURIComponent(username)}`);
+        return response.data || { sources: [], playlists: [] };
+    }
+
+    showUserSyncModal() {
+        if (!this.users?.length) {
+            showInfo('请先创建至少两个用户');
+            return;
+        }
+        const userOptions = this.users.map(user => `<option value="${this.escapeAttr(user.name)}">${this.escapeHtml(user.name)}</option>`).join('');
+        const modal = document.getElementById('modal');
+        document.getElementById('modal-title').textContent = '管理员跨用户同步';
+        document.getElementById('modal-body').innerHTML = `
+            <div class="admin-user-sync">
+                <p class="sync-help">音源与歌单会复制到目标账户，复制后仍由各账户独立维护；追加不会改写同 ID 音源或目标歌单已有歌曲，覆盖只影响明确选择的目标。</p>
+                <section class="sync-panel">
+                    <h3>同步音乐源</h3>
+                    <div class="sync-form-grid">
+                        <label>源用户<select id="admin-source-from" class="form-input">${userOptions}</select></label>
+                        <label>模式<select id="admin-source-mode" class="form-input"><option value="append">追加（保留同 ID 源）</option><option value="overwrite">覆盖同 ID 源</option></select></label>
+                        <label>选择源<select id="admin-source-items" class="form-input" multiple size="5"></select></label>
+                        <label>目标用户（可多选）<select id="admin-source-targets" class="form-input" multiple size="5">${userOptions}</select></label>
+                    </div>
+                    <button type="button" class="btn-primary" id="admin-source-sync-submit">同步音乐源</button>
+                </section>
+                <section class="sync-panel">
+                    <h3>同步歌单</h3>
+                    <div class="sync-form-grid">
+                        <label>源用户<select id="admin-playlist-from" class="form-input">${userOptions}</select></label>
+                        <label>源歌单<select id="admin-playlist-source" class="form-input"></select></label>
+                        <label>目标用户<select id="admin-playlist-to" class="form-input">${userOptions}</select></label>
+                        <label>目标歌单<select id="admin-playlist-target" class="form-input"><option value="">创建新歌单</option></select></label>
+                        <label>模式<select id="admin-playlist-mode" class="form-input"><option value="append">追加</option><option value="overwrite">覆盖</option></select></label>
+                    </div>
+                    <button type="button" class="btn-primary" id="admin-playlist-sync-submit">同步歌单</button>
+                </section>
+                <div class="form-actions"><button type="button" class="btn-secondary" onclick="app.closeModal()">关闭</button></div>
+            </div>`;
+        modal.classList.remove('hidden');
+
+        const sourceFrom = document.getElementById('admin-source-from');
+        const playlistFrom = document.getElementById('admin-playlist-from');
+        const playlistTo = document.getElementById('admin-playlist-to');
+        if (this.users.length > 1) {
+            document.getElementById('admin-source-targets').options[1].selected = true;
+            playlistTo.selectedIndex = 1;
+        }
+        const refreshSources = async () => {
+            const inventory = await this.getUserSyncInventory(sourceFrom.value);
+            document.getElementById('admin-source-items').innerHTML = inventory.sources.map(source =>
+                `<option value="${this.escapeAttr(source.id)}" selected>${this.escapeHtml(source.name)} (${this.escapeHtml(source.id)})</option>`
+            ).join('');
+        };
+        const refreshSourcePlaylists = async () => {
+            const inventory = await this.getUserSyncInventory(playlistFrom.value);
+            document.getElementById('admin-playlist-source').innerHTML = inventory.playlists.map(playlist =>
+                `<option value="${this.escapeAttr(playlist.id)}" data-track-count="${Number(playlist.trackCount) || 0}">${this.escapeHtml(playlist.name)} (${Number(playlist.trackCount) || 0} 首)</option>`
+            ).join('');
+        };
+        const refreshTargetPlaylists = async () => {
+            const inventory = await this.getUserSyncInventory(playlistTo.value);
+            document.getElementById('admin-playlist-target').innerHTML = '<option value="">创建新歌单</option>' + inventory.playlists.map(playlist =>
+                `<option value="${this.escapeAttr(playlist.id)}">${this.escapeHtml(playlist.name)} (${Number(playlist.trackCount) || 0} 首)</option>`
+            ).join('');
+        };
+        sourceFrom.addEventListener('change', () => void refreshSources().catch(error => showError(error.message)));
+        playlistFrom.addEventListener('change', () => void refreshSourcePlaylists().catch(error => showError(error.message)));
+        playlistTo.addEventListener('change', () => void refreshTargetPlaylists().catch(error => showError(error.message)));
+        document.getElementById('admin-source-sync-submit').addEventListener('click', () => void this.submitAdminSourceSync());
+        document.getElementById('admin-playlist-sync-submit').addEventListener('click', () => void this.submitAdminPlaylistSync());
+        void Promise.all([refreshSources(), refreshSourcePlaylists(), refreshTargetPlaylists()]).catch(error => showError(error.message));
+    }
+
+    async submitAdminSourceSync() {
+        const fromUser = document.getElementById('admin-source-from').value;
+        const sourceIds = Array.from(document.getElementById('admin-source-items').selectedOptions).map(option => option.value);
+        const targetUsers = Array.from(document.getElementById('admin-source-targets').selectedOptions).map(option => option.value).filter(user => user !== fromUser);
+        const mode = document.getElementById('admin-source-mode').value;
+        if (!sourceIds.length || !targetUsers.length) return showInfo('请选择音乐源和至少一个不同的目标用户');
+        if (mode === 'overwrite' && !(await showSelect('覆盖同 ID 音源', '目标用户中同 ID 的音源脚本和平台设置将被替换，其他音源保留。是否继续？', { danger: true }))) return;
+        try {
+            const response = await this.request('/api/v1/admin/user-sync/sources', {
+                method: 'POST',
+                body: JSON.stringify({ fromUser, targetUsers, sourceIds, mode })
+            });
+            const changed = (response.data?.results || []).reduce((sum, item) => sum + item.copied.length + item.overwritten.length, 0);
+            showSuccess(`音乐源同步完成，共写入 ${changed} 项`);
+        } catch (error) {
+            showError('音乐源同步失败: ' + error.message);
+        }
+    }
+
+    async submitAdminPlaylistSync() {
+        const fromUser = document.getElementById('admin-playlist-from').value;
+        const toUser = document.getElementById('admin-playlist-to').value;
+        const sourceSelect = document.getElementById('admin-playlist-source');
+        const sourcePlaylistId = sourceSelect.value;
+        const targetPlaylistId = document.getElementById('admin-playlist-target').value;
+        const mode = document.getElementById('admin-playlist-mode').value;
+        if (!sourcePlaylistId || !toUser) return showInfo('请选择源歌单和目标用户');
+        const trackCount = Number(sourceSelect.selectedOptions[0]?.dataset.trackCount || 0);
+        if (mode === 'overwrite' && targetPlaylistId && trackCount === 0) return showError('空源歌单不能覆盖已有目标歌单');
+        if (mode === 'overwrite' && targetPlaylistId && !(await showSelect('覆盖目标歌单', '目标歌单现有歌曲将被所选源歌单替换。是否继续？', { danger: true }))) return;
+        try {
+            const response = await this.request('/api/v1/admin/user-sync/playlist', {
+                method: 'POST',
+                body: JSON.stringify({ fromUser, toUser, sourcePlaylistId, targetPlaylistId, mode })
+            });
+            showSuccess(`歌单同步完成：${response.data.beforeTrackCount} → ${response.data.afterTrackCount} 首`);
+            const inventory = await this.getUserSyncInventory(toUser);
+            document.getElementById('admin-playlist-target').innerHTML = '<option value="">创建新歌单</option>' + inventory.playlists.map(playlist =>
+                `<option value="${this.escapeAttr(playlist.id)}">${this.escapeHtml(playlist.name)} (${Number(playlist.trackCount) || 0} 首)</option>`
+            ).join('');
+        } catch (error) {
+            showError('歌单同步失败: ' + error.message);
+        }
+    }
+
     async batchDeleteUsers() {
         const checked = document.querySelectorAll('.user-checkbox:checked');
         // 使用 data-index 获取对应的用户对象
@@ -1932,7 +2052,12 @@ class App {
 
         if (!response.ok) {
             const text = await response.text();
-            throw new Error(text || 'Request failed');
+            let message = text;
+            try {
+                const payload = JSON.parse(text);
+                message = payload.message || payload.error?.message || payload.error || text;
+            } catch { /* plain-text error response */ }
+            throw new Error(message || 'Request failed');
         }
 
         return response.json();
@@ -1957,6 +2082,12 @@ class App {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    escapeAttr(text) {
+        return this.escapeHtml(String(text ?? ''))
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
     // ========== WebDAV 功能 ==========
 

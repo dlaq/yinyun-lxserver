@@ -3903,6 +3903,51 @@ select.form-input option:checked {
 
 /* =============== 用户管理表格样式 =============== */
 
+.admin-user-sync {
+    display: grid;
+    gap: 1rem;
+}
+
+.admin-user-sync .sync-help {
+    color: var(--text-secondary);
+    line-height: 1.65;
+}
+
+.admin-user-sync .sync-panel {
+    padding: 1rem;
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    background: var(--glass-bg);
+}
+
+.admin-user-sync .sync-panel h3 {
+    margin: 0 0 0.85rem;
+}
+
+.admin-user-sync .sync-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+    margin-bottom: 0.85rem;
+}
+
+.admin-user-sync .sync-form-grid label {
+    display: grid;
+    gap: 0.4rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.admin-user-sync select[multiple] {
+    min-height: 8rem;
+}
+
+@media (max-width: 720px) {
+    .admin-user-sync .sync-form-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 
 .header-main-actions {
     display: flex;
@@ -5400,5 +5445,42 @@ input:-webkit-autofill:active {
     /* 统一底部留白 */
     .content-wrapper {
         padding-bottom: 10rem !important;
+    }
+}
+
+/* iPhone Safari uses a dynamic visual viewport. Keep the admin console out of
+ * the notch/home-indicator areas and prevent focus zoom on compact controls. */
+@media screen and (max-width: 768px) {
+    @supports (height: 100dvh) {
+        #app,
+        .main-content,
+        .sidebar {
+            height: 100dvh;
+        }
+    }
+
+    .main-content {
+        padding-left: max(1rem, env(safe-area-inset-left, 0px)) !important;
+        padding-right: max(1rem, env(safe-area-inset-right, 0px)) !important;
+    }
+
+    .top-bar {
+        margin-top: max(1rem, env(safe-area-inset-top, 0px));
+    }
+
+    .content-wrapper {
+        padding-bottom: calc(10rem + env(safe-area-inset-bottom, 0px)) !important;
+    }
+
+    .sidebar {
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+    select,
+    textarea,
+    [contenteditable="true"] {
+        font-size: 16px !important;
     }
 }

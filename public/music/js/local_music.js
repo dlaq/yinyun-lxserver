@@ -640,13 +640,21 @@ window.LocalMusicManager = {
     },
 
     getSearchValues(item, includeQuality = false) {
-        const values = [item.name, item.singer, item.album, item.filename];
+        const values = [item.name, item.singer, item.album, item.filename, item.libraryOwner];
         if (includeQuality) values.push(item.quality);
         return values;
     },
 
+    getLibraryOwner(item) {
+        return item?.libraryOwner || (window.currentListData && window.currentListData.username) || localStorage.getItem('lx_sync_user') || '';
+    },
+
+    isManageableItem(item) {
+        return !!item && item.shared !== true && item.readOnly !== true;
+    },
+
     getItemKey(item) {
-        return `${item.folder}\u0000${item.filename}`;
+        return `${this.getLibraryOwner(item)}\u0000${item.folder}\u0000${item.filename}`;
     },
 
     getSelectedEntries() {
@@ -1367,6 +1375,8 @@ window.LocalMusicManager = {
         let html = '';
         page.list.forEach((item, pageIndex) => {
             const index = page.start + pageIndex;
+            const libraryOwner = this.getLibraryOwner(item);
+            const manageable = this.isManageableItem(item);
             const safeName = this.escapeHtml(item.name || '未知歌曲');
             const safeSinger = this.escapeHtml(item.singer || '未知歌手');
             const safeAlbum = this.escapeHtml(item.album || '--');
@@ -1411,7 +1421,7 @@ window.LocalMusicManager = {
                     item.coverCheckedSize || item.size || 0,
                     1
                 ].join('-');
-                const coverUrl = `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(username)}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}&v=${encodeURIComponent(coverVersion)}`;
+                const coverUrl = `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(libraryOwner)}&folder=music${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}&v=${encodeURIComponent(coverVersion)}`;
                 coverHtml = `<img data-src="${this.escapeAttr(coverUrl)}" data-lm-cover-index="${index}" src="/_player/assets/logo.svg" loading="lazy" fetchpriority="low" class="lazy-image lm-cover-image is-placeholder w-10 h-10 md:w-12 md:h-12 rounded-lg object-cover shadow-sm flex-shrink-0 border t-border-main mr-2.5 md:mr-4 ml-0.5 md:ml-3">`;
             }
 
@@ -1435,7 +1445,7 @@ window.LocalMusicManager = {
                     <div class="${this.batchMode ? 'hidden' : 'block'}">${index + 1}</div>
                     <div class="${this.batchMode ? 'block' : 'hidden'}">
                         <label class="flex items-center justify-center w-full h-full cursor-pointer">
-                            <input type="checkbox" data-lm-action="select" data-lm-index="${index}" ${isSelected ? 'checked' : ''}
+                            <input type="checkbox" data-lm-action="select" data-lm-index="${index}" ${isSelected ? 'checked' : ''} ${manageable ? '' : 'disabled'}
                                 class="w-4 h-4 rounded border-gray-300 text-emerald-500 focus:ring-emerald-500 mx-auto cursor-pointer transition-all">
                         </label>
                     </div>
@@ -1451,6 +1461,7 @@ window.LocalMusicManager = {
                         <div class="text-[10px] md:text-xs t-text-muted mt-0.5 truncate flex items-center gap-1.5 flex-wrap">
                             <span class="sm:hidden font-medium text-emerald-600/70 mr-0.5">${safeSinger}</span>
                             <span class="px-1.5 py-[1px] rounded-md border t-border-main ${qualityClass} scale-90 origin-left inline-block">${this.escapeHtml(qualityName || '标准')}</span>
+                            ${item.shared ? `<span class="text-[10px] text-blue-500 border border-blue-400/40 rounded px-1 scale-90" title="来自 ${this.escapeAttr(libraryOwner)} 的共享本地音乐">共享 · ${this.escapeHtml(libraryOwner)}</span>` : ''}
                             ${item.bitrate ? `<span class="text-[10px] opacity-60 font-mono hidden sm:inline-block">${Math.round(item.bitrate)}kbps</span>` : ''}
                             ${item.sampleRate ? `<span class="text-[10px] opacity-60 font-mono hidden sm:inline-block">${(item.sampleRate / 1000).toFixed(1)}kHz</span>` : ''}
                             ${item.bitDepth && item.bitDepth > 16 ? `<span class="text-[10px] opacity-60 font-mono hidden sm:inline-block">${item.bitDepth}bit</span>` : ''}
@@ -1473,7 +1484,7 @@ window.LocalMusicManager = {
                                 ${(!missingID3 && !missingCover && !missingLyric) ? '<span class="px-1 py-0 bg-emerald-50 text-emerald-600 border border-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-400 dark:border-emerald-900/30 rounded-sm font-medium">完整</span>' : ''}
                             </div>
 
-                            ${(isUnindexed || this.enableReMapping) ? `
+                            ${manageable && (isUnindexed || this.enableReMapping) ? `
                                 <button data-lm-action="manual" data-lm-index="${index}"
                                         class="px-1.5 py-0.5 bg-emerald-500 text-white rounded-md font-bold shadow-sm shadow-emerald-500/20 active:scale-95 transition-all flex items-center gap-1">
                                     <i class="fas fa-link text-[8px]"></i>关联
@@ -1520,7 +1531,7 @@ window.LocalMusicManager = {
                     <div class="hidden lg:block text-xs text-right pr-2 font-mono t-text-muted shrink-0 mr-1">
                         ${formatSize(item.size)}
                     </div>
-                    ${(isUnindexed || this.enableReMapping) ? `
+                    ${manageable && (isUnindexed || this.enableReMapping) ? `
                         <button data-lm-action="manual" data-lm-index="${index}"
                                 class="hidden sm:flex w-8 h-8 md:w-7 md:h-7 items-center justify-center rounded-full bg-emerald-500 text-white hover:bg-emerald-600 transition-all shadow-sm shrink-0" title="手动关联">
                             <i class="fas fa-link text-[10px]"></i>
@@ -1536,10 +1547,10 @@ window.LocalMusicManager = {
                         <i class="fas fa-download text-[10px]"></i>
                     </button>
                     <!-- Deletion from single operations -->
-                    <button data-lm-action="delete" data-lm-index="${index}"
+                    ${manageable ? `<button data-lm-action="delete" data-lm-index="${index}"
                             class="w-8 h-8 md:w-7 md:h-7 flex items-center justify-center rounded-full t-bg-main border t-border-main t-text-muted hover:text-red-500 hover:border-red-300 transition-all shadow-sm shrink-0" title="删除">
                         <i class="far fa-trash-alt text-[10px]"></i>
-                    </button>
+                    </button>` : ''}
                 </div>
             </div>
             `;
@@ -1585,7 +1596,7 @@ window.LocalMusicManager = {
 
     toggleSelect(index, checked) {
         const item = this.displayData[index];
-        if (!item) return;
+        if (!this.isManageableItem(item)) return;
         const key = this.getItemKey(item);
         if (checked) {
             this.selectedItems.add(key);
@@ -1662,7 +1673,7 @@ window.LocalMusicManager = {
         // Re-apply the current DOM values before selecting so a stale quick
         // search input event can never select the unfiltered list.
         this.applyFilters();
-        this.displayData.forEach(item => this.selectedItems.add(this.getItemKey(item)));
+        this.displayData.filter(item => this.isManageableItem(item)).forEach(item => this.selectedItems.add(this.getItemKey(item)));
         this.updateBatchUI();
         this.render();
     },
@@ -1715,13 +1726,32 @@ window.LocalMusicManager = {
     },
 
     isPlaylistCollectable(item) {
-        return !!this.getPlaylistPlatformIdentity(item);
+        return !!this.getPlaylistPlatformIdentity(item) ||
+            (item?.folder === 'music' && !!item?.localTrackId);
     },
 
     buildPlaylistSong(item) {
         const songInfo = item?.songInfo || {};
         const identity = this.getPlaylistPlatformIdentity(item);
-        if (!identity) return null;
+        if (!identity) {
+            if (item?.folder !== 'music' || !item?.localTrackId) return null;
+            return {
+                ...songInfo,
+                id: item.localTrackId,
+                songmid: item.localTrackId,
+                songId: item.localTrackId,
+                name: item.name || songInfo.name,
+                singer: item.singer || songInfo.singer,
+                source: 'local',
+                albumName: item.album || songInfo.albumName || '',
+                interval: item.interval || songInfo.interval || '0',
+                _localFilename: item.filename,
+                _localFolder: 'music',
+                _localStorageLocation: item.storageLocation,
+                _localOwner: this.getLibraryOwner(item),
+                _localLibraryItem: true
+            };
+        }
         const quality = item?.quality || songInfo.quality || songInfo.type || '128k';
         let types = songInfo.types;
 
@@ -1765,7 +1795,7 @@ window.LocalMusicManager = {
         const unavailableCount = targets.length - collectableTargets.length;
         if (collectableTargets.length === 0) {
             if (typeof showError === 'function') {
-                showError('歌曲不在曲库中，无法收藏到歌单。请先使用“手动关联”绑定平台歌曲 ID。');
+                showError('所选缓存既没有平台歌曲 ID，也不是可共享的本地音乐，无法加入歌单。');
             }
             return;
         }
@@ -1776,7 +1806,7 @@ window.LocalMusicManager = {
         }
 
         if (unavailableCount > 0 && typeof showInfo === 'function') {
-            showInfo(`已跳过 ${unavailableCount} 首未绑定平台 ID 的歌曲；歌曲不在曲库中，无法收藏到歌单。`);
+            showInfo(`已跳过 ${unavailableCount} 首既未绑定平台 ID、也未进入本地音乐库的缓存。`);
         }
 
         window.openPlaylistAddModal(collectableTargets.map(item => this.buildPlaylistSong(item)).filter(Boolean));
@@ -1787,7 +1817,6 @@ window.LocalMusicManager = {
         if (!item) return;
 
         // Transform into songInfo for global player
-        const username = (window.currentListData && window.currentListData.username) || localStorage.getItem('lx_sync_user') || '';
         const authToken = (window.getUserAuthHeaders ? window.getUserAuthHeaders()['x-user-token'] : null) || localStorage.getItem('lx_user_token') || '';
 
         // Important: Use existing checkCache via global logic if possible, 
@@ -1795,19 +1824,21 @@ window.LocalMusicManager = {
         const songInfo = {
             ...item.songInfo,
             // Reconstruct full URL locally
-            url: `/api/v1/player/music/cache/file/${encodeURIComponent(username)}/${encodeURIComponent(item.filename)}?folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
-            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(username)}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            url: `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(item))}/${encodeURIComponent(item.filename)}?folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(this.getLibraryOwner(item))}&folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
             isLocal: true,
-            folder: item.folder
+            folder: item.folder,
+            _localOwner: this.getLibraryOwner(item)
         };
 
         // If 'app.js' exposes playSong(song), we use it.
         // We might want to construct a playlist of local tracks.
         const playlist = this.displayData.map(d => ({
             ...d.songInfo,
-            url: `/api/v1/player/music/cache/file/${encodeURIComponent(username)}/${encodeURIComponent(d.filename)}?folder=${d.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
-            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(d.filename)}&user=${encodeURIComponent(username)}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
-            isLocal: true
+            url: `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(d))}/${encodeURIComponent(d.filename)}?folder=${d.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(d.filename)}&user=${encodeURIComponent(this.getLibraryOwner(d))}&folder=${d.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            isLocal: true,
+            _localOwner: this.getLibraryOwner(d)
         }));
 
         if (typeof window.updatePlaylist === 'function') {
@@ -1824,6 +1855,10 @@ window.LocalMusicManager = {
         const item = this.displayData[index];
         if (!item) {
             if (typeof showError === 'function') showError('文件信息已失效，请刷新后重试');
+            return;
+        }
+        if (!this.isManageableItem(item)) {
+            if (typeof showInfo === 'function') showInfo('共享本地音乐为只读，不能修改或删除');
             return;
         }
 
@@ -2127,7 +2162,7 @@ window.LocalMusicManager = {
         if (!item) return;
         const username = (window.currentListData && window.currentListData.username) || localStorage.getItem('lx_sync_user') || '';
         const authToken = (window.getUserAuthHeaders ? window.getUserAuthHeaders()['x-user-token'] : null) || localStorage.getItem('lx_user_token') || '';
-        const url = `/api/v1/player/music/cache/file/${encodeURIComponent(username)}/${encodeURIComponent(item.filename)}?folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`;
+        const url = `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(item))}/${encodeURIComponent(item.filename)}?folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`;
 
         const a = document.createElement('a');
         a.href = url;

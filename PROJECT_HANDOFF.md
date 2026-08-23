@@ -15,6 +15,8 @@
 5. 音云和 Songloft 必须看到同一宿主机音乐目录，但两个索引的刷新时机和元数据解析可能不同，界面必须分别显示两端状态，不能直接假定数量相等。
 6. 普通用户可以维护自己的歌单、导入记录、匹配选择和下载队列；删除共享音乐文件属于管理员操作。涉及真实下载、替换或删除前要确认目标歌单和文件。
 7. 所有改动都要考虑将来合并上游：优先在 integration bridge 和标记区块中修改，避免把业务逻辑散落到上游播放器代码。
+8. 多用户数据采用“私有配置、共享持久音乐”的边界：自定义音源、平台开关、歌单、缓存和下载队列按用户隔离；`/music/<用户>` 中的长期音乐对所有已登录用户只读可见。跨用户写入只能通过管理员同步接口显式执行。
+9. Songloft 覆盖同步必须保留三道保护：空源拒绝、先添加后删除、写后校验/失败恢复。删除音云歌单只能移除本地映射，不能顺带删除远端 Songloft 歌单。
 
 ## 2. 项目和远端拓扑
 
@@ -73,6 +75,8 @@ public/music/css/            联动、队列和响应式样式
 src/server/apiV1.ts          API 路由及联动适配入口
 src/server/playlistIntegration.ts 统一歌曲模型、匹配和导入账本
 src/server/songloftClient.ts       Songloft 原生/Subsonic API 客户端
+src/server/adminUserSync.ts        管理员跨用户音源/歌单复制与回滚
+src/server/sharedLocalLibrary.ts   跨用户只读本地曲库聚合和 owner 边界
 src/common/utils/musicMeta/         音频元数据、封面和刮削相关逻辑
 scripts/update-build-hash.js        构建哈希生成
 .github/workflows/docker.yml        Docker Hub/GHCR 构建发布
@@ -82,6 +86,24 @@ Dockerfile                           amd64 Docker 构建定义
 docs/songloft-playlist-integration.md 详细联动说明
 docs/upstream-integration-boundary.md  上游合并边界
 ```
+
+### 3.1 多用户复制与本地曲库共享
+
+- 管理后台入口：`/admin` → “跨用户同步”。
+- `GET /api/v1/admin/user-sync/inventory?user=<name>`：读取指定用户拥有的音源和歌单摘要。
+- `POST /api/v1/admin/user-sync/sources`：把源用户拥有的音源复制给多个目标用户；`append` 保留目标同 ID 源，`overwrite` 只替换同 ID 源，不清空其它源。
+- `POST /api/v1/admin/user-sync/playlist`：把一个用户歌单复制到另一用户的新歌单或指定歌单；支持追加/覆盖、快照和失败回滚，空源覆盖非空目标默认拒绝。
+- `/api/v1/player/music/cache/list` 默认返回本人缓存/音乐以及其他用户的长期音乐；`scope=own` 仅供缓存管理界面读取本人数据。
+- 共享歌曲携带 `libraryOwner`、`localTrackId` 和 `_localOwner`。跨用户加入歌单时必须保留 owner；否则播放端会错误地到目标用户目录寻找文件。
+- 文件和封面接口只允许跨用户读取 `folder=music`，绝不允许跨用户读取 `folder=cache`。共享条目在 UI 中必须保持只读，不能进入批量删除、重命名或元数据写入。
+
+### 3.2 Songloft 覆盖同步安全不变量
+
+1. 普通用户只允许 `push + merge`，不能传任意 Songloft 目标 ID，也不能调用 `replace`。
+2. `push + replace` 遇到空音云源歌单时返回 `playlist_replace_empty_source`，不执行远端删除。
+3. 先把缺失歌曲加入 Songloft，再移除多余歌曲；写后必须重新读取并确认目标歌曲仍存在。
+4. 写入或校验失败时尽力恢复操作前的 Songloft 歌曲集合，并把失败返回给调用方。
+5. 删除音云歌单只删除音云记录和同步映射；远端删除只允许通过明确的 Songloft 删除接口执行。
 
 联动代码使用 `[YINYUN-INTEGRATION]` 注释标出边界。将来合并上游时：
 

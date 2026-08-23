@@ -38,13 +38,20 @@ export const verifySignedApiToken = (
   }
 }
 
-export const decodeTrackId = (id: string): { filename: string; folder: 'cache' | 'music'; location?: string } | null => {
+export const decodeTrackId = (id: string): { filename: string; folder: 'cache' | 'music'; location?: string; owner?: string } | null => {
   try {
     const value = JSON.parse(Buffer.from(id, 'base64url').toString('utf8'))
     if (!value || typeof value.f !== 'string' || !['cache', 'music'].includes(value.d)) return null
     const normalizedFilename = value.f.replace(/\\/g, '/')
     if (!normalizedFilename || normalizedFilename.startsWith('/') || normalizedFilename.split('/').includes('..') || /^[a-z]:/i.test(normalizedFilename)) return null
-    return { filename: value.f, folder: value.d, ...(typeof value.l === 'string' ? { location: value.l } : {}) }
+    const owner = typeof value.u === 'string' ? value.u.trim().toLowerCase() : ''
+    if (owner && (owner === '.' || owner === '..' || /[\\/\0]/.test(owner))) return null
+    return {
+      filename: value.f,
+      folder: value.d,
+      ...(typeof value.l === 'string' ? { location: value.l } : {}),
+      ...(owner ? { owner } : {}),
+    }
   } catch {
     return null
   }

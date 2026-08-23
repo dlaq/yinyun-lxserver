@@ -1119,3 +1119,129 @@ body.energy-saving-mode .integration-page .glass {
 body.energy-saving-mode .integration-page .glass {
     box-shadow: none !important;
 }
+
+/* iPhone Safari viewport and safe-area handling.
+ * 100vh follows Safari's large viewport and can leave the player underneath
+ * the address/home bars. dvh follows the actually visible viewport instead. */
+:root {
+    --ios-safe-top: env(safe-area-inset-top, 0px);
+    --ios-safe-right: env(safe-area-inset-right, 0px);
+    --ios-safe-bottom: env(safe-area-inset-bottom, 0px);
+    --ios-safe-left: env(safe-area-inset-left, 0px);
+    --mobile-player-reserve: calc(8.25rem + var(--ios-safe-bottom));
+}
+
+html,
+body {
+    width: 100%;
+    min-height: 100%;
+}
+
+@supports (height: 100dvh) {
+    body.h-screen {
+        height: 100dvh !important;
+        min-height: 100dvh;
+    }
+}
+
+@media (max-width: 767px) {
+    main > header {
+        height: calc(4rem + var(--ios-safe-top));
+        min-height: calc(4rem + var(--ios-safe-top));
+        padding-top: var(--ios-safe-top);
+        padding-left: max(.75rem, var(--ios-safe-left));
+        padding-right: max(.75rem, var(--ios-safe-right));
+    }
+
+    #main-sidebar {
+        padding-top: var(--ios-safe-top);
+        padding-bottom: var(--mobile-player-reserve);
+    }
+
+    #view-search,
+    #view-songlist,
+    #view-leaderboard,
+    #view-my-playlists,
+    #view-library-integration,
+    #view-favorites,
+    #view-localmusic,
+    #view-settings,
+    #view-about {
+        padding-bottom: var(--mobile-player-reserve) !important;
+    }
+
+    #view-player-detail {
+        padding-top: var(--ios-safe-top);
+        padding-bottom: var(--mobile-player-reserve) !important;
+    }
+
+    #detail-visualizer {
+        bottom: var(--mobile-player-reserve) !important;
+        height: calc(100dvh - var(--mobile-player-reserve)) !important;
+    }
+
+    #player-footer {
+        min-height: 0;
+        padding-top: .375rem !important;
+        padding-right: max(.75rem, var(--ios-safe-right)) !important;
+        padding-bottom: max(.375rem, var(--ios-safe-bottom)) !important;
+        padding-left: max(.75rem, var(--ios-safe-left)) !important;
+    }
+
+    #player-song-info {
+        min-height: 2.75rem;
+        margin-bottom: .125rem !important;
+        align-items: center;
+    }
+
+    #player-song-info > div:first-child {
+        width: 2.5rem !important;
+        height: 2.5rem !important;
+    }
+
+    #player-footer > div:nth-child(2) > div:first-child {
+        min-height: 1.5rem;
+        margin-bottom: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+
+    #player-footer > div:nth-child(2) > div:first-child > div.flex-1 {
+        height: 1.5rem !important;
+    }
+
+    #player-footer > div:nth-child(2) > div:nth-child(2) {
+        min-height: 2.5rem;
+        gap: clamp(1rem, 5vw, 1.5rem) !important;
+    }
+
+    #visualizer-container {
+        display: none;
+    }
+
+    #btn-expand-panel {
+        right: max(1rem, var(--ios-safe-right));
+        bottom: calc(1rem + var(--ios-safe-bottom));
+    }
+
+    /* Safari zooms the entire page when a focused form control is below 16px. */
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+    select,
+    textarea,
+    [contenteditable="true"] {
+        font-size: 16px !important;
+    }
+
+    #required-login-modal,
+    #project-agreement-modal {
+        padding-top: max(1rem, var(--ios-safe-top));
+        padding-right: max(1rem, var(--ios-safe-right));
+        padding-bottom: max(1rem, var(--ios-safe-bottom));
+        padding-left: max(1rem, var(--ios-safe-left));
+    }
+
+    #project-agreement-modal > div:last-child {
+        max-height: calc(100dvh - var(--ios-safe-top) - var(--ios-safe-bottom) - 2rem);
+        overflow-y: auto;
+    }
+}

@@ -17,7 +17,7 @@ import {
     setEnabledSourcePlatforms,
 } from './customSourcePlatformPreferences'
 
-interface StoredSource {
+export interface StoredSource {
     id: string
     name: string
     version: string | number
@@ -86,10 +86,112 @@ const readSources = (username: string): StoredSource[] => {
     }
 }
 
+const writeFileAtomic = (filePath: string, content: string) => {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    try {
+        fs.writeFileSync(tempPath, content, 'utf-8')
+        fs.renameSync(tempPath, filePath)
+    } finally {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+    }
+}
+
 const writeSources = (username: string, sources: StoredSource[]) => {
     const sourcesDir = getSourceDir(username)
     fs.mkdirSync(sourcesDir, { recursive: true })
-    fs.writeFileSync(path.join(sourcesDir, 'sources.json'), JSON.stringify(sources, null, 2))
+    writeFileAtomic(path.join(sourcesDir, 'sources.json'), JSON.stringify(sources, null, 2))
+}
+
+export const listOwnedSourcesForAdmin = (username: string) => {
+    const owner = assertUsername(username)
+    return readSources(owner).map(source => ({
+        id: source.id,
+        name: source.name,
+        version: source.version,
+        enabled: source.enabled,
+        supportedSources: [...source.supportedSources],
+        enabledSources: getEnabledSourcePlatforms(owner, owner, source.id, source.supportedSources),
+    }))
+}
+
+export const syncOwnedSourcesForAdmin = async (
+    fromUsername: string,
+    rawTargetUsers: unknown,
+    rawMode: unknown,
+    rawSourceIds?: unknown,
+) => {
+    const owner = assertUsername(fromUsername)
+    if (!Array.isArray(rawTargetUsers) || rawTargetUsers.length === 0) throw new Error('At least one target user is required')
+    const mode = rawMode === 'overwrite' ? 'overwrite' : rawMode === 'append' ? 'append' : null
+    if (!mode) throw new Error('mode must be append or overwrite')
+    const targetUsers = [...new Set(rawTargetUsers.map(target => assertUsername(String(target))))].filter(target => target !== owner)
+    if (!targetUsers.length) throw new Error('At least one different target user is required')
+
+    const allSources = readSources(owner)
+    const selectedIds = rawSourceIds == null
+        ? allSources.map(source => source.id)
+        : Array.isArray(rawSourceIds)
+            ? [...new Set(rawSourceIds.map(id => String(id || '').trim()).filter(Boolean))]
+            : []
+    if (!selectedIds.length) throw new Error('At least one source is required')
+    const selectedSources = selectedIds.map(id => {
+        const source = allSources.find(item => item.id === id)
+        if (!source) throw new Error(`Source not found: ${id}`)
+        const scriptPath = path.join(getSourceDir(owner), source.id)
+        if (!fs.existsSync(scriptPath)) throw new Error(`Source script not found: ${source.id}`)
+        return {
+            source: { ...source, supportedSources: [...source.supportedSources] },
+            content: fs.readFileSync(scriptPath, 'utf-8'),
+            enabledSources: getEnabledSourcePlatforms(owner, owner, source.id, source.supportedSources),
+        }
+    })
+
+    const results = []
+    for (const targetUser of targetUsers) {
+        const targetDir = getSourceDir(targetUser)
+        const previous = readSources(targetUser)
+        const next = previous.map(source => ({ ...source, supportedSources: [...source.supportedSources] }))
+        const copied: string[] = []
+        const overwritten: string[] = []
+        const skipped: string[] = []
+
+        for (const selected of selectedSources) {
+            const existingIndex = next.findIndex(source => source.id === selected.source.id)
+            if (existingIndex >= 0 && mode === 'append') {
+                skipped.push(selected.source.id)
+                continue
+            }
+            const targetSource: StoredSource = {
+                ...selected.source,
+                supportedSources: [...selected.source.supportedSources],
+                uploadTime: new Date().toISOString(),
+            }
+            writeFileAtomic(path.join(targetDir, targetSource.id), selected.content)
+            if (existingIndex >= 0) {
+                next.splice(existingIndex, 1, targetSource)
+                removeSourceShare(targetUser, targetSource.id)
+                overwritten.push(targetSource.id)
+            } else {
+                next.push(targetSource)
+                copied.push(targetSource.id)
+            }
+            setEnabledSourcePlatforms(
+                targetUser,
+                targetUser,
+                targetSource.id,
+                selected.enabledSources,
+                targetSource.supportedSources,
+            )
+        }
+
+        writeSources(targetUser, next)
+        const orderPath = path.join(targetDir, 'order.json')
+        writeFileAtomic(orderPath, JSON.stringify(next.map(source => source.id), null, 2))
+        await initUserApis(targetUser)
+        results.push({ targetUser, copied, overwritten, skipped, total: next.length })
+    }
+    return { fromUser: owner, mode, results }
 }
 
 export const exportOwnedSourcesForSync = (username: string): AccountSyncSource[] => {

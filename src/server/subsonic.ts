@@ -8,7 +8,8 @@ import { getUserSpace, getUserDirname } from '@/user'
 import { getSingerPic, getSingerDetail, getSingerMid } from '@/server/utils/singer'
 import { fetchRecommendedAlbums } from '@/server/utils/recommendAlbums'
 import { fetchGenres, fetchRadios, fetchPlaylistsByGenre, fetchRadioSongs, fetchPlaylistSongs, fetchSongsByGenre } from '@/server/utils/discovery'
-import { checkCache, getCacheCover, getCacheFilePath, getDownloadedMusicItemsAcrossLocations, getLocalLyrics, serveCacheFile, type CacheFolder, type CacheItem } from '@/server/fileCache'
+import { checkCache, getCacheCover, getCacheFilePath, getLocalLyrics, serveCacheFile, type CacheFolder, type CacheItem } from '@/server/fileCache'
+import { getSharedDownloadedMusicItems, type SharedLibraryItem } from '@/server/sharedLocalLibrary'
 import fs from 'fs'
 import path from 'path'
 import { tryNormalizeUsername } from '@/utils/username'
@@ -44,9 +45,9 @@ class SubsonicHandler {
     // 本地文件索引可能需要递归扫描两个存储根目录。共享这个快照，避免
     // 音流连续请求 getSong/stream 时为每一首歌重复扫描磁盘。
     private localMusicSnapshots = new Map<string, {
-        items: CacheItem[]
+        items: SharedLibraryItem[]
         expiresAt: number
-        pending?: Promise<CacheItem[]>
+        pending?: Promise<SharedLibraryItem[]>
     }>()
 
     private albumReleaseDateCache = new Map<string, { date: string, expiresAt: number }>()
@@ -417,8 +418,8 @@ class SubsonicHandler {
         }
     }
 
-    private getLocalFileId(item: CacheItem) {
-        const identity = `${item.storageLocation || 'current'}\0${item.filename}`
+    private getLocalFileId(item: CacheItem & { libraryOwner?: string }) {
+        const identity = `${item.libraryOwner || ''}\0${item.storageLocation || 'current'}\0${item.filename}`
         return `local_${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 32)}`
     }
 
@@ -458,11 +459,12 @@ class SubsonicHandler {
             _localFilename: item.filename,
             _localFolder: item.folder,
             _localStorageLocation: item.storageLocation,
+            _localOwner: (item as SharedLibraryItem).libraryOwner,
             ...(platformId ? { _platformId: platformId } : {}),
         } as any
     }
 
-    private async getLocalMusicItems(username: string): Promise<CacheItem[]> {
+    private async getLocalMusicItems(username: string): Promise<SharedLibraryItem[]> {
         const snapshot = this.localMusicSnapshots.get(username)
         const now = Date.now()
         if (snapshot?.pending) {
@@ -473,7 +475,7 @@ class SubsonicHandler {
         }
         if (snapshot && snapshot.expiresAt > now) return snapshot.items
 
-        const pending = getDownloadedMusicItemsAcrossLocations(username)
+        const pending = getSharedDownloadedMusicItems(username)
             .then(items => {
                 this.localMusicSnapshots.set(username, {
                     items,
@@ -534,11 +536,11 @@ class SubsonicHandler {
         return musics.map(music => localMusicById.get(music.id) || music)
     }
 
-    private async findLocalMusicById(username: string, id: string): Promise<{ item: CacheItem, music: LX.Music.MusicInfo } | null> {
+    private async findLocalMusicById(username: string, id: string): Promise<{ item: SharedLibraryItem, music: LX.Music.MusicInfo } | null> {
         const items = await this.getLocalMusicItems(username)
-        const isAvailable = (candidate: CacheItem) => {
+        const isAvailable = (candidate: SharedLibraryItem) => {
             try {
-                return fs.existsSync(getCacheFilePath(username, true, candidate.filename, candidate.storageLocation))
+                return fs.existsSync(getCacheFilePath(candidate.libraryOwner, true, candidate.filename, candidate.storageLocation))
             } catch {
                 return false
             }
@@ -2580,7 +2582,7 @@ class SubsonicHandler {
                     req,
                     res,
                     local.item.filename,
-                    username,
+                    local.item.libraryOwner,
                     'music',
                     local.item.storageLocation,
                 )
@@ -2949,7 +2951,7 @@ class SubsonicHandler {
             if (localFilename) {
                 const localCover = await getCacheCover(
                     localFilename,
-                    username,
+                    (found.music as any)?._localOwner || username,
                     (found.music as any)?._localStorageLocation,
                 )
                 if (localCover?.data) {

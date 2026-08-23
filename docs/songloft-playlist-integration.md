@@ -40,7 +40,7 @@ environment:
 | GET | `/api/v1/integration/playlist/import/{importId}` | 重新扫描本地曲库，查看该导入歌单的 matched/ambiguous/missing 状态 |
 | POST | `/api/v1/integration/playlist/complete` | `mode: "selected"` 手工补齐；`mode: "all"` 或 `all: true` 一键补齐所有明确缺失歌曲 |
 | POST | `/api/v1/integration/match` | 对输入歌曲同时匹配音云已下载曲库和 Songloft 曲库，返回 matched/ambiguous/missing |
-| POST | `/api/v1/integration/playlists/sync` | `push` 音云→Songloft、`pull` Songloft→音云、`merge` 双向合并；`replace` 只允许 push |
+| POST | `/api/v1/integration/playlists/sync` | `push` 音云→Songloft、`pull` Songloft→音云、`merge` 双向合并；普通用户只允许安全的 `push + merge`，`replace` 仅管理员可用 |
 | POST | `/api/v1/integration/songloft/scan` | 显式触发 Songloft 共享目录扫描 |
 | GET | `/api/v1/integration/songloft/scan` | 读取扫描进度 |
 | GET | `/api/v1/integration/library/status` | 读取音云与 Songloft 当前索引数量和扫描状态；不分页读取 Songloft 全曲库 |
@@ -60,13 +60,24 @@ environment:
 
 管理后台提供三个独立按钮：“刷新音云索引”只重建当前音云用户在两个存储位置的下载索引；“刷新 Songloft 索引”只提交 Songloft 扫描；“刷新状态”只读取两端计数、扫描状态、补齐队列和歌单，不会再次分页读取 Songloft 全曲库。联合刷新接口则依次执行前两项并清空匹配缓存。Songloft 扫描是异步任务，返回“已提交”不代表扫描已完成；应等待扫描状态为“已完成”后再打开导入记录或重新匹配。两套软件共用物理目录，但索引更新时间、挂载路径、元数据读取和扫描完成时间仍可能不同，所以“音云 2 首、Songloft 64 首”并不矛盾；执行刷新可以缩小差异，但无法把元数据缺失或标题差异强行变成可靠匹配。
 
-播放器中创建、重命名、收藏歌曲到歌单或收藏外部歌单后，会自动延迟同步到 Songloft；侧边栏歌单的旋转箭头提供手动“同步到 Songloft”。播放器使用当前用户令牌，默认采用 `push + merge`：同名 Songloft 歌单复用，不存在则创建，只追加，不删除远端歌曲。管理后台仍可选择 `pull`、`merge` 或明确的 `replace`。
+播放器中创建、重命名、收藏歌曲到歌单或收藏外部歌单后，会自动延迟同步到 Songloft；侧边栏歌单的旋转箭头提供手动“同步到 Songloft”。播放器使用当前用户令牌，固定采用 `push + merge`：同名 Songloft 歌单复用，不存在则创建，只追加，不删除远端歌曲。只有管理员认证的调用才可选择 `pull`、`merge` 或明确的 `replace`，普通用户不能指定任意 Songloft 目标歌单 ID。
+
+### 覆盖同步的防清空保护
+
+旧实现会在 `push + replace` 时把“空音云歌单”解释成“期望远端集合为空”，随后删除 Songloft 目标歌单中的全部歌曲。这不是概率问题，而是输入满足条件时可稳定触发的破坏性路径。当前实现遵守以下规则：
+
+- 源音云歌单为空且目标非空时默认拒绝覆盖，返回 `playlist_replace_empty_source`。
+- 先添加目标缺少的歌曲，再移除多余歌曲，避免添加阶段失败后先损失已有歌曲。
+- 写入后重新读取 Songloft 歌单并校验期望歌曲；失败时尽力恢复操作前的歌曲集合。
+- 删除音云歌单只删除本地歌单和同步映射，不再隐式删除 Songloft 歌单。远端删除必须调用明确的 Songloft 删除动作。
+
+这些保护解决的是“同步动作直接清空”的确定性原因。若生产环境再次出现 0 首，还应结合当时的 Songloft 服务日志、音云请求日志和同步账本时间戳核对是否存在外部客户端覆盖、扫描异常或远端 API 的非原子行为。
 
 ### `subsonic.onlineSearch` 是什么
 
 此开关只控制音云暴露给第三方 Subsonic/OpenSubsonic 播放器的“搜索”接口。开启时，Subsonic 会先查本地曲库，再按 `subsonic.onlineSearchMode` 在结果不足时或合并模式下查询配置的在线平台；它返回可播放的在线搜索结果，不会下载文件、写入音云下载队列、刷新 Songloft，也不会增加本地匹配数量。要让导入歌单与共享曲库一致，应使用“刷新双端索引”，而不是开启此开关。
 
-同步账本保存在音云数据目录 `playlist-sync/<user>.json`，记录双方最后共同歌曲集合及哈希，用于后续合并和冲突提示。默认 `merge` 只追加，不删除远端歌曲；只有明确使用 `mode: "replace"` 的 `push` 才会移除 Songloft 歌单中的多余歌曲。
+同步账本保存在音云数据目录 `playlist-sync/<user>.json`，记录双方最后共同歌曲集合及哈希，用于后续合并和冲突提示。默认 `merge` 只追加，不删除远端歌曲；只有管理员明确使用 `mode: "replace"` 的 `push` 才会移除 Songloft 歌单中的多余歌曲，并受上述防清空保护约束。
 
 导入账本保存在音云数据目录 `playlist-import/<user>.json`，只保存第三方歌单的规范化歌曲信息和对应音云歌单 ID，不保存 Songloft 凭据。管理界面默认把这些账本按“歌单名称（来源、歌曲数、最近更新时间）”放进下拉框，普通使用不需要记忆技术 ID；同一个来源和歌单再次导入时会复用最近账本和音云歌单，不再创建新的副本。旧版本已经产生的重复账本仍会显示为“历史副本”，需要用户确认后再在播放器中合并或删除。只有排查问题、跨设备恢复或调用 API 时，才需要展开“高级：导入记录 ID”；首次导入成功后 ID 会自动填入，也可以从结果卡片复制。选择歌单后点击“打开记录”会重新读取源歌曲并扫描当前音云索引和 Songloft 共享曲库，恢复最新的已收录/缺失/歧义状态，不需要重新粘贴网络歌单链接。
 

@@ -15,6 +15,7 @@ export type IntegrationTrack = {
   isLocal?: boolean
   folder?: 'cache' | 'music' | string
   storageLocation?: string
+  libraryOwner?: string
   isrc?: string
   fingerprint?: string
   artworkUrl?: string
@@ -399,6 +400,25 @@ export const playlistSyncConflicts = (
   ? []
   : [...new Set([...initial, ...final])]
 
+/**
+ * Empty input is not a meaningful authoritative state for a destructive
+ * cross-system replace. It is commonly produced by a transient empty snapshot
+ * or a UI race, and historically caused a populated Songloft playlist to be
+ * reduced to zero. An explicit opt-in is kept for API clients that genuinely
+ * intend to clear a remote playlist.
+ */
+export const playlistReplacementSafetyIssue = (
+  sourceTrackCount: number,
+  currentRemoteIds: Array<number | string>,
+  desiredRemoteIds: Array<number | string>,
+  allowEmptyReplace = false,
+) => {
+  if (allowEmptyReplace || currentRemoteIds.length === 0) return null
+  if (sourceTrackCount === 0) return 'empty_source_playlist'
+  if (desiredRemoteIds.length === 0) return 'empty_resolved_playlist'
+  return null
+}
+
 export type PlaylistSyncRecord = {
   syncId: string
   username: string
@@ -566,6 +586,7 @@ export const toIntegrationTrack = (value: any): IntegrationTrack => ({
   isLocal: Boolean(value?.isLocal || value?.folder || value?.storageLocation || value?.filename),
   folder: value?.folder,
   storageLocation: value?.storageLocation || value?._localStorageLocation,
+  libraryOwner: value?.libraryOwner || value?._localOwner,
   isrc: value?.isrc,
   fingerprint: value?.fingerprint,
   artworkUrl: value?.artworkUrl || value?.coverUrl || value?.cover_url || value?.picUrl || value?.pic_url || value?.img || value?.raw?.artworkUrl || value?.raw?.coverUrl || value?.raw?.cover_url || undefined,
