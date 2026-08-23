@@ -44,7 +44,9 @@
             });
             window.addEventListener('load', () => {
                 // 使用相对路径，它会自动基于 <base> 路径解析
-                navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+                const workerUrl = new URL('sw.js', document.baseURI);
+                if (window.CONFIG?.buildHash) workerUrl.searchParams.set('v', window.CONFIG.buildHash);
+                navigator.serviceWorker.register(workerUrl.href, { updateViaCache: 'none' })
                     .then(registration => registration.update())
                     .catch(err => console.error('[Admin PWA] Service Worker registration failed:', err));
             });

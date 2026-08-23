@@ -131,6 +131,7 @@ test('PWA caching bypasses private and large responses and updates per build', (
   const adminWorker = read('public/sw.js')
   const playerPwa = read('public/music/js/pwa.js')
   const playerApp = read('public/music/app.js')
+  const adminHtml = read('public/index.html')
   const buildHashScript = read('scripts/update-build-hash.js')
   const prepareBuild = read('scripts/prepare-build.mjs')
 
@@ -147,6 +148,10 @@ test('PWA caching bypasses private and large responses and updates per build', (
   assert.match(playerPwa, /CLEAR_RUNTIME_CACHES/)
   assert.match(playerPwa, /controllerchange/)
   assert.match(playerPwa, /target\.protocol = 'https:'/)
+  assert.match(playerPwa, /workerUrl\.searchParams\.set\('v', window\.CONFIG\.buildHash\)/)
+  assert.match(adminHtml, /workerUrl\.searchParams\.set\('v', window\.CONFIG\.buildHash\)/)
+  assert.match(playerWorker, /fetchUrl\.searchParams\.set\('__pwa', BUILD_HASH\)/)
+  assert.match(adminWorker, /fetchUrl\.searchParams\.set\('__pwa', BUILD_HASH\)/)
   assert.match(playerPwa, /const checkPwaUpdates = async/)
   assert.doesNotMatch(playerPwa, /const checkForUpdates = async/)
   assert.doesNotMatch(playerApp, /Promise\.all\(keys\.map\(k => caches\.delete\(k\)\)\)/)

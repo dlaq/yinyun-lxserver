@@ -1,4 +1,4 @@
-const BUILD_HASH = '89b34d6';
+const BUILD_HASH = '9377708';
 const CACHE_PREFIX = 'yinyun-player-';
 const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
 const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;
@@ -115,7 +115,9 @@ self.addEventListener('install', (event) => {
     event.waitUntil((async () => {
         const cache = await caches.open(PRECACHE_NAME);
         await Promise.all(PRECACHE_URLS.map(async (url) => {
-            const request = new Request(url, { cache: 'reload', credentials: 'same-origin' });
+            const fetchUrl = new URL(url, self.location.origin);
+            fetchUrl.searchParams.set('__pwa', BUILD_HASH);
+            const request = new Request(fetchUrl.href, { cache: 'reload', credentials: 'same-origin' });
             const response = await fetch(request);
             if (!isCacheableResponse(response)) {
                 throw new Error(`[SW] Precache failed for ${url}: HTTP ${response.status}`);

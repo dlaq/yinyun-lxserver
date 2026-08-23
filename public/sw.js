@@ -1,4 +1,4 @@
-const BUILD_HASH = '89b34d6';
+const BUILD_HASH = '9377708';
 const CACHE_PREFIX = 'yinyun-admin-';
 const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
 const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;
@@ -81,7 +81,9 @@ self.addEventListener('install', (event) => {
         const cache = await caches.open(PRECACHE_NAME);
         await Promise.all(PRECACHE_URLS.map(async (url) => {
             const absoluteUrl = new URL(url, self.registration.scope).href;
-            const request = new Request(absoluteUrl, { cache: 'reload', credentials: 'same-origin' });
+            const fetchUrl = new URL(absoluteUrl);
+            fetchUrl.searchParams.set('__pwa', BUILD_HASH);
+            const request = new Request(fetchUrl.href, { cache: 'reload', credentials: 'same-origin' });
             const response = await fetch(request);
             if (!isCacheableResponse(response)) {
                 throw new Error(`[Admin SW] Precache failed for ${absoluteUrl}: HTTP ${response.status}`);

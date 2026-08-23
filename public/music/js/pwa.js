@@ -88,7 +88,9 @@ if (canUpgradeToHttps) {
     registrationPromise = new Promise((resolve) => {
         window.addEventListener('load', async () => {
             try {
-                const registration = await navigator.serviceWorker.register('/sw.js', {
+                const workerUrl = new URL('/sw.js', location.origin);
+                if (window.CONFIG?.buildHash) workerUrl.searchParams.set('v', window.CONFIG.buildHash);
+                const registration = await navigator.serviceWorker.register(workerUrl.href, {
                     scope: '/',
                     updateViaCache: 'none',
                 });
