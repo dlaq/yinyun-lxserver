@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url'
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scripts = [
   'scripts/download-binary.js',
-  'scripts/update-build-hash.js',
+  'scripts/build-pwa-icons.mjs',
   'scripts/build-tailwind.mjs',
+  'scripts/update-build-hash.js',
 ]
 
 for (const script of scripts) {

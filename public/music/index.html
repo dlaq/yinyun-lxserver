@@ -4,6 +4,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#10b981">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="墨璃">
     <title>音云 Yinyun</title>
     <!-- Config MUST be loaded before PostHog -->
     <script src="/js/config.js"></script>
@@ -15,6 +20,7 @@
         }
     </script>
     <link rel="icon" href="/_player/assets/logo.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" sizes="180x180" href="/_player/assets/icons/icon-180.png">
     <link rel="manifest" href="/manifest.json">
     <link rel="stylesheet" href="/_player/css/theme_variables.css">
     <link rel="stylesheet" href="/_player/css/tailwind.generated.css">
@@ -5026,7 +5032,6 @@
     <audio id="audio-player" crossorigin="anonymous"></audio>
 
     <!-- External Scripts Section (Placed at the end for performance) -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
     <script src="/_player/js/NoSleep.min.js"></script>
     <script src="/_player/js/log_viewer.js"></script>
     <script src="/_player/js/lyric-utils.js"></script>

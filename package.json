@@ -5,6 +5,7 @@
   "scripts": {
     "test": "tsx --test test/**/*.test.ts",
     "build:styles": "node scripts/build-tailwind.mjs",
+    "build:pwa-icons": "node scripts/build-pwa-icons.mjs",
     "prebuild": "node scripts/prepare-build.mjs",
     "build": "rimraf server && tsc --project tsconfig.json && tsc-alias -p tsconfig.json",
     "prestart": "node scripts/download-binary.js && node scripts/update-build-hash.js",

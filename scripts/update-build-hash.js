@@ -56,7 +56,7 @@ const packageVersion = `v${packageJson.version}`;
 
 // We exclude config.js/about.md itself to avoid infinite hash changes when injecting the hash.
 // Also ignore logs, data, server (dist), node_modules, .git.
-const publicHash = getDirectoryHash(path.join(targetDir, 'public'), ['js/config.js', 'about.md', 'music/about.md', 'music/bin'], []);
+const publicHash = getDirectoryHash(path.join(targetDir, 'public'), ['js/config.js', 'about.md', 'music/about.md', 'music/bin', 'sw.js'], []);
 const srcHash = getDirectoryHash(path.join(targetDir, 'src'), [], []);
 
 const finalHash = crypto.createHash('md5').update(publicHash + srcHash).digest('hex').substring(0, 7);
@@ -81,4 +81,20 @@ if (fs.existsSync(configPath)) {
 
     fs.writeFileSync(configPath, configContent);
     console.log(`Build hash updated to ${finalHash} in config.js`);
+}
+
+// Inject the same build identity into both service workers. The worker files are
+// excluded from the hash above so repeated builds remain deterministic.
+for (const workerPath of [
+    path.join(targetDir, 'public', 'music', 'sw.js'),
+    path.join(targetDir, 'public', 'sw.js'),
+]) {
+    if (!fs.existsSync(workerPath)) continue;
+    let workerContent = fs.readFileSync(workerPath, 'utf8');
+    workerContent = workerContent.replace(
+        /const BUILD_HASH = ['"][^'"]+['"];/,
+        `const BUILD_HASH = '${finalHash}';`,
+    );
+    fs.writeFileSync(workerPath, workerContent);
+    console.log(`Build hash updated to ${finalHash} in ${path.relative(targetDir, workerPath)}`);
 }

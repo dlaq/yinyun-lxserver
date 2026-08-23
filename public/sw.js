@@ -1,5 +1,9 @@
-const CACHE_NAME = 'yinyun-admin-v1.6.1-r2';
-const ASSETS_TO_CACHE = [
+const BUILD_HASH = '89b34d6';
+const CACHE_PREFIX = 'yinyun-admin-';
+const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
+const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;
+
+const PRECACHE_URLS = [
     './',
     './index.html',
     './style.css',
@@ -11,71 +15,110 @@ const ASSETS_TO_CACHE = [
     './manifest.json',
     './vendor/js/marked.min.js',
     './vendor/fonts/inter.css',
-    '/_player/assets/fontawesome/css/all.min.css'
+    './vendor/fonts/inter-1.woff2',
+    './vendor/fonts/inter-2.woff2',
+    './vendor/fonts/inter-3.woff2',
+    './vendor/fonts/inter-4.woff2',
+    './vendor/fonts/inter-5.woff2',
+    './vendor/fonts/inter-6.woff2',
+    './vendor/fonts/inter-7.woff2',
+    '/_player/assets/fontawesome/css/all.min.css',
+    '/_player/assets/fontawesome/webfonts/fa-brands-400.woff2',
+    '/_player/assets/fontawesome/webfonts/fa-regular-400.woff2',
+    '/_player/assets/fontawesome/webfonts/fa-solid-900.woff2',
+    '/_player/assets/logo.svg',
+    '/_player/assets/icons/icon-180.png',
+    '/_player/assets/icons/icon-192.png',
+    '/_player/assets/icons/icon-512.png',
+    '/_player/assets/icons/icon-maskable-512.png',
 ];
 
+const PRECACHE_URLS_ABSOLUTE = new Set(PRECACHE_URLS.map(url => new URL(url, self.registration.scope).href));
+
+const isCacheableResponse = (response) => Boolean(
+    response && response.ok && (response.type === 'basic' || response.type === 'cors')
+);
+
+const shouldBypass = (request, url) => {
+    if (request.method !== 'GET' || url.origin !== self.location.origin) return true;
+    if (request.headers.has('range')) return true;
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/rest/')) return true;
+    if (url.pathname === '/js/config.js') return true;
+    return /\.(mp3|flac|m4a|ogg|aac|wav|opus|mp4|webm)(?:$|\/)/i.test(url.pathname);
+};
+
+const putIfCacheable = async (cacheName, request, response) => {
+    if (!isCacheableResponse(response)) return response;
+    const cache = await caches.open(cacheName);
+    await cache.put(request, response.clone());
+    return response;
+};
+
+const networkFirstNavigation = async (request) => {
+    try {
+        const response = await fetch(request);
+        return await putIfCacheable(RUNTIME_CACHE_NAME, request, response);
+    } catch {
+        return (await caches.match(request, { ignoreSearch: true })) ||
+            (await caches.match(new URL('./', self.registration.scope).href, { ignoreSearch: true })) ||
+            Response.error();
+    }
+};
+
+const staleWhileRevalidate = async (event, request) => {
+    const cacheName = PRECACHE_URLS_ABSOLUTE.has(request.url) ? PRECACHE_NAME : RUNTIME_CACHE_NAME;
+    const cached = await caches.match(request, { ignoreSearch: true });
+    const network = fetch(request).then(response => putIfCacheable(cacheName, request, response));
+    if (cached) {
+        event.waitUntil(network.catch(() => undefined));
+        return cached;
+    }
+    return network;
+};
+
 self.addEventListener('install', (event) => {
-    event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(ASSETS_TO_CACHE);
-        })
-    );
-    self.skipWaiting();
+    event.waitUntil((async () => {
+        const cache = await caches.open(PRECACHE_NAME);
+        await Promise.all(PRECACHE_URLS.map(async (url) => {
+            const absoluteUrl = new URL(url, self.registration.scope).href;
+            const request = new Request(absoluteUrl, { cache: 'reload', credentials: 'same-origin' });
+            const response = await fetch(request);
+            if (!isCacheableResponse(response)) {
+                throw new Error(`[Admin SW] Precache failed for ${absoluteUrl}: HTTP ${response.status}`);
+            }
+            await cache.put(absoluteUrl, response);
+        }));
+        await self.skipWaiting();
+    })());
 });
 
 self.addEventListener('fetch', (event) => {
-    // Only cache GET requests
-    if (event.request.method !== 'GET') return;
-    if (!event.request.url.startsWith('http')) return;
-
-    // [Fix] Do not cache API requests
-    if (event.request.url.includes('/api/')) return;
-    // Player assets use a separate root-scoped service worker.
-    if (event.request.url.includes('/_player/')) return;
-
-    // [Fix] Do not cache external resources (CDN, placeholders, etc.)
     const url = new URL(event.request.url);
-    if (url.origin !== location.origin) return;
-
-    event.respondWith(
-        fetch(event.request)
-            .then((response) => {
-                // 如果请求成功，更新缓存并返回
-                if (response && response.status === 200 && response.type === 'basic') {
-                    const responseToCache = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => {
-                        cache.put(event.request, responseToCache);
-                    });
-                }
-                return response;
-            })
-            .catch(() => {
-                // 网络不可用时，尝试从缓存获取
-                return caches.match(event.request).then((cachedResponse) => {
-                    if (cachedResponse) return cachedResponse;
-                    throw new Error('Network failed and no cache available');
-                });
-            }).catch((error) => {
-                console.error('[SW] Fetch failed:', event.request.url, error);
-                return new Response('Network error', {
-                    status: 408,
-                    statusText: 'Request Timeout'
-                });
-            })
-    );
+    if (shouldBypass(event.request, url)) return;
+    if (event.request.mode === 'navigate') {
+        event.respondWith(networkFirstNavigation(event.request));
+        return;
+    }
+    event.respondWith(staleWhileRevalidate(event, event.request));
 });
 
 self.addEventListener('activate', (event) => {
-    event.waitUntil(
-        caches.keys().then((cacheNames) => {
-            return Promise.all(
-                cacheNames.map((cacheName) => {
-                    if (cacheName !== CACHE_NAME) {
-                        return caches.delete(cacheName);
-                    }
-                })
-            );
-        })
-    );
-    self.clients.claim();
+    event.waitUntil((async () => {
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map((cacheName) => {
+            if (cacheName.startsWith(CACHE_PREFIX) &&
+                cacheName !== PRECACHE_NAME &&
+                cacheName !== RUNTIME_CACHE_NAME) {
+                return caches.delete(cacheName);
+            }
+            return undefined;
+        }));
+        await self.clients.claim();
+    })());
+});
+
+self.addEventListener('message', (event) => {
+    if (event.data?.type === 'SKIP_WAITING') {
+        event.waitUntil(self.skipWaiting());
+    }
 });

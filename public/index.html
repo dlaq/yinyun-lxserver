@@ -4,6 +4,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="音云管理">
     <title>音云 Yinyun - 管理控制台</title>
     <!-- Config MUST be loaded before PostHog -->
     <script>
@@ -26,18 +31,22 @@
     </script>
     <link rel="stylesheet" href="style.css">
     <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" sizes="180x180" href="/_player/assets/icons/icon-180.png">
     <link rel="manifest" href="manifest.json">
     <script>
         if ('serviceWorker' in navigator) {
+            const hadAdminController = Boolean(navigator.serviceWorker.controller);
+            let refreshingAdminWorker = false;
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                if (!hadAdminController || refreshingAdminWorker) return;
+                refreshingAdminWorker = true;
+                window.location.reload();
+            });
             window.addEventListener('load', () => {
                 // 使用相对路径，它会自动基于 <base> 路径解析
-                navigator.serviceWorker.register('sw.js')
-                    .then(registration => {
-                        console.log('ServiceWorker registration successful');
-                    })
-                    .catch(err => {
-                        console.log('ServiceWorker registration failed: ', err);
-                    });
+                navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+                    .then(registration => registration.update())
+                    .catch(err => console.error('[Admin PWA] Service Worker registration failed:', err));
             });
         }
     </script>
@@ -54,7 +63,7 @@
     <div id="login-overlay" class="overlay">
         <div class="login-box glass">
             <div class="login-header">
-                <img src="/icon.svg" class="logo-icon" alt="Yinyun">
+                <img src="icon.svg" class="logo-icon" alt="Yinyun">
                 <h1 id="admin-login-brand">音云 Yinyun</h1>
             </div>
             <p class="login-subtitle">管理控制台</p>

@@ -1,16 +1,42 @@
 {
-    "name": "音云 Yinyun",
-    "short_name": "Yinyun",
+    "id": "/",
+    "name": "墨璃 · 音云",
+    "short_name": "墨璃",
+    "description": "多用户隔离的音乐搜索、歌单、曲库联动与本地音乐管理工具",
+    "lang": "zh-CN",
+    "dir": "ltr",
     "start_url": "/",
     "scope": "/",
     "display": "standalone",
+    "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+    "orientation": "any",
     "background_color": "#ffffff",
     "theme_color": "#10b981",
+    "categories": ["music", "entertainment"],
     "icons": [
         {
             "src": "/_player/assets/logo.svg",
             "sizes": "any",
-            "type": "image/svg+xml"
+            "type": "image/svg+xml",
+            "purpose": "any"
+        },
+        {
+            "src": "/_player/assets/icons/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "/_player/assets/icons/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "/_player/assets/icons/icon-maskable-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
         }
     ]
 }

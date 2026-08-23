@@ -688,7 +688,9 @@ async function handleHeaderLogout(e) {
                 }
                 if ('caches' in window) {
                     const keys = await caches.keys();
-                    await Promise.all(keys.map(k => caches.delete(k)));
+                    await Promise.all(keys
+                        .filter(key => key.startsWith('yinyun-player-') && key.endsWith('-runtime'))
+                        .map(key => caches.delete(key)));
                 }
             } catch (err) {}
             const agreementAccepted = localStorage.getItem('lx_agreement_accepted');
@@ -8996,7 +8998,9 @@ async function handleSyncLogout(skipConfirm = false) {
             void window.ListStore.remove().catch(e => console.warn('[IDBStore] 清除失败:', e));
         }
         if ('caches' in window) {
-            void caches.keys().then(keys => Promise.all(keys.map(key => caches.delete(key))))
+            void caches.keys().then(keys => Promise.all(keys
+                .filter(key => key.startsWith('yinyun-player-') && key.endsWith('-runtime'))
+                .map(key => caches.delete(key))))
                 .catch(e => console.warn('[Cache] 物理缓存删除失败:', e));
         }
 
