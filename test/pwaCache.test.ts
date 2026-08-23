@@ -150,6 +150,8 @@ test('PWA caching bypasses private and large responses and updates per build', (
   assert.match(playerPwa, /target\.protocol = 'https:'/)
   assert.match(playerPwa, /workerUrl\.searchParams\.set\('v', window\.CONFIG\.buildHash\)/)
   assert.match(adminHtml, /workerUrl\.searchParams\.set\('v', window\.CONFIG\.buildHash\)/)
+  assert.match(playerPwa, /currentRegistration\?\.active\?\.scriptURL \|\| '\/sw\.js'/)
+  assert.match(adminHtml, /currentRegistration\?\.active\?\.scriptURL \|\| 'sw\.js'/)
   assert.match(playerWorker, /fetchUrl\.searchParams\.set\('__pwa', BUILD_HASH\)/)
   assert.match(adminWorker, /fetchUrl\.searchParams\.set\('__pwa', BUILD_HASH\)/)
   assert.match(playerPwa, /const checkPwaUpdates = async/)

@@ -42,9 +42,10 @@
                 refreshingAdminWorker = true;
                 window.location.reload();
             });
-            window.addEventListener('load', () => {
+            window.addEventListener('load', async () => {
                 // 使用相对路径，它会自动基于 <base> 路径解析
-                const workerUrl = new URL('sw.js', document.baseURI);
+                const currentRegistration = await navigator.serviceWorker.getRegistration(document.baseURI);
+                const workerUrl = new URL(currentRegistration?.active?.scriptURL || 'sw.js', document.baseURI);
                 if (window.CONFIG?.buildHash) workerUrl.searchParams.set('v', window.CONFIG.buildHash);
                 navigator.serviceWorker.register(workerUrl.href, { updateViaCache: 'none' })
                     .then(registration => registration.update())
