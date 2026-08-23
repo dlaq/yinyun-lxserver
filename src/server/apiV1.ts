@@ -60,8 +60,9 @@ const QUALITY_ORDER = ['128k', '320k', 'flac', 'flac24bit', 'hires', 'atmos', 'a
 interface ApiV1Dependencies {
   serverVersion: string
   getAuthSecret: () => string
-  getUsers: () => Array<{ name: string; password: string }>
+  getUsers: () => Array<{ name: string; password: string; isAdmin?: boolean }>
   isAdminRequest?: (req: IncomingMessage) => boolean
+  isAdminUser: (username: string) => boolean
   musicSdk: any
   normalizeSongInfo: (songInfo: any) => any
   resolveSong: (
@@ -2582,7 +2583,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     }
 
     if (pathname === `${API_PREFIX}/auth/me` && req.method === 'GET') {
-      success(res, { username, isAdmin: username === 'admin' })
+      success(res, { username, isAdmin: deps.isAdminUser(username) })
       return true
     }
 

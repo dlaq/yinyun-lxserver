@@ -5,7 +5,7 @@ import test from 'node:test'
 
 const read = (relativePath: string): string => fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8')
 
-test('player and admin opt into iPhone safe-area layout', () => {
+test('player and admin opt into mobile safe-area layout', () => {
   for (const page of ['public/music/index.html', 'public/index.html']) {
     const html = read(page)
     assert.match(html, /name="viewport"[^>]+viewport-fit=cover/)
@@ -16,11 +16,20 @@ test('player and admin opt into iPhone safe-area layout', () => {
   assert.match(playerCss, /safe-area-inset-bottom/)
   assert.match(playerCss, /--mobile-player-reserve/)
   assert.match(playerCss, /font-size:\s*16px\s*!important/)
+  assert.match(playerCss, /orientation:\s*landscape[\s\S]*?max-height:\s*520px[\s\S]*?pointer:\s*coarse/)
+  assert.match(playerCss, /#player-footer\s*\{[\s\S]*?flex-direction:\s*row\s*!important/)
+  assert.match(playerCss, /\.hot-search-container\s*\{[\s\S]*?padding-top:\s*\.5rem\s*!important/)
 
   const adminCss = read('public/style.css')
   assert.match(adminCss, /height:\s*100dvh/)
   assert.match(adminCss, /safe-area-inset-top/)
   assert.match(adminCss, /safe-area-inset-bottom/)
+})
+
+test('touch-only Android and iOS layouts keep compact hot-search labels stable', () => {
+  const playerApp = read('public/music/app.js')
+  assert.match(playerApp, /matchMedia\('\(hover: hover\) and \(pointer: fine\)'\)/)
+  assert.match(playerApp, /if \(!window\.matchMedia[\s\S]*?matches\) return/)
 })
 
 test('shared local-library songs retain a durable playlist identity', () => {

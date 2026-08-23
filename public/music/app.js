@@ -2070,6 +2070,11 @@ function renderHotSearch(data) {
 
     // 动态检测溢出并应用滚动效果
     setTimeout(() => {
+        // Android Chrome and iOS Safari have no hover state. Starting a
+        // marquee immediately on those devices makes long keywords appear
+        // split or reversed across the compact two-column cards. Keep the
+        // existing ellipsis on coarse touch screens and animate on desktop.
+        if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
         const items = container.querySelectorAll('.hot-search-item .keyword');
         items.forEach(el => {
             if (el.scrollWidth > el.clientWidth) {

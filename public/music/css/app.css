@@ -1120,9 +1120,9 @@ body.energy-saving-mode .integration-page .glass {
     box-shadow: none !important;
 }
 
-/* iPhone Safari viewport and safe-area handling.
- * 100vh follows Safari's large viewport and can leave the player underneath
- * the address/home bars. dvh follows the actually visible viewport instead. */
+/* Mobile Safari/Chrome viewport and safe-area handling.
+ * 100vh can follow the large viewport and leave the player underneath browser
+ * bars. dvh follows the actually visible viewport instead. */
 :root {
     --ios-safe-top: env(safe-area-inset-top, 0px);
     --ios-safe-right: env(safe-area-inset-right, 0px);
@@ -1243,5 +1243,106 @@ body {
     #project-agreement-modal > div:last-child {
         max-height: calc(100dvh - var(--ios-safe-top) - var(--ios-safe-bottom) - 2rem);
         overflow-y: auto;
+    }
+}
+
+/* Phones in landscape can exceed the width breakpoint while retaining very
+ * little vertical space. Keep the player in one compact row based on input
+ * type and height, instead of treating that shape as a desktop window. */
+@media (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
+    :root {
+        --mobile-player-reserve: calc(5.75rem + var(--ios-safe-bottom));
+    }
+
+    #view-search,
+    #view-songlist,
+    #view-leaderboard,
+    #view-my-playlists,
+    #view-library-integration,
+    #view-favorites,
+    #view-localmusic,
+    #view-settings,
+    #view-about,
+    #view-player-detail {
+        padding-bottom: var(--mobile-player-reserve) !important;
+    }
+
+    #player-footer {
+        min-height: 5.5rem !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        padding: .375rem max(.75rem, var(--ios-safe-right)) max(.375rem, var(--ios-safe-bottom)) max(.75rem, var(--ios-safe-left)) !important;
+    }
+
+    #player-song-info {
+        width: 30% !important;
+        min-width: 0;
+        min-height: 3rem;
+        margin: 0 !important;
+        padding-right: .5rem !important;
+        align-items: center !important;
+    }
+
+    #player-song-info > div:first-child {
+        width: 3rem !important;
+        height: 3rem !important;
+    }
+
+    #player-song-info > div:last-child {
+        max-width: 2rem !important;
+        flex-wrap: nowrap !important;
+    }
+
+    #player-song-info > div:last-child button:not(#player-like-btn) {
+        display: none !important;
+    }
+
+    #player-footer > div:nth-child(2) {
+        order: 0 !important;
+        width: auto !important;
+        max-width: none !important;
+        margin: 0 !important;
+        padding: 0 .5rem !important;
+    }
+
+    #player-footer > div:nth-child(2) > div:first-child {
+        min-height: 1.5rem;
+        margin-bottom: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+
+    #player-footer > div:nth-child(2) > div:nth-child(2) {
+        min-height: 2.5rem;
+        margin-bottom: 0 !important;
+        gap: clamp(.75rem, 3vw, 1.5rem) !important;
+    }
+
+    #visualizer-container {
+        display: none;
+    }
+
+    #btn-expand-panel {
+        right: max(.5rem, var(--ios-safe-right));
+        bottom: calc(.5rem + var(--ios-safe-bottom));
+    }
+
+    .hot-search-container {
+        padding-top: .5rem !important;
+        padding-bottom: .5rem !important;
+    }
+
+    .hot-search-container > div:first-child {
+        margin-bottom: .5rem !important;
+    }
+
+    .hot-search-list {
+        gap: .375rem !important;
+    }
+
+    .hot-search-item {
+        height: 2.75rem !important;
+        padding-top: .5rem !important;
+        padding-bottom: .5rem !important;
     }
 }

@@ -42,9 +42,11 @@ import { parseLyrics, serializeLyrics, normalizeLyricOutputFormat } from '@/util
 import { registerPlaybackResolver, resolveOriginalPlatformFirst } from './playbackResolverRegistry'
 import { migrateLegacySubsonicSourcePriority, SUBSONIC_SOURCE_PRIORITY_VALUE } from './subsonicSearch'
 import { normalizeUsername, tryNormalizeUsername, validateUsername } from '@/utils/username'
+import { normalizeAdminPath, DEFAULT_ADMIN_PATH, isAdminPath } from '@/adminPath'
+import { getUserIsAdmin, withUserRole } from '@/userRoles'
 import crypto from 'node:crypto'
 import needle from 'needle'
-const { MusicTagger, MetaPicture } = require('music-tag-native')
+import { MusicTagger, MetaPicture } from './musicTagger'
 
 /** 生成随机 sessionId */
 const generateSessionId = () => crypto.randomBytes(32).toString('hex')
@@ -223,7 +225,7 @@ const prepareReloadedUsers = (users: any[], config: LX.Config = global.lx.config
     names.add(username)
     if (oldUsername !== username) renames.push({ oldName: oldUsername, newName: username })
     return {
-      ...user,
+      ...withUserRole(user),
       name: username,
       dataPath: path.join(global.lx.userPath, getUserDirname(username)),
     }
@@ -366,6 +368,7 @@ const saveUsers = () => {
     fs.writeFileSync(usersJsonPath, JSON.stringify(global.lx.config.users.map(u => ({
       name: u.name,
       password: u.password,
+      isAdmin: getUserIsAdmin(u),
       maxSnapshotNum: u.maxSnapshotNum,
       'list.addMusicLocationType': u['list.addMusicLocationType'],
     })), null, 2))
@@ -383,7 +386,7 @@ export const reloadServerData = async () => {
   // 先完整读取并校验候选配置，避免校验失败后留下部分生效的配置。
   const previousConfig = global.lx.config
   const nextConfig = { ...previousConfig }
-  const configPath = process.env.CONFIG_PATH || path.join(process.cwd(), 'config.js')
+  const configPath = global.lx.configPath
   if (fs.existsSync(configPath)) {
     try {
       delete require.cache[require.resolve(configPath)]
@@ -431,6 +434,12 @@ export const reloadServerData = async () => {
   }
 
   nextConfig.users = reloadedUsers
+  try {
+    nextConfig['admin.path'] = normalizeAdminPath(nextConfig['admin.path'] || DEFAULT_ADMIN_PATH)
+  } catch (error: any) {
+    startupLog.warn(`Invalid admin.path during reload, using /admin: ${error.message}`)
+    nextConfig['admin.path'] = DEFAULT_ADMIN_PATH
+  }
   nextConfig['subsonic.onlineSearchSources'] = migrateLegacySubsonicSourcePriority(nextConfig['subsonic.onlineSearchSources']) as string
   global.lx.config = nextConfig
   if (preparedUsers) {
@@ -822,11 +831,17 @@ const getPlaylistImportStore = (username: string) => {
   return store
 }
 
+const isConfiguredAdminUser = (username: string) => {
+  const user = global.lx.config.users.find(item => item.name === username)
+  return user ? getUserIsAdmin(user) : false
+}
+
 const handleApiV1 = createApiV1Handler({
   serverVersion: APP_VERSION,
   getAuthSecret: () => `${getServerId()}:${global.lx.config['frontend.password']}`,
   getUsers: () => global.lx.config.users,
   isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
+  isAdminUser: isConfiguredAdminUser,
   musicSdk,
   normalizeSongInfo,
   resolveSong: resolveServerSong,
@@ -961,6 +976,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
     // Fixed Web entry points and static asset namespaces.
     const normalizePath = (p: string) => (p || '').replace(/\/+$/, '')
+    const adminPath = (() => {
+      try {
+        const value = normalizeAdminPath(global.lx.config['admin.path'] || DEFAULT_ADMIN_PATH)
+        global.lx.config['admin.path'] = value
+        return value
+      } catch {
+        return DEFAULT_ADMIN_PATH
+      }
+    })()
     const staticRoot = path.resolve(global.lx.staticPath)
     const servePublicFile = (relativePath: string) => {
       const filePath = path.resolve(staticRoot, relativePath)
@@ -977,14 +1001,14 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       return
     }
 
-    if (pathname === '/admin') {
-      res.writeHead(308, { Location: '/admin/' })
+    if (pathname === adminPath) {
+      res.writeHead(308, { Location: `${adminPath}/` })
       res.end()
       return
     }
 
-    if (pathname === '/admin/' || pathname.startsWith('/admin/')) {
-      const subPath = pathname === '/admin/' ? 'index.html' : pathname.slice('/admin/'.length)
+    if (isAdminPath(pathname, adminPath)) {
+      const subPath = pathname === `${adminPath}/` ? 'index.html' : pathname.slice(`${adminPath}/`.length)
       if (subPath === 'music' || subPath.startsWith('music/')) {
         res.writeHead(404)
         res.end('Not Found')
@@ -1044,7 +1068,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         'list.addMusicLocationType': global.lx.config['list.addMusicLocationType'],
         port: global.lx.config.port,
         bindIP: global.lx.config.bindIP,
-        'admin.path': '/admin',
+        'admin.path': global.lx.config['admin.path'] || DEFAULT_ADMIN_PATH,
         'player.path': '/',
       }
 
@@ -1231,7 +1255,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           const users = global.lx.config.users.map(user => ({
             name: user.name,
             password: user.password,
-            isAdmin: user.name.toLowerCase() === 'admin',
+            isAdmin: getUserIsAdmin(user),
           }))
           res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -1271,6 +1295,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               global.lx.config.users.push({
                 name: normalizedName,
                 password,
+                isAdmin: false,
                 dataPath,
               })
               saveUsers()
@@ -3332,7 +3357,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 }
 
                 // 检查是否已有 USLT 歌词（已有则跳过）
-                const { MusicTagger: MT } = require('music-tag-native')
+                const { MusicTagger: MT } = require('./musicTagger')
                 let checkTagger: any
                 let existingLyrics = ''
                 try {
@@ -4989,6 +5014,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             'user.enableCacheSizeLimit': global.lx.config['user.enableCacheSizeLimit'],
             'user.cacheSizeLimit': global.lx.config['user.cacheSizeLimit'],
             'frontend.password': global.lx.config['frontend.password'],
+            'admin.path': global.lx.config['admin.path'] || DEFAULT_ADMIN_PATH,
             'webdav.enable': global.lx.config['webdav.enable'] ?? false,
             'webdav.url': global.lx.config['webdav.url'] || '',
             'webdav.username': global.lx.config['webdav.username'] || '',
@@ -5031,6 +5057,16 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               if (newConfig['user.enableCacheSizeLimit'] !== undefined) global.lx.config['user.enableCacheSizeLimit'] = newConfig['user.enableCacheSizeLimit']
               if (newConfig['user.cacheSizeLimit'] !== undefined) global.lx.config['user.cacheSizeLimit'] = parseInt(newConfig['user.cacheSizeLimit']) || 2000
               if (newConfig['system.allowUnsafeVM'] !== undefined) global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM']
+
+              if (newConfig['admin.path'] !== undefined) {
+                try {
+                  global.lx.config['admin.path'] = normalizeAdminPath(newConfig['admin.path'])
+                } catch (error: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+                  res.end(JSON.stringify({ success: false, error: error.message }))
+                  return
+                }
+              }
 
               const warning = ''
               if (newConfig['frontend.password'] !== undefined) global.lx.config['frontend.password'] = newConfig['frontend.password']
@@ -5082,7 +5118,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 })
               }
 
-              const configPath = process.env.CONFIG_PATH || path.join(process.cwd(), 'config.js')
+              const configPath = global.lx.configPath
               const configContent = `module.exports = ${JSON.stringify({
                 serverName: global.lx.config.serverName,
                 bindIP: global.lx.config.bindIP,
@@ -5096,6 +5132,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 'list.addMusicLocationType': global.lx.config['list.addMusicLocationType'],
                 disableTelemetry: global.lx.config.disableTelemetry,
                 'frontend.password': global.lx.config['frontend.password'],
+                'admin.path': global.lx.config['admin.path'] || DEFAULT_ADMIN_PATH,
                 'webdav.enable': global.lx.config['webdav.enable'],
                 'webdav.url': global.lx.config['webdav.url'],
                 'webdav.username': global.lx.config['webdav.username'],
@@ -5120,6 +5157,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 users: global.lx.config.users.map(u => ({
                   name: u.name,
                   password: u.password,
+                  isAdmin: getUserIsAdmin(u),
                   maxSnapshotNum: u.maxSnapshotNum,
                   'list.addMusicLocationType': u['list.addMusicLocationType'],
                 })),
@@ -5853,6 +5891,7 @@ export const startServer = async (port: number, ip: string) => {
         getAuthSecret: () => `${getServerId()}:${global.lx.config['frontend.password']}`,
         getUsers: () => global.lx.config.users,
         isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
+        isAdminUser: isConfiguredAdminUser,
         musicSdk,
         normalizeSongInfo,
         resolveSong: resolveServerSong,

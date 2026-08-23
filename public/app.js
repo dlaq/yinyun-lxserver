@@ -1884,6 +1884,9 @@ class App {
                 form.elements['singer.sourcePriority'].value = config['singer.sourcePriority'] || 'tx,wy';
             }
             form.elements['frontend.password'].value = config['frontend.password'] || '';
+            if (form.elements['admin.path']) {
+                form.elements['admin.path'].value = config['admin.path'] || '/admin';
+            }
 
             // WebDAV 配置
             if (form.elements['webdav.enable']) {
@@ -1959,6 +1962,7 @@ class App {
             'user.enableCacheSizeLimit': formData.get('user.enableCacheSizeLimit') === 'on',
             'user.cacheSizeLimit': parseInt(formData.get('user.cacheSizeLimit')) || 2000,
             'frontend.password': formData.get('frontend.password'),
+            'admin.path': (formData.get('admin.path') || '').trim() || '/admin',
             'webdav.enable': formData.get('webdav.enable') === 'on',
             'webdav.url': formData.get('webdav.url'),
             'webdav.username': formData.get('webdav.username'),
@@ -1999,7 +2003,8 @@ class App {
                 if (res.warning) {
                     showInfo('配置保存成功！\n\n⚠️ 警告：' + res.warning);
                 } else {
-                    showSuccess('配置保存成功！');
+                    const adminPath = config['admin.path'];
+                    showSuccess(`配置保存成功！\n管理后台新地址：${location.origin}${adminPath}/`);
                 }
             }
         } catch (err) {

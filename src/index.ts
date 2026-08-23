@@ -21,6 +21,9 @@ import { migrateLegacySubsonicSourcePriority } from './server/subsonicSearch'
 import { ENV_PARAMS, File } from './constants'
 import { checkAndCreateDirSync } from './utils'
 import { normalizeUsername, validateUsername } from './utils/username'
+import { normalizeAdminPath } from './adminPath'
+import { withUserRole } from './userRoles'
+import { resolveConfigPath } from './configPath'
 
 // Declare Env Params Type
 type ENV_PARAMS_Type = typeof ENV_PARAMS
@@ -79,10 +82,12 @@ const getConfigHash = (filePath: string) => {
 }
 
 const dataPath = envParams.DATA_PATH ?? path.join(__dirname, '../data')
+const bundledConfigPath = path.join(__dirname, '../config.js')
+let configPath = resolveConfigPath(dataPath, envParams.CONFIG_PATH)
 const saveConfigToFile = () => {
-  const configPath = process.env.CONFIG_PATH || path.join(process.cwd(), 'config.js')
   const content = `module.exports = ${JSON.stringify(global.lx.config, null, 2)}`
   try {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true })
     fs.writeFileSync(configPath, content)
     lastConfigHash = crypto.createHash('md5').update(content).digest('hex')
     // console.log('Current memory config saved to config.js')
@@ -95,6 +100,7 @@ global.lx = {
   logPath: envParams.LOG_PATH ?? path.join(__dirname, '../logs'),
   dataPath,
   userPath: path.join(dataPath, File.userDir),
+  configPath,
   config: defaultConfig,
   staticPath: process.env.STATIC_PATH ?? path.join(process.cwd(), 'public'),
   saveConfig: saveConfigToFile,
@@ -145,13 +151,19 @@ const margeConfig = (p: string) => {
     const users: LX.UserConfig[] = []
     for (const user of newConfig.users) {
       users.push({
-        ...user,
+        ...withUserRole(user),
         dataPath: '',
       })
     }
     newConfig.users = users
   }
   if (['lxserver', 'yintuan'].includes(newConfig.serverName)) newConfig.serverName = 'yinyun'
+  try {
+    newConfig['admin.path'] = normalizeAdminPath(newConfig['admin.path'])
+  } catch (error: any) {
+    console.warn(`Invalid admin.path, using /admin: ${error.message}`)
+    newConfig['admin.path'] = '/admin'
+  }
   newConfig['subsonic.onlineSearchSources'] = migrateLegacySubsonicSourcePriority(newConfig['subsonic.onlineSearchSources']) as string
   global.lx.config = newConfig
 
@@ -160,9 +172,12 @@ const margeConfig = (p: string) => {
 }
 
 //加载环境变量
-const p1 = path.join(__dirname, '../config.js')
-fs.existsSync(p1) && margeConfig(p1)
-envParams.CONFIG_PATH && fs.existsSync(envParams.CONFIG_PATH) && margeConfig(envParams.CONFIG_PATH)
+fs.existsSync(bundledConfigPath) && margeConfig(bundledConfigPath)
+configPath = resolveConfigPath(dataPath, envParams.CONFIG_PATH)
+global.lx.configPath = configPath
+if (path.resolve(configPath) !== path.resolve(bundledConfigPath) && fs.existsSync(configPath)) {
+  margeConfig(configPath)
+}
 if (envParams.PROXY_HEADER) {
   global.lx.config['proxy.enabled'] = true
   global.lx.config['proxy.header'] = envParams.PROXY_HEADER
@@ -181,6 +196,14 @@ if (envParams.LIST_ADD_MUSIC_LOCATION_TYPE) {
 }
 if (envParams.FRONTEND_PASSWORD) {
   global.lx.config['frontend.password'] = envParams.FRONTEND_PASSWORD
+}
+if (envParams.ADMIN_PATH) {
+  try {
+    global.lx.config['admin.path'] = normalizeAdminPath(envParams.ADMIN_PATH)
+  } catch (error: any) {
+    console.warn(`Invalid ADMIN_PATH, using /admin: ${error.message}`)
+    global.lx.config['admin.path'] = '/admin'
+  }
 }
 if (envParams.WEBDAV_ENABLE) {
   global.lx.config['webdav.enable'] = envParams.WEBDAV_ENABLE === 'true'
@@ -305,7 +328,7 @@ const validateUserConfig = (users: LX.Config['users']) => {
     }
     if (userNames.has(name)) throw new Error('User name duplicate: ' + name)
     userNames.add(name)
-    normalizedUsers.push({ ...user, name })
+    normalizedUsers.push(withUserRole({ ...user, name }))
     if (oldName !== name) renames.push({ oldName, newName: name })
   }
   return { users: normalizedUsers, renames }
@@ -331,7 +354,7 @@ if (fs.existsSync(usersJsonPath)) {
     const users = JSON.parse(fs.readFileSync(usersJsonPath, 'utf-8'))
     if (Array.isArray(users)) {
       console.log('Load users from users.json')
-      global.lx.config.users = users.map(u => ({ ...u, dataPath: '' }))
+      global.lx.config.users = users.map(u => ({ ...withUserRole(u), dataPath: '' }))
     }
   } catch (err) {
     console.error('Failed to load users.json', err)
@@ -357,6 +380,7 @@ try {
   fs.writeFileSync(usersJsonPath, JSON.stringify(global.lx.config.users.map(u => ({
     name: u.name,
     password: u.password,
+    isAdmin: u.isAdmin === true,
     maxSnapshotNum: u.maxSnapshotNum,
     'list.addMusicLocationType': u['list.addMusicLocationType'],
   })), null, 2))
@@ -428,7 +452,7 @@ global.lx.webdavSync = webdavSync
 // 尚未完成合并/恢复的内存默认配置覆盖到数据卷，导致管理员设置在
 // 重启后回退。环境变量仍会在首次启动时固化；已有 config.js 由管理员
 // 保存接口显式更新。
-const persistedConfigPath = process.env.CONFIG_PATH || path.join(process.cwd(), 'config.js')
+const persistedConfigPath = global.lx.configPath
 if (!fs.existsSync(persistedConfigPath)) {
   saveConfigToFile()
 } else {
@@ -438,7 +462,7 @@ if (!fs.existsSync(persistedConfigPath)) {
 startServer(global.lx.config.port, global.lx.config.bindIP)
 
 // 监控 config.js 变动以实现热重载 (由于 nodemon 已忽略该文件)
-const rootConfigPath = process.env.CONFIG_PATH || path.join(process.cwd(), 'config.js')
+const rootConfigPath = global.lx.configPath
 if (fs.existsSync(rootConfigPath)) {
   lastConfigHash = getConfigHash(rootConfigPath)
   let debounceTimer: NodeJS.Timeout | null = null
