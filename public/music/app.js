@@ -322,13 +322,8 @@ window.checkNetworkListUpdates = checkNetworkListUpdates;
 
 
 
-// Initial Sync for Server Cache Config
-setTimeout(() => {
-    if (settings.serverCacheLocation && window.updateServerCacheConfig) {
-        console.log('[ServerCache] Syncing config:', settings.serverCacheLocation, settings.serverCacheNamingPattern);
-        window.updateServerCacheConfig(settings.serverCacheLocation, settings.serverCacheNamingPattern);
-    }
-}, 2000);
+// Server cache configuration is persisted only after an explicit setting
+// change. Page initialization must never rewrite account/server defaults.
 
 window.batchMode = false;
 window.selectedItems = new Set();
@@ -4534,6 +4529,9 @@ async function triggerServerCache(song, url, quality) {
 let lastNamingPattern = window.settings?.serverCacheNamingPattern || 'simple';
 
 async function updateServerCacheConfig(location, pattern) {
+    if (!isUserLoggedIn()) return false;
+    if (!userToken && !(await ensureUserAuthToken())) return false;
+
     const loc = location || window.settings?.serverCacheLocation || 'root';
     const pat = pattern || window.settings?.serverCacheNamingPattern || 'simple';
     const oldPattern = lastNamingPattern;
@@ -4595,10 +4593,12 @@ async function updateServerCacheConfig(location, pattern) {
                 }
             }
             lastNamingPattern = pat; // 更新最后同步的模式
+            return true;
         }
     } catch (e) {
         console.error('[ServerCache] Config update failed:', e);
     }
+    return false;
 }
 window.updateServerCacheConfig = updateServerCacheConfig; // Expose global
 
@@ -6744,6 +6744,12 @@ async function updateServerCacheSize() {
     const musicEl = document.getElementById('server-music-info');
     if (!cacheEl && !musicEl) return;
 
+    if (!isUserLoggedIn()) {
+        if (cacheEl) cacheEl.textContent = '登录后查看';
+        if (musicEl) musicEl.textContent = '登录后查看';
+        return;
+    }
+
     const formatSize = (size) => {
         if (size >= 1024 * 1024 * 1024) return (size / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
         if (size >= 1024 * 1024) return (size / (1024 * 1024)).toFixed(2) + ' MB';
@@ -6755,8 +6761,13 @@ async function updateServerCacheSize() {
         if (cacheEl) cacheEl.textContent = '计算中...';
         if (musicEl) musicEl.textContent = '计算中...';
 
-        const headers = getUserAuthHeaders();
-        const response = await fetch('/api/v1/player/music/cache/stats', { headers });
+        if (!userToken && !(await ensureUserAuthToken())) return;
+        let headers = getUserAuthHeaders();
+        let response = await fetch('/api/v1/player/music/cache/stats', { headers });
+        if (response.status === 401 && await ensureUserAuthToken({ force: true })) {
+            headers = getUserAuthHeaders();
+            response = await fetch('/api/v1/player/music/cache/stats', { headers });
+        }
         if (!response.ok) throw new Error('获取缓存统计失败');
 
         const data = await response.json();
@@ -9088,6 +9099,7 @@ async function handleLocalLogin(options = {}) {
             localStorage.setItem('lx_sync_pass', pass);
             if (!userToken) await ensureUserAuthToken();
             if (typeof updateUserUI === 'function') updateUserUI();
+            void updateServerCacheSize();
             // Custom-source metadata can involve several script/status reads.
             // It must not hold the account's first playlist response hostage.
             if (typeof renderCustomSources === 'function') {
@@ -13092,8 +13104,12 @@ window.updateSetting = updateSetting;
 
 // Initialize Sound Effects on first play/click
 function initAudioEngine() {
-    if (window.soundEffects && !window._audioEngineInited) {
-        window.soundEffects.init();
+    if (window.soundEffects && !window._audioEngineInited && !window._audioEngineUnavailable) {
+        const initialized = window.soundEffects.init();
+        if (initialized === false) {
+            window._audioEngineUnavailable = true;
+            return;
+        }
         window._audioEngineInited = true;
         console.log('[AudioEngine] Sound effects initialized via AudioEngine');
 

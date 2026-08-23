@@ -30,3 +30,26 @@ test('shared local-library songs retain a durable playlist identity', () => {
   assert.match(playerApp, /song\?\._localFilename/)
   assert.match(playerApp, /song\?\._localOwner/)
 })
+
+test('pre-login initialization does not mutate cache config or call protected cache stats', () => {
+  const playerApp = read('public/music/app.js')
+  assert.doesNotMatch(playerApp, /Initial Sync for Server Cache Config/)
+  assert.match(playerApp, /Server cache configuration is persisted only after an explicit setting/)
+  assert.match(playerApp, /if \(!isUserLoggedIn\(\)\) \{[\s\S]*?登录后查看/)
+  assert.match(playerApp, /response\.status === 401[\s\S]*?ensureUserAuthToken\(\{ force: true \}\)/)
+})
+
+test('sound effects disable cleanly when Web Audio is unavailable', () => {
+  const soundEffects = read('public/music/js/sound-effects.js')
+  const playerApp = read('public/music/app.js')
+  assert.match(soundEffects, /typeof AudioContextConstructor !== 'function'/)
+  assert.match(soundEffects, /sound effects disabled/)
+  assert.match(playerApp, /window\._audioEngineUnavailable = true/)
+})
+
+test('an empty GitHub release collection is handled as a normal state', () => {
+  const notifications = read('public/js/notification-engine.js')
+  assert.match(notifications, /releases\?per_page=1/)
+  assert.match(notifications, /payload\[0\] \|\| \{ noRelease: true \}/)
+  assert.match(notifications, /if \(release\.noRelease\)/)
+})

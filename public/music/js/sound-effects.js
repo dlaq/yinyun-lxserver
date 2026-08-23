@@ -53,12 +53,18 @@ window.soundEffects = (function () {
     let dryGainNode, wetGainNode, mixerNode;
 
     function init() {
-        if (audioContext) return;
+        if (audioContext) return true;
         const audio = document.getElementById('audio-player');
-        if (!audio) return;
+        if (!audio) return false;
+
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        if (typeof AudioContextConstructor !== 'function') {
+            console.info('[SoundEffects] Web Audio API unavailable; sound effects disabled.');
+            return false;
+        }
 
         console.log('[SoundEffects] Initializing AudioContext...');
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioContext = new AudioContextConstructor();
 
         // 1. Create Nodes
         mediaSource = audioContext.createMediaElementSource(audio);
@@ -121,6 +127,7 @@ window.soundEffects = (function () {
         applySettings();
         renderUI();
         initPitchShifter();
+        return true;
     }
 
     async function initPitchShifter() {

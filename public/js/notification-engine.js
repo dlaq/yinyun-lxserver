@@ -8,7 +8,10 @@
 (function () {
     // ================= 1. 基础配置与资源 =================
     const CONFIG = {
-        LATEST_RELEASE_URL: 'https://api.github.com/repos/dlaq/yinyun-lxserver/releases/latest',
+        // The singular /releases/latest endpoint returns 404 before the first
+        // formal release. The collection endpoint returns 200 with an empty
+        // array, which is a normal "no release yet" state.
+        LATEST_RELEASE_URL: 'https://api.github.com/repos/dlaq/yinyun-lxserver/releases?per_page=1',
         getLocalVersion: () => (window.CONFIG && window.CONFIG.version) ? window.CONFIG.version : '0.0.0'
     };
     const RELEASE_CACHE_KEY = 'lx_github_release_cache';
@@ -361,9 +364,27 @@
                     headers: { Accept: 'application/vnd.github+json' }
                 });
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-                release = await res.json();
+                const payload = await res.json();
+                release = Array.isArray(payload) ? (payload[0] || { noRelease: true }) : payload;
                 localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), release }));
                 localStorage.removeItem(RELEASE_RETRY_KEY);
+            }
+            if (release.noRelease) {
+                if (isManual) {
+                    renderModal({
+                        id: 'manual_check_no_release',
+                        type: 'info',
+                        ui: {
+                            title: '暂无正式版本',
+                            message: 'GitHub 暂未发布正式 Release，当前服务可继续正常使用。',
+                            confirm_text: '确定',
+                            cancel_text: ''
+                        },
+                        action: { type: 'close' },
+                        logic: { interval_hours: 0 }
+                    }, 'temp_manual_check', null);
+                }
+                return;
             }
             const latestVersion = release.tag_name;
             if (!latestVersion || !/^v?\d+\.\d+\.\d+/.test(latestVersion)) {
