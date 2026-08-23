@@ -53,6 +53,9 @@ test('sound effects disable cleanly when Web Audio is unavailable', () => {
   const playerApp = read('public/music/app.js')
   assert.match(soundEffects, /typeof AudioContextConstructor !== 'function'/)
   assert.match(soundEffects, /sound effects disabled/)
+  assert.match(soundEffects, /audioContext\?\.audioWorklet/)
+  assert.match(soundEffects, /typeof window\.AudioWorkletNode === 'function'/)
+  assert.match(soundEffects, /AudioWorklet unavailable; pitch shifting disabled/)
   assert.match(playerApp, /window\._audioEngineUnavailable = true/)
 })
 

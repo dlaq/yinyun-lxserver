@@ -134,6 +134,12 @@ window.soundEffects = (function () {
         if (!audioContext) return;
         if (pitchShifterNode) return;
 
+        if (!supportsPitchShifter()) {
+            console.info('[SoundEffects] AudioWorklet unavailable; pitch shifting disabled while other effects remain active.');
+            updatePitchAvailabilityUI();
+            return;
+        }
+
         try {
             console.log('[SoundEffects] Loading Pitch Shifter Module from /_player/js/pitch-shifter/phase-vocoder.js');
             await audioContext.audioWorklet.addModule('/_player/js/pitch-shifter/phase-vocoder.js');
@@ -158,6 +164,24 @@ window.soundEffects = (function () {
         } catch (e) {
             console.error('[SoundEffects] Failed to initialize pitch shifter:', e);
         }
+    }
+
+    function supportsPitchShifter() {
+        return Boolean(
+            audioContext?.audioWorklet
+            && typeof audioContext.audioWorklet.addModule === 'function'
+            && typeof window.AudioWorkletNode === 'function'
+        );
+    }
+
+    function updatePitchAvailabilityUI() {
+        const pitchInput = document.getElementById('pitch-slider');
+        if (!pitchInput) return;
+        const supported = supportsPitchShifter();
+        pitchInput.disabled = !supported;
+        pitchInput.style.opacity = supported ? '1' : '0.5';
+        pitchInput.style.cursor = supported ? 'pointer' : 'not-allowed';
+        pitchInput.title = supported ? '' : '当前浏览器或连接环境不支持音调调整';
     }
 
     function connectPitchShifter() {
@@ -467,6 +491,7 @@ window.soundEffects = (function () {
         if (pitchInput) {
             pitchInput.value = settings.pitch;
             document.getElementById('pitch-val').innerText = settings.pitch.toFixed(2) + 'x';
+            updatePitchAvailabilityUI();
         }
 
         const pannerEnableInput = document.getElementById('panner-enable');
@@ -574,6 +599,11 @@ window.soundEffects = (function () {
             renderUI(); // Update radio selection state
         },
         setPitch: function (val) {
+            if (!supportsPitchShifter()) {
+                updatePitchAvailabilityUI();
+                if (window.showWarning) window.showWarning('当前浏览器或连接环境不支持音调调整');
+                return;
+            }
             const oldPitch = settings.pitch;
             settings.pitch = parseFloat(val);
 
