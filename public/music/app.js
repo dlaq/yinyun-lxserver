@@ -438,6 +438,8 @@ function isUserLoggedIn() {
 window.isUserLoggedIn = isUserLoggedIn;
 
 async function reloadUserFavorites() {
+    const requestId = ++favoritesReloadRequestId;
+    const requestUser = normalizeSyncUsername(localStorage.getItem('lx_sync_user'));
     try {
         if (!isUserLoggedIn()) {
             currentListData = null;
@@ -447,11 +449,15 @@ async function reloadUserFavorites() {
         }
 
         // 1. 先恢复已缓存的个人数据（避免切换时白屏）
-        if (window.myPersonalListData) {
+        const cachedOwner = normalizeSyncUsername(window.myPersonalListData?.username);
+        if (window.myPersonalListData && (!cachedOwner || cachedOwner === requestUser)) {
             currentListData = window.myPersonalListData;
             window.currentListData = window.myPersonalListData;
             renderMyLists(window.myPersonalListData);
-        } else {
+        } else if (!currentListData || normalizeSyncUsername(currentListData.username) !== requestUser) {
+            // Do not blank an already-rendered same-account snapshot while the
+            // network request is pending.  A slow NAS must not turn a temporary
+            // loading gap into an apparent "all playlists disappeared" state.
             currentListData = null;
             window.currentListData = null;
         }
@@ -469,7 +475,8 @@ async function reloadUserFavorites() {
         });
         if (res.ok) {
             const listData = await res.json();
-            if (listData) {
+            if (requestId !== favoritesReloadRequestId || normalizeSyncUsername(localStorage.getItem('lx_sync_user')) !== requestUser || !isUserLoggedIn()) return;
+            if (canApplyAccountListSnapshot(listData, currentListData, requestUser)) {
                 currentListData = listData;
                 window.currentListData = listData;
                 window.myPersonalListData = listData;
@@ -479,6 +486,8 @@ async function reloadUserFavorites() {
                 if (typeof loadLibraryData === 'function') {
                     await loadLibraryData();
                 }
+            } else {
+                console.warn('[ReloadFavorites] 忽略无效或空的旧歌单快照，保留当前账号数据');
             }
         }
     } catch (e) {
@@ -7302,7 +7311,14 @@ window.addEventListener('popstate', (e) => {
         return;
     }
 
-    // 2. 处理搜索详情 (歌手/专辑)
+    // 2. 本地歌单详情页是 SPA 内部导航。优先消费它自己的 history
+    // entry，避免 iOS 侧滑/Android 系统返回直接离开页面并丢失账号列表。
+    if (window.SongListManager?.isDetailOpen?.()) {
+        window.SongListManager.closeDetail(true);
+        return;
+    }
+
+    // 3. 处理搜索详情 (歌手/专辑)
     const backBtn = document.getElementById('search-back-btn');
     if (backBtn && !backBtn.classList.contains('hidden')) {
         goBackToSearch(true);
@@ -8772,6 +8788,43 @@ window.removeLibraryAlbum = removeLibraryAlbum;
 // Link SyncManager from user_sync.js
 const syncManager = window.SyncManager;
 let currentListData = null;
+let accountSyncEpoch = 0;
+let favoritesReloadRequestId = 0;
+
+function isAccountListSnapshot(listData) {
+    return Boolean(listData && typeof listData === 'object'
+        && Array.isArray(listData.defaultList)
+        && Array.isArray(listData.loveList)
+        && Array.isArray(listData.userList));
+}
+
+function canApplyAccountListSnapshot(nextData, existingData, username = '') {
+    if (!isAccountListSnapshot(nextData)) return false;
+
+    const requestedUser = normalizeSyncUsername(username);
+    const nextUser = normalizeSyncUsername(nextData.username);
+    if (nextUser && requestedUser && nextUser !== requestedUser) return false;
+    const existingUser = normalizeSyncUsername(existingData?.username);
+    // A cached snapshot from another account must never veto the new account's
+    // first valid response.
+    if (existingUser && requestedUser && existingUser !== requestedUser) return true;
+
+    // The list endpoint is a full snapshot.  An empty userList can be a
+    // transient/partially-read NAS file; never replace a populated same-account
+    // cache with it during an automatic refresh.  Explicit playlist deletion
+    // still works because the in-memory snapshot is already empty at that point.
+    if (Array.isArray(existingData?.userList)
+        && existingData.userList.length > 0
+        && nextData.userList.length === 0) return false;
+
+    return true;
+}
+
+function isCurrentAccountSync(username, epoch) {
+    return epoch === accountSyncEpoch
+        && isUserLoggedIn()
+        && normalizeSyncUsername(localStorage.getItem('lx_sync_user')) === normalizeSyncUsername(username);
+}
 
 function setActiveListData(listData) {
     currentListData = listData || null;
@@ -8950,6 +9003,11 @@ async function handleSyncLogout(skipConfirm = false) {
     }
 
     try {
+        // Invalidate any foreground/background login or list request before
+        // clearing account state.  A late response from the old account must
+        // not repopulate the UI after logout or account switching.
+        accountSyncEpoch += 1;
+        favoritesReloadRequestId += 1;
         stopPlaylistSharePolling();
 
         // 1. 服务端注销 Token 不应阻塞退出。旧实现等待远端响应，局域网
@@ -9043,6 +9101,7 @@ async function handleLocalLogin(options = {}) {
         return false;
     }
 
+    const loginEpoch = ++accountSyncEpoch;
     statusEl.innerHTML = '<i class="fas fa-spinner fa-spin text-emerald-500"></i> 正在登录...';
 
     try {
@@ -9141,6 +9200,14 @@ async function handleLocalLogin(options = {}) {
             }
 
             const finishListSync = async (listData, background = false) => {
+                if (!isCurrentAccountSync(user, loginEpoch)) {
+                    console.warn('[Sync] 忽略已过期的账号歌单响应');
+                    return false;
+                }
+                if (!canApplyAccountListSnapshot(listData, currentListData, user)) {
+                    console.warn('[Sync] 忽略无效或空的旧歌单快照，保留当前账号数据');
+                    return false;
+                }
                 currentListData = listData;
                 if (currentListData) currentListData.username = user;
                 window.myPersonalListData = currentListData;
@@ -9172,6 +9239,7 @@ async function handleLocalLogin(options = {}) {
                     showInitialSearchState();
                 }
                 })();
+                return true;
             };
 
             // Fetch the account list, but cap the foreground wait. A cached
@@ -10186,6 +10254,10 @@ async function handleRefreshList(listId, event, silent = false) {
         if (!silent && window.showToast) window.showToast('info', '该歌单不支持在线刷新');
         return;
     }
+    const refreshUser = normalizeSyncUsername(localStorage.getItem('lx_sync_user'));
+    const previousList = Array.isArray(list.list) ? list.list : [];
+    const previousName = list.name;
+    const previousAlbum = list.Album;
 
     if (!silent) {
         const safeListName = escapeHtmlText(list.name || list.id || list.sourceListId || '');
@@ -10207,6 +10279,7 @@ async function handleRefreshList(listId, event, silent = false) {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
+        if (!isUserLoggedIn() || normalizeSyncUsername(localStorage.getItem('lx_sync_user')) !== refreshUser) return;
 
         if (!data || !data.list) throw new Error('数据拉取失败');
 
@@ -10216,6 +10289,14 @@ async function handleRefreshList(listId, event, silent = false) {
             if (!item.source) item.source = list.source;
             return item;
         });
+
+        // A transient upstream/API failure can legally return HTTP 200 with an
+        // empty list.  Never turn a populated personal playlist into an empty
+        // one during an automatic refresh; an explicit empty-source restore is
+        // handled by the guarded Songloft sync endpoint instead.
+        if (previousList.length > 0 && newList.length === 0) {
+            throw new Error('源歌单返回空列表，已保留原歌单');
+        }
 
         // 更新列表模型
         list.list = newList;
@@ -10230,7 +10311,8 @@ async function handleRefreshList(listId, event, silent = false) {
         }
 
         // 推送同步并重绘 UI
-        await pushDataChange();
+        const synced = await pushDataChange();
+        if (synced === false) throw new Error('歌单变更未能保存到服务器');
         scheduleSongloftPlaylistSync(listId);
         renderMyLists(currentListData);
 
@@ -10241,6 +10323,15 @@ async function handleRefreshList(listId, event, silent = false) {
 
         if (window.showToast) window.showToast('success', '歌单内容已同步至最新状态');
     } catch (e) {
+        if (currentListData && normalizeSyncUsername(localStorage.getItem('lx_sync_user')) === refreshUser) {
+            const current = currentListData.userList?.find(item => item.id === listId);
+            if (current) {
+                current.list = previousList;
+                current.name = previousName;
+                current.Album = previousAlbum;
+                renderMyLists(currentListData);
+            }
+        }
         console.error('[Refresh] Failed:', e);
         if (window.showToast) window.showToast('error', '歌单同步失败: ' + e.message);
     }
@@ -10387,8 +10478,15 @@ async function pushDataChange(customListData) {
 
 async function refreshUserListData() {
     if (!window.SyncManager) return;
+    const requestUser = normalizeSyncUsername(localStorage.getItem('lx_sync_user'));
+    const existingData = getActiveListData();
     try {
         const listData = await window.SyncManager.sync();
+        if (!isUserLoggedIn() || normalizeSyncUsername(localStorage.getItem('lx_sync_user')) !== requestUser) return;
+        if (!canApplyAccountListSnapshot(listData, existingData, requestUser)) {
+            console.warn('[Sync] 刷新时忽略无效或空的旧歌单快照，保留当前账号数据');
+            return;
+        }
         await hydratePersonalPlaylistArtwork(listData);
         setActiveListData(listData);
         if (typeof renderMyLists === 'function') {

@@ -32,7 +32,26 @@ window.SongListManager = (function () {
         hostParentId: 'view-songlist',
         isLocal: false,
         playlist: null,
+        historyPushed: false,
     };
+    let detailCloseTimer = null;
+
+    function pushDetailHistory(detailType, listId) {
+        const current = window.history.state;
+        if (current?.page === 'songlist-detail'
+            && current.detailType === detailType
+            && String(current.listId || '') === String(listId || '')) {
+            detailState.historyPushed = true;
+            return;
+        }
+        window.history.pushState({
+            ...(current && typeof current === 'object' ? current : {}),
+            page: 'songlist-detail',
+            detailType,
+            listId: String(listId || ''),
+        }, '');
+        detailState.historyPushed = true;
+    }
 
     function ensureDetailHost(parentId) {
         const detailView = document.getElementById('songlist-detail-view');
@@ -267,6 +286,7 @@ window.SongListManager = (function () {
         detailState.returnTab = 'songlist';
         detailState.isLocal = false;
         detailState.page = page;
+        if (page === 1) pushDetailHistory('network', id);
 
         const detailView = ensureDetailHost('view-songlist');
         const listContainer = document.getElementById('sl-detail-list');
@@ -397,6 +417,10 @@ window.SongListManager = (function () {
 
     function openLocalDetail(list) {
         if (!list) return;
+        if (detailCloseTimer) {
+            clearTimeout(detailCloseTimer);
+            detailCloseTimer = null;
+        }
         const songs = Array.isArray(list.list) ? list.list.map((song, index) => ({
             ...song,
             id: song.id || song.songmid || song.songId || song.hash || `local_${list.id}_${index}`,
@@ -420,6 +444,11 @@ window.SongListManager = (function () {
             img: playlistArtwork(list, songs),
             desc: list.sourceListId ? '网络歌单导入的本地歌单，可继续在曲库联动中补齐。' : '音云用户歌单。',
         };
+        // A local playlist detail is a real navigation state.  This makes the
+        // iOS swipe-back/Android system back gesture close the detail view in
+        // place instead of leaving the SPA (which previously made the account
+        // playlists appear to vanish on the next render).
+        pushDetailHistory('local', detailState.id);
         if (window.ListSearch) window.ListSearch.resetState();
         switchTab('my-playlists');
         const detailView = ensureDetailHost('view-my-playlists');
@@ -781,16 +810,30 @@ window.SongListManager = (function () {
             modal.classList.add('hidden');
             modal.classList.remove('flex');
         },
-        closeDetail: function () {
+        isDetailOpen: function () {
+            const detailView = document.getElementById('songlist-detail-view');
+            return Boolean(detailView && !detailView.classList.contains('hidden'));
+        },
+        closeDetail: function (fromPopState = false) {
             this.closeCoverPicker();
+            if (!fromPopState
+                && detailState.historyPushed
+                && window.history.state?.page === 'songlist-detail') {
+                window.history.back();
+                return;
+            }
             const detailView = document.getElementById('songlist-detail-view');
             if (!detailView) return;
             detailView.classList.add('translate-x-full');
             const returnTab = detailState.returnTab || 'songlist';
-            setTimeout(() => {
+            const hostParentId = detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist');
+            detailState.historyPushed = false;
+            if (detailCloseTimer) clearTimeout(detailCloseTimer);
+            detailCloseTimer = setTimeout(() => {
                 detailView.classList.add('hidden');
-                ensureDetailHost('view-songlist');
+                ensureDetailHost(hostParentId);
                 switchTab(returnTab);
+                detailCloseTimer = null;
             }, 300);
         },
         toggleTagSelector,

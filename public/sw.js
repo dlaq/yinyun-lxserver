@@ -1,4 +1,4 @@
-const BUILD_HASH = '995191d';
+const BUILD_HASH = '5f99e74';
 const CACHE_PREFIX = 'yinyun-admin-';
 const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
 const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;
