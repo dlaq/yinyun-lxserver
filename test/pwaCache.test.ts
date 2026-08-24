@@ -147,6 +147,8 @@ test('PWA caching bypasses private and large responses and updates per build', (
   assert.match(playerPwa, /updateViaCache: 'none'/)
   assert.match(playerPwa, /CLEAR_RUNTIME_CACHES/)
   assert.match(playerPwa, /controllerchange/)
+  assert.match(playerPwa, /const isDefaultHttpPort = location\.port === '' \|\| location\.port === '80'/)
+  assert.match(playerPwa, /location\.protocol === 'http:' && isDefaultHttpPort/)
   assert.match(playerPwa, /target\.protocol = 'https:'/)
   assert.match(playerPwa, /workerUrl\.searchParams\.set\('v', window\.CONFIG\.buildHash\)/)
   assert.match(adminHtml, /workerUrl\.searchParams\.set\('v', window\.CONFIG\.buildHash\)/)

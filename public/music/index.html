@@ -554,8 +554,8 @@
 
                     <!-- Song List Detail View (Overlay within the view) -->
                     <div id="songlist-detail-view"
-                        class="absolute inset-0 t-bg-main z-20 flex flex-col hidden translate-x-full transition-transform duration-300 pb-44 md:pb-32">
-                        <div class="h-16 px-4 md:px-6 flex items-center gap-4 border-b t-border-main t-bg-panel glass">
+                        class="absolute inset-0 t-bg-main z-20 flex flex-col overflow-y-auto custom-scrollbar hidden translate-x-full transition-transform duration-300 pb-44 md:pb-32">
+                        <div class="h-16 flex-shrink-0 px-4 md:px-6 flex items-center gap-4 border-b t-border-main t-bg-panel glass">
                             <button onclick="closeSongListDetail()"
                                 class="p-2 t-text-muted hover:t-bg-track rounded-lg">
                                 <i class="fas fa-arrow-left text-xl"></i>
@@ -583,7 +583,7 @@
                         </div>
 
                         <!-- Detail Content -->
-                        <div class="flex-1 flex flex-col overflow-hidden">
+                        <div class="flex-none flex flex-col">
                             <!-- Info Section -->
                             <div id="sl-detail-header"
                                 class="p-4 md:p-6 flex gap-4 md:gap-6 border-b t-border-main t-bg-panel/30 overflow-hidden transition-all duration-300 ease-in-out max-h-[1000px]">
@@ -645,9 +645,9 @@
                             </div>
 
                             <!-- List Section -->
-                            <div class="flex-1 flex flex-col overflow-hidden">
+                            <div class="flex-none flex flex-col">
                                 <div
-                                    class="grid grid-cols-12 gap-2 md:gap-4 p-4 border-b t-border-main t-bg-main text-gray-500 text-xs font-bold uppercase tracking-wider">
+                                    class="flex-shrink-0 grid grid-cols-12 gap-2 md:gap-4 p-4 border-b t-border-main t-bg-main text-gray-500 text-xs font-bold uppercase tracking-wider">
                                     <div
                                         class="col-span-1 sm:col-span-1 text-center font-mono flex items-center justify-center gap-1 sm:gap-2">
                                         <span>#</span>
@@ -727,7 +727,7 @@
                                     </div>
                                 </div>
                                 <div id="sl-detail-list"
-                                    class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar pb-20">
+                                    class="p-2 space-y-1 pb-20">
                                     <!-- Song items -->
                                 </div>
                             </div>

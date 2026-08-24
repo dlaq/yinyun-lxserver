@@ -1,4 +1,4 @@
-const BUILD_HASH = '5f99e74';
+const BUILD_HASH = 'e7da5d9';
 const CACHE_PREFIX = 'yinyun-player-';
 const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
 const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;

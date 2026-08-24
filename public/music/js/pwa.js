@@ -6,7 +6,13 @@ const isStandalone = () => window.matchMedia('(display-mode: standalone)').match
 const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
 const isLocalDevelopment = ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
 const isIpv4Address = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(location.hostname);
-const canUpgradeToHttps = location.protocol === 'http:' && !isLocalDevelopment && !isIpv4Address;
+// A non-standard HTTP port may be an intentional reverse-tunnel endpoint.
+// Upgrading `http://host:55553` to HTTPS makes the browser connect to a TLS
+// listener that does not exist, even though the HTTP listener is healthy.
+// Keep the convenience upgrade for default HTTP, but leave explicit ports
+// alone; PWA installation still requires HTTPS and is reported below.
+const isDefaultHttpPort = location.port === '' || location.port === '80';
+const canUpgradeToHttps = location.protocol === 'http:' && isDefaultHttpPort && !isLocalDevelopment && !isIpv4Address;
 
 const showPwaMessage = (message) => {
     if (typeof window.showInfo === 'function') window.showInfo(message);

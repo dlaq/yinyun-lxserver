@@ -12,6 +12,7 @@ test('player and admin opt into mobile safe-area layout', () => {
   }
 
   const playerCss = read('public/music/css/app.css')
+  const playerHtml = read('public/music/index.html')
   assert.match(playerCss, /height:\s*100dvh/)
   assert.match(playerCss, /safe-area-inset-bottom/)
   assert.match(playerCss, /--mobile-player-reserve/)
@@ -19,6 +20,8 @@ test('player and admin opt into mobile safe-area layout', () => {
   assert.match(playerCss, /orientation:\s*landscape[\s\S]*?max-height:\s*520px[\s\S]*?pointer:\s*coarse/)
   assert.match(playerCss, /#player-footer\s*\{[\s\S]*?flex-direction:\s*row\s*!important/)
   assert.match(playerCss, /\.hot-search-container\s*\{[\s\S]*?padding-top:\s*\.5rem\s*!important/)
+  assert.match(playerHtml, /id="songlist-detail-view"[\s\S]*?overflow-y-auto custom-scrollbar/)
+  assert.match(playerHtml, /id="sl-detail-list"\s+class="p-2 space-y-1 pb-20"/)
 
   const adminCss = read('public/style.css')
   assert.match(adminCss, /height:\s*100dvh/)
