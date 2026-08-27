@@ -28,6 +28,19 @@ test('local playlist detail releases the closing overlay and ignores a stale bac
   assert.match(manager, /fromPopState && suppressedDetailPopstates > 0/)
 })
 
+test('local playlist detail isolates background refreshes from the list-search view', () => {
+  const manager = read('public/music/js/songlist_manager.js')
+  const app = read('public/music/app.js')
+
+  assert.match(manager, /notifyDetailContext\(true, 'local', detailState\.id\)/)
+  assert.match(manager, /notifyDetailContext\(false, detailState\.isLocal \? 'local' : 'network', detailState\.id\)/)
+  assert.match(manager, /let detailGeneration = 0/)
+  assert.match(manager, /requestGeneration !== detailGeneration/)
+  assert.match(app, /function isSongListDetailActive\(\)/)
+  assert.match(app, /if \(isSongListDetailActive\(\)\) return;/)
+  assert.match(app, /if \(!isSongListDetailActive\(\) && window\.currentSearchScope === 'local_list'/)
+})
+
 test('browser back delegates local playlist detail before search history handling', () => {
   const app = read('public/music/app.js')
   const start = app.indexOf("window.addEventListener('popstate'")

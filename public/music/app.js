@@ -8847,6 +8847,24 @@ function getActiveListData() {
     return data;
 }
 
+// Detail navigation is a separate SPA state.  Background account refreshes
+// may finish after the user has opened or closed a local playlist; they must
+// not resurrect the old search/list view underneath the playlist grid.
+function setSongListDetailContext(context = {}) {
+    const open = Boolean(context?.open);
+    window.songListDetailActive = open;
+    if (!open) {
+        currentSearchScope = 'network';
+        window.currentSearchScope = 'network';
+        window.currentViewingListId = null;
+    }
+}
+window.setSongListDetailContext = setSongListDetailContext;
+
+function isSongListDetailActive() {
+    return Boolean(window.songListDetailActive || window.SongListManager?.isDetailOpen?.());
+}
+
 //同步设置
 async function pushSettingsToServer(force = false) {
     if (!force && !settings.saveAccountSettingsToFile) return;
@@ -9491,7 +9509,7 @@ function renderMyLists(data) {
         delete window._pendingResumeListId;
         console.log('[Resume] 正在同步本地播放列表上下文:', listId);
         // 调用 handleListClick 以加载真实的列表数据并应用高亮
-        handleListClick(listId);
+        if (!isSongListDetailActive()) handleListClick(listId);
     }
 }
 
@@ -9572,6 +9590,7 @@ function handleMyPlaylistCardClick(listId) {
 }
 
 function handleListClick(listId, skipAutoUpdate = false) {
+    if (isSongListDetailActive()) return;
     exitListSecondaryModes();
 
     if (!currentListData) return;
@@ -9805,7 +9824,7 @@ async function handleRenameList(listId, event) {
         if (typeof renderPlaylistAddGrid === 'function' && !document.getElementById('playlist-add-modal')?.classList.contains('hidden')) {
             renderPlaylistAddGrid();
         }
-        if (window.currentSearchScope === 'local_list' && window.currentViewingListId === listId) {
+        if (!isSongListDetailActive() && window.currentSearchScope === 'local_list' && window.currentViewingListId === listId) {
             handleListClick(listId, true);
         }
         showSuccess('歌单名称已更新');
@@ -10331,7 +10350,7 @@ async function handleRefreshList(listId, event, silent = false) {
         renderMyLists(currentListData);
 
         // 如果当前正处于该列表视图，刷新结果列表显示
-        if (window.currentViewingListId === listId) {
+        if (!isSongListDetailActive() && window.currentViewingListId === listId) {
             handleListClick(listId, true); // Skip auto-update to avoid loop
         }
 
@@ -10508,7 +10527,7 @@ async function refreshUserListData() {
         }
 
         // [New] If currently viewing a local list, refresh its contents in main view
-        if (window.currentSearchScope === 'local_list' && window.currentViewingListId) {
+        if (!isSongListDetailActive() && window.currentSearchScope === 'local_list' && window.currentViewingListId) {
             console.log('[Sync] Auto-refreshing current list view:', window.currentViewingListId);
             handleListClick(window.currentViewingListId, true); // true to skip background auto-update
         }
@@ -11727,7 +11746,7 @@ async function handleTogglePlaylist(listId, btnElement) {
         // 3. Immediate UI Refresh
         setActiveListData(activeListData);
         renderMyLists(activeListData);
-        if (window.currentSearchScope === 'local_list' && window.currentViewingListId) {
+        if (!isSongListDetailActive() && window.currentSearchScope === 'local_list' && window.currentViewingListId) {
             handleListClick(window.currentViewingListId, true);
         }
 

@@ -35,6 +35,8 @@ window.SongListManager = (function () {
         historyPushed: false,
     };
     let detailCloseTimer = null;
+    let detailGeneration = 0;
+    let detailClosing = false;
     // A close button first schedules history.back().  On iOS/Android the
     // resulting popstate can arrive after the user has already tapped a
     // different playlist.  Keep enough state to consume that stale traversal
@@ -65,6 +67,28 @@ window.SongListManager = (function () {
         if (detailView && parent && detailView.parentElement !== parent) parent.appendChild(detailView);
         detailState.hostParentId = parentId;
         return detailView;
+    }
+
+    function isDetailVisible() {
+        const detailView = document.getElementById('songlist-detail-view');
+        return Boolean(detailView && !detailView.classList.contains('hidden'));
+    }
+
+    function resetDetailCloseState() {
+        if (detailCloseTimer) {
+            clearTimeout(detailCloseTimer);
+            detailCloseTimer = null;
+        }
+        detailClosing = false;
+    }
+
+    function notifyDetailContext(open, detailType, listId) {
+        if (typeof window.setSongListDetailContext !== 'function') return;
+        window.setSongListDetailContext({
+            open: Boolean(open),
+            type: detailType || '',
+            listId: listId == null ? '' : String(listId),
+        });
     }
 
     function escapeHtml(value) {
@@ -287,6 +311,13 @@ window.SongListManager = (function () {
     }
 
     async function loadDetail(id, source, page = 1) {
+        if (page === 1) {
+            resetDetailCloseState();
+            detailGeneration += 1;
+            detailClosing = false;
+            notifyDetailContext(true, 'network', id);
+        }
+        const requestGeneration = detailGeneration;
         detailState.id = id;
         detailState.source = source;
         detailState.returnTab = 'songlist';
@@ -340,6 +371,13 @@ window.SongListManager = (function () {
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
 
+            // A slow response from a detail that was already closed (or from a
+            // previous playlist) must never repopulate the current detail DOM.
+            if (requestGeneration !== detailGeneration
+                || String(detailState.id) !== String(id)
+                || detailState.source !== source
+                || detailState.isLocal) return;
+
             detailState.info = data.info;
 
             // Normalize IDs to ensure batch operations work correctly
@@ -379,7 +417,7 @@ window.SongListManager = (function () {
         }
     }
 
-    async function hydrateLocalDetailArtwork(list, listId) {
+    async function hydrateLocalDetailArtwork(list, listId, requestGeneration = detailGeneration) {
         if (!listId || !window.getUserAuthHeaders) return;
         try {
             const response = await fetch(`/api/v1/playlists/${encodeURIComponent(listId)}`, {
@@ -413,7 +451,11 @@ window.SongListManager = (function () {
                 };
             });
 
-            if (detailState.id !== String(listId) || !detailState.isLocal) return;
+            if (requestGeneration !== detailGeneration
+                || detailState.id !== String(listId)
+                || !detailState.isLocal
+                || detailClosing
+                || !isDetailVisible()) return;
             detailState.list = refreshedSongs;
             detailState.total = refreshedSongs.length;
             detailState.info.img = payload?.data?.artworkUrl || payload.artworkUrl || playlistArtwork(list, refreshedSongs);
@@ -425,10 +467,7 @@ window.SongListManager = (function () {
 
     function openLocalDetail(list) {
         if (!list) return;
-        if (detailCloseTimer) {
-            clearTimeout(detailCloseTimer);
-            detailCloseTimer = null;
-        }
+        resetDetailCloseState();
         if (pendingDetailBack) {
             pendingDetailBack = false;
             suppressedDetailPopstates += 1;
@@ -449,6 +488,8 @@ window.SongListManager = (function () {
         detailState.page = 1;
         detailState.total = songs.length;
         detailState.list = songs;
+        detailGeneration += 1;
+        detailClosing = false;
         detailState.info = {
             name: list.name || '未命名歌单',
             author: '音云 · 我的歌单',
@@ -456,6 +497,7 @@ window.SongListManager = (function () {
             img: playlistArtwork(list, songs),
             desc: list.sourceListId ? '网络歌单导入的本地歌单，可继续在曲库联动中补齐。' : '音云用户歌单。',
         };
+        notifyDetailContext(true, 'local', detailState.id);
         // A local playlist detail is a real navigation state.  This makes the
         // iOS swipe-back/Android system back gesture close the detail view in
         // place instead of leaving the SPA (which previously made the account
@@ -478,7 +520,7 @@ window.SongListManager = (function () {
         requestAnimationFrame(() => detailView.classList.remove('translate-x-full'));
         // Render immediately from the local snapshot, then replace stale local
         // cover URLs with fresh signed artwork without blocking navigation.
-        void hydrateLocalDetailArtwork(list, detailState.id);
+        void hydrateLocalDetailArtwork(list, detailState.id, detailGeneration);
     }
 
     // --- Rendering ---
@@ -833,8 +875,20 @@ window.SongListManager = (function () {
             if (fromPopState && suppressedDetailPopstates > 0) {
                 suppressedDetailPopstates -= 1;
                 pendingDetailBack = false;
+                // If a second playlist was opened before the first
+                // history.back() delivered its popstate, restore the history
+                // entry for that new detail.  Without this forward traversal
+                // the UI looks open while history points at the playlist page;
+                // the next click/back then gets interpreted as another close.
+                if (window.history.state?.page !== 'songlist-detail'
+                    && detailState.historyPushed
+                    && !detailClosing) {
+                    suppressedDetailPopstates += 1;
+                    window.history.forward();
+                }
                 return;
             }
+            if (detailClosing) return;
             if (!fromPopState
                 && detailState.historyPushed
                 && window.history.state?.page === 'songlist-detail') {
@@ -850,6 +904,8 @@ window.SongListManager = (function () {
             }
             const detailView = document.getElementById('songlist-detail-view');
             if (!detailView) return;
+            detailClosing = true;
+            detailGeneration += 1;
             detailView.classList.add('translate-x-full', 'pointer-events-none');
             detailView.style.pointerEvents = 'none';
             const returnTab = detailState.returnTab || 'songlist';
@@ -859,8 +915,12 @@ window.SongListManager = (function () {
             if (detailCloseTimer) clearTimeout(detailCloseTimer);
             detailCloseTimer = setTimeout(() => {
                 detailView.classList.add('hidden');
+                detailView.classList.remove('translate-x-full');
+                detailView.style.pointerEvents = 'none';
                 ensureDetailHost(hostParentId);
+                notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
                 switchTab(returnTab);
+                detailClosing = false;
                 detailCloseTimer = null;
             }, 300);
         },
