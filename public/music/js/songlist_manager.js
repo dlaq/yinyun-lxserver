@@ -35,6 +35,12 @@ window.SongListManager = (function () {
         historyPushed: false,
     };
     let detailCloseTimer = null;
+    // A close button first schedules history.back().  On iOS/Android the
+    // resulting popstate can arrive after the user has already tapped a
+    // different playlist.  Keep enough state to consume that stale traversal
+    // without closing the newly opened detail view.
+    let pendingDetailBack = false;
+    let suppressedDetailPopstates = 0;
 
     function pushDetailHistory(detailType, listId) {
         const current = window.history.state;
@@ -293,6 +299,8 @@ window.SongListManager = (function () {
 
         if (page === 1) {
             detailView.classList.remove('hidden');
+            detailView.classList.remove('pointer-events-none');
+            detailView.style.pointerEvents = '';
             document.getElementById('sl-detail-collect')?.classList.remove('hidden');
             setTimeout(() => detailView.classList.remove('translate-x-full'), 10);
             listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
@@ -421,6 +429,10 @@ window.SongListManager = (function () {
             clearTimeout(detailCloseTimer);
             detailCloseTimer = null;
         }
+        if (pendingDetailBack) {
+            pendingDetailBack = false;
+            suppressedDetailPopstates += 1;
+        }
         const songs = Array.isArray(list.list) ? list.list.map((song, index) => ({
             ...song,
             id: song.id || song.songmid || song.songId || song.hash || `local_${list.id}_${index}`,
@@ -455,6 +467,8 @@ window.SongListManager = (function () {
         const listContainer = document.getElementById('sl-detail-list');
         if (!detailView || !listContainer) return;
         detailView.classList.remove('hidden');
+        detailView.classList.remove('pointer-events-none');
+        detailView.style.pointerEvents = '';
         listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
         const collect = document.getElementById('sl-detail-collect');
         if (collect) collect.classList.add('hidden');
@@ -816,18 +830,32 @@ window.SongListManager = (function () {
         },
         closeDetail: function (fromPopState = false) {
             this.closeCoverPicker();
+            if (fromPopState && suppressedDetailPopstates > 0) {
+                suppressedDetailPopstates -= 1;
+                pendingDetailBack = false;
+                return;
+            }
             if (!fromPopState
                 && detailState.historyPushed
                 && window.history.state?.page === 'songlist-detail') {
+                pendingDetailBack = true;
+                detailState.historyPushed = false;
+                const pendingView = document.getElementById('songlist-detail-view');
+                if (pendingView) {
+                    pendingView.classList.add('translate-x-full', 'pointer-events-none');
+                    pendingView.style.pointerEvents = 'none';
+                }
                 window.history.back();
                 return;
             }
             const detailView = document.getElementById('songlist-detail-view');
             if (!detailView) return;
-            detailView.classList.add('translate-x-full');
+            detailView.classList.add('translate-x-full', 'pointer-events-none');
+            detailView.style.pointerEvents = 'none';
             const returnTab = detailState.returnTab || 'songlist';
             const hostParentId = detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist');
             detailState.historyPushed = false;
+            pendingDetailBack = false;
             if (detailCloseTimer) clearTimeout(detailCloseTimer);
             detailCloseTimer = setTimeout(() => {
                 detailView.classList.add('hidden');

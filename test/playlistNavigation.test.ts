@@ -17,6 +17,17 @@ test('local playlist detail owns a history entry and restores its original host 
   assert.doesNotMatch(manager, /ensureDetailHost\('view-songlist'\);\s*switchTab\(returnTab\)/)
 })
 
+test('local playlist detail releases the closing overlay and ignores a stale back event', () => {
+  const manager = read('public/music/js/songlist_manager.js')
+
+  assert.match(manager, /let pendingDetailBack = false/)
+  assert.match(manager, /let suppressedDetailPopstates = 0/)
+  assert.match(manager, /pendingDetailBack = false[\s\S]*suppressedDetailPopstates \+= 1/)
+  assert.match(manager, /classList\.add\('translate-x-full', 'pointer-events-none'\)/)
+  assert.match(manager, /style\.pointerEvents = 'none'/)
+  assert.match(manager, /fromPopState && suppressedDetailPopstates > 0/)
+})
+
 test('browser back delegates local playlist detail before search history handling', () => {
   const app = read('public/music/app.js')
   const start = app.indexOf("window.addEventListener('popstate'")
