@@ -222,12 +222,18 @@
         localSelect.innerHTML = '<option value="">选择音云歌单</option>' + local.map(item =>
             `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${Number(item.trackCount || 0)} 首</option>`).join('');
         remoteSelect.innerHTML = '<option value="">按同名自动创建/匹配</option>' + (remote.playlists || []).map(item =>
-            `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${Number(item.song_count || item.songCount || 0)} 首</option>`).join('');
+            `<option value="${escapeHtml(item.id)}" ${isReadonlySongloftPlaylist(item) ? 'disabled' : ''}>${escapeHtml(item.name)} · ${Number(item.song_count || item.songCount || 0)} 首${isReadonlySongloftPlaylist(item) ? ' · 系统歌单（只读）' : ''}</option>`).join('');
         if (state.importData?.yinyunPlaylistId) localSelect.value = state.importData.yinyunPlaylistId;
         localSelect.onchange = updatePlaylistDeleteButtons;
         remoteSelect.onchange = updatePlaylistDeleteButtons;
         updatePlaylistDeleteButtons();
         renderImportHistory(state.importRecords)
+    }
+
+    function isReadonlySongloftPlaylist(playlist) {
+        const id = Number(playlist?.id);
+        return id <= 2 || playlist?.type === 'radio'
+            || (Array.isArray(playlist?.labels) && playlist.labels.some(label => String(label).toLowerCase() === 'built_in'));
     }
 
     function queueLabel(status) {
@@ -299,7 +305,7 @@
         const songloftButton = el('integration-delete-songloft-btn')
         if (yinyunButton) yinyunButton.disabled = !yinyunId || ['default', 'love'].includes(yinyunId)
         const remote = state.remotePlaylists.find(item => String(item.id) === String(songloftId))
-        const readonly = remote?.type === 'radio' || Number(songloftId) <= 2 || (Array.isArray(remote?.labels) && remote.labels.includes('built_in'))
+        const readonly = isReadonlySongloftPlaylist(remote)
         if (songloftButton) songloftButton.disabled = !songloftId || readonly
     }
 
@@ -1067,7 +1073,11 @@
             mode: el('integration-sync-mode').value,
         };
         const remoteId = el('integration-songloft-playlist').value;
-        if (remoteId) body.songloftPlaylistId = Number(remoteId);
+        if (remoteId) {
+            const remote = state.remotePlaylists.find(item => String(item.id) === String(remoteId));
+            if (isReadonlySongloftPlaylist(remote)) return notifyError(new Error('Songloft 系统歌单或电台歌单只读，不能同步'));
+            body.songloftPlaylistId = Number(remoteId);
+        }
         const confirmed = typeof showSelect !== 'function' || await showSelect('确认同步歌单', `方向：${body.direction}\n模式：${body.mode}\n确认继续吗？`);
         if (!confirmed) return;
         setBusy('integration-sync-btn', true, '同步中');

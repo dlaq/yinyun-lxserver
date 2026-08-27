@@ -39,6 +39,7 @@ import {
   mergePlaylistIds,
   playlistReplacementSafetyIssue,
   playlistSyncConflicts,
+  findPlaylistSyncTargetConflict,
   preferExistingPlaylistCandidate,
   PlaylistImportStore,
   PlaylistSyncStore,
@@ -81,6 +82,7 @@ interface ApiV1Dependencies {
   getSongloftClient?: () => SongloftClient | null
   getSongloftSubsonicClient?: () => SubsonicClient | null
   getPlaylistSyncStore?: (username: string) => PlaylistSyncStore
+  getPlaylistSyncRecords?: () => PlaylistSyncRecord[]
   getPlaylistImportStore?: (username: string) => PlaylistImportStore
   getLegacyUser?: (req: IncomingMessage) => string | null
 }
@@ -107,6 +109,7 @@ class ApiError extends Error {
 
 const revokedTokens = new Map<string, number>()
 const activePlaylistSyncs = new Set<string>()
+const songloftPlaylistLockKey = (playlistId: number) => `songloft:${playlistId}`
 let songloftMatchingCache: { client: SongloftClient; tracks: IntegrationTrack[]; expiresAt: number } | null = null
 let songloftMatchingPromise: Promise<IntegrationTrack[]> | null = null
 const SONGLOFT_MATCHING_CACHE_TTL = 60_000
@@ -899,6 +902,20 @@ const normalizePlaylistName = (value: unknown) => String(value || '')
   .replace(/\s+/g, ' ')
   .toLocaleLowerCase()
 
+const isSongloftPlaylistReadOnly = (playlist: any) => {
+  const playlistId = Number(playlist?.id)
+  const labels = Array.isArray(playlist?.labels) ? playlist.labels : []
+  return playlistId <= 2
+    || playlist?.type === 'radio'
+    || labels.some((label: unknown) => String(label).toLocaleLowerCase() === 'built_in')
+}
+
+const getPlaylistSyncRecords = (deps: ApiV1Dependencies, username: string, store?: PlaylistSyncStore) => {
+  const records = deps.getPlaylistSyncRecords?.()
+  if (Array.isArray(records)) return records
+  return store?.list() || []
+}
+
 const getUserLocalIntegrationTracks = async (username: string): Promise<IntegrationTrack[]> => {
   // Playlist matching is against the downloaded/local music tree only.  This
   // intentionally excludes yinyun's transient cache so MusicHub (and any
@@ -1506,41 +1523,58 @@ const syncSongloftReplacement = async (
   store?.load()
   const mapped = store?.get(`${username}:${playlistId}`)
   const remotePlaylists = await client.listPlaylists()
-  const remoteId = Number(mapped?.songloftPlaylistId || remotePlaylists.find(item => normalizePlaylistName(item.name) === normalizePlaylistName(playlistName))?.id)
+  const remotePlaylist = mapped?.songloftPlaylistId
+    ? remotePlaylists.find(item => Number(item.id) === Number(mapped.songloftPlaylistId))
+    : remotePlaylists.find(item => normalizePlaylistName(item.name) === normalizePlaylistName(playlistName))
+  const remoteId = Number(remotePlaylist?.id)
   if (!Number.isFinite(remoteId) || remoteId <= 2) return { updated: false, reason: 'songloft_playlist_not_mapped' }
+  if (isSongloftPlaylistReadOnly(remotePlaylist)) return { updated: false, reason: 'songloft_playlist_readonly' }
+  const conflictingRecord = findPlaylistSyncTargetConflict(
+    getPlaylistSyncRecords(deps, username, store),
+    `${username}:${playlistId}`,
+    remoteId,
+  )
+  if (conflictingRecord) return { updated: false, reason: 'songloft_playlist_already_mapped' }
+  const remoteLockKey = songloftPlaylistLockKey(remoteId)
+  if (activePlaylistSyncs.has(remoteLockKey)) return { updated: false, reason: 'songloft_playlist_sync_in_progress' }
+  activePlaylistSyncs.add(remoteLockKey)
 
-  let remoteLibrary = await client.listAllSongs()
-  const currentSongs = await client.getPlaylistSongs(remoteId)
-  const matchRemote = (track: IntegrationTrack) => matchTracks([track], remoteLibrary, { ...SHARED_LIBRARY_MATCH_OPTIONS, threshold: 0.82, ambiguityMargin: 0 })[0]?.candidate
-  let previousRemote = matchRemote(previousTrack)
-  let nextRemote = matchRemote(nextTrack)
-  // Songloft indexes asynchronously.  A replacement can therefore finish
-  // downloading before its new file is visible in the remote library.  Start
-  // one normal scan and poll the read-only library endpoint briefly so the
-  // playlist update is eventual instead of silently leaving the old song.
-  if (!nextRemote) {
-    try { await client.startScan(false) } catch (error: any) {
-      console.warn('[PlaylistReplacement] Songloft scan request failed:', error?.message || error)
-    }
-    for (const delayMs of [1500, 3000, 5000]) {
-      await new Promise(resolve => setTimeout(resolve, delayMs))
-      try {
-        remoteLibrary = await client.listAllSongs()
-        nextRemote = matchRemote(nextTrack)
-        previousRemote = matchRemote(previousTrack)
-        if (nextRemote) break
-      } catch (error: any) {
-        console.warn('[PlaylistReplacement] Songloft library retry failed:', error?.message || error)
+  try {
+    let remoteLibrary = await client.listAllSongs()
+    const currentSongs = await client.getPlaylistSongs(remoteId)
+    const matchRemote = (track: IntegrationTrack) => matchTracks([track], remoteLibrary, { ...SHARED_LIBRARY_MATCH_OPTIONS, threshold: 0.82, ambiguityMargin: 0 })[0]?.candidate
+    let previousRemote = matchRemote(previousTrack)
+    let nextRemote = matchRemote(nextTrack)
+    // Songloft indexes asynchronously.  A replacement can therefore finish
+    // downloading before its new file is visible in the remote library.  Start
+    // one normal scan and poll the read-only library endpoint briefly so the
+    // playlist update is eventual instead of silently leaving the old song.
+    if (!nextRemote) {
+      try { await client.startScan(false) } catch (error: any) {
+        console.warn('[PlaylistReplacement] Songloft scan request failed:', error?.message || error)
+      }
+      for (const delayMs of [1500, 3000, 5000]) {
+        await new Promise(resolve => setTimeout(resolve, delayMs))
+        try {
+          remoteLibrary = await client.listAllSongs()
+          nextRemote = matchRemote(nextTrack)
+          previousRemote = matchRemote(previousTrack)
+          if (nextRemote) break
+        } catch (error: any) {
+          console.warn('[PlaylistReplacement] Songloft library retry failed:', error?.message || error)
+        }
       }
     }
+    const previousId = asRemoteSongId(previousRemote)
+    const nextId = asRemoteSongId(nextRemote)
+    if (!nextId) return { updated: false, reason: 'songloft_replacement_not_indexed' }
+    const currentIds = new Set(currentSongs.map(asRemoteSongId).filter((id): id is number => id !== null))
+    if (!currentIds.has(nextId)) await client.addPlaylistSongs(remoteId, [nextId])
+    if (previousId !== null && previousId !== nextId && currentIds.has(previousId)) await client.removePlaylistSong(remoteId, previousId)
+    return { updated: true, songloftPlaylistId: remoteId, removedSongId: previousId, addedSongId: nextId }
+  } finally {
+    activePlaylistSyncs.delete(remoteLockKey)
   }
-  const previousId = asRemoteSongId(previousRemote)
-  const nextId = asRemoteSongId(nextRemote)
-  if (!nextId) return { updated: false, reason: 'songloft_replacement_not_indexed' }
-  const currentIds = new Set(currentSongs.map(asRemoteSongId).filter((id): id is number => id !== null))
-  if (!currentIds.has(nextId)) await client.addPlaylistSongs(remoteId, [nextId])
-  if (previousId !== null && previousId !== nextId && currentIds.has(previousId)) await client.removePlaylistSong(remoteId, previousId)
-  return { updated: true, songloftPlaylistId: remoteId, removedSongId: previousId, addedSongId: nextId }
 }
 
 /**
@@ -2364,6 +2398,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       const syncLockKey = `${username}:${yinyunPlaylistId}`
       if (activePlaylistSyncs.has(syncLockKey)) throw new ApiError(409, 'playlist_sync_in_progress', '该音云歌单正在同步，请等待当前任务完成')
       activePlaylistSyncs.add(syncLockKey)
+      let remoteSyncLockKey: string | null = null
       try {
       const client = requireSongloftClient(deps)
       const yinyunPlaylist = await getPlaylist(username, yinyunPlaylistId)
@@ -2402,6 +2437,32 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 
       const remotePlaylistId = Number(songloftPlaylist.id)
       if (!Number.isFinite(remotePlaylistId) || remotePlaylistId <= 0) throw new ApiError(502, 'invalid_songloft_playlist', 'Songloft 歌单 ID 无效')
+      if (isSongloftPlaylistReadOnly(songloftPlaylist)) {
+        throw new ApiError(409, 'songloft_playlist_readonly', 'Songloft 系统歌单或电台歌单只读，不能作为同步目标', {
+          songloftPlaylistId: remotePlaylistId,
+          name: songloftPlaylist.name,
+        })
+      }
+      remoteSyncLockKey = songloftPlaylistLockKey(remotePlaylistId)
+      if (activePlaylistSyncs.has(remoteSyncLockKey)) {
+        remoteSyncLockKey = null
+        throw new ApiError(409, 'songloft_playlist_sync_in_progress', '该 Songloft 歌单正在同步，请等待当前任务完成')
+      }
+      activePlaylistSyncs.add(remoteSyncLockKey)
+      const conflictingRecord = findPlaylistSyncTargetConflict(
+        getPlaylistSyncRecords(deps, username, store),
+        syncId,
+        remotePlaylistId,
+      )
+      if (conflictingRecord) {
+        throw new ApiError(409, 'songloft_playlist_already_mapped', '该 Songloft 歌单已经映射到其它音云歌单，已取消同步以避免覆盖', {
+          songloftPlaylistId: remotePlaylistId,
+          mappedSyncId: conflictingRecord.syncId,
+          mappedUsername: conflictingRecord.username,
+          mappedYinyunPlaylistId: conflictingRecord.yinyunPlaylistId,
+          mappedName: conflictingRecord.name,
+        })
+      }
       if (['mapped', 'explicit'].includes(playlistResolution) && normalizePlaylistName(songloftPlaylist.name) !== normalizePlaylistName(yinyunPlaylist.name)) {
         try {
           await client.renamePlaylist(remotePlaylistId, yinyunPlaylist.name)
@@ -2414,6 +2475,15 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       let remotePlaylistTracks = await client.getPlaylistSongs(remotePlaylistId)
       const initialRemoteIds = remotePlaylistTracks.map(canonicalTrackId)
       const initialLocalIds = initialLocalTracks.map(canonicalTrackId)
+      const remoteSnapshotWasUnexpectedlyEmpty = remotePlaylistTracks.length === 0
+        && Boolean(previous?.lastCommonIds?.length || (previous?.lastSongloftHash && previous.lastSongloftHash !== PlaylistSyncStore.hashIds([])))
+      if (remoteSnapshotWasUnexpectedlyEmpty) {
+        // A stale/partial Songloft read must never be treated as proof that a
+        // previously populated remote playlist is genuinely empty.  We can
+        // still add missing songs, but the replace path skips reorder until a
+        // subsequent read confirms the remote membership.
+        console.warn('[PlaylistSync] Songloft 返回空歌单，但同步账本显示此前有歌曲；本次跳过重排以避免误清空')
+      }
       const initialMerge = mergePlaylistIds(previous?.lastCommonIds || [], initialLocalIds, initialRemoteIds)
       const result: any = { direction, mode, yinyunPlaylistId, songloftPlaylistId: remotePlaylistId, playlistResolution, push: null, pull: null }
 
@@ -2467,7 +2537,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         try {
           if (addedIds.length) await client.addPlaylistSongs(remotePlaylistId, addedIds)
           for (const id of removedIds) await client.removePlaylistSong(remotePlaylistId, id)
-          if (mode === 'replace' && desiredIds.length) await client.reorderPlaylist(remotePlaylistId, desiredIds)
+          if (mode === 'replace' && desiredIds.length && !remoteSnapshotWasUnexpectedlyEmpty) await client.reorderPlaylist(remotePlaylistId, desiredIds)
           remotePlaylistTracks = await client.getPlaylistSongs(remotePlaylistId)
           if (mode === 'replace' && desiredIds.length) {
             const verifiedIds = new Set(remotePlaylistTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null))
@@ -2490,7 +2560,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
           matches: matches.map(publicTrackMatch),
           addedIds,
           removedIds,
-          reordered: mode === 'replace' && desiredIds.length > 0,
+          reordered: mode === 'replace' && desiredIds.length > 0 && !remoteSnapshotWasUnexpectedlyEmpty,
           unmatched: unmatched.map(publicTrackMatch),
         }
       }
@@ -2560,6 +2630,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       success(res, result)
       } finally {
         activePlaylistSyncs.delete(syncLockKey)
+        if (remoteSyncLockKey) activePlaylistSyncs.delete(remoteSyncLockKey)
       }
       return true
     }

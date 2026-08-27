@@ -56,3 +56,23 @@ test('network playlist refresh cannot persist a transient empty source response'
   assert.match(refresh, /if \(synced === false\) throw/)
   assert.match(refresh, /current\.list = previousList/)
 })
+
+test('returning from a local playlist renders the validated cached account snapshot', () => {
+  const app = read('public/music/app.js')
+
+  assert.match(app, /renderMyPlaylists\(getActiveListData\(\)\)/)
+  assert.match(app, /function getActiveListData\(\)/)
+  assert.match(app, /requestedUser && dataUser && requestedUser !== dataUser/)
+  assert.match(app, /const activeData = getActiveListData\(\)/)
+})
+
+test('Songloft synchronization protects read-only and duplicated remote targets', () => {
+  const api = read('src/server/apiV1.ts')
+
+  assert.match(api, /songloft_playlist_readonly/)
+  assert.match(api, /findPlaylistSyncTargetConflict\(/)
+  assert.match(api, /songloft_playlist_already_mapped/)
+  assert.match(api, /songloftPlaylistLockKey\(remotePlaylistId\)/)
+  assert.match(api, /remoteSnapshotWasUnexpectedlyEmpty/)
+  assert.match(api, /跳过重排以避免误清空/)
+})

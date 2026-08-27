@@ -1349,7 +1349,10 @@ function switchTab(tabId) {
 
     if (tabId === 'my-playlists') {
         document.getElementById('page-title').innerText = "我的歌单";
-        renderMyPlaylists(currentListData);
+        // A detail view can be closed while the account snapshot is being
+        // refreshed.  Prefer the same-account cached snapshot instead of
+        // rendering a transient null value as an empty playlist collection.
+        renderMyPlaylists(getActiveListData());
     }
 
     if (tabId === 'library-integration') {
@@ -8834,7 +8837,14 @@ function setActiveListData(listData) {
 }
 
 function getActiveListData() {
-    return currentListData || window.currentListData || window.myPersonalListData || null;
+    const data = currentListData || window.currentListData || window.myPersonalListData || null;
+    const requestedUser = normalizeSyncUsername(localStorage.getItem('lx_sync_user'));
+    const dataUser = normalizeSyncUsername(data?.username);
+    // Never use a cached snapshot belonging to another account while an
+    // account switch is in flight.  A missing owner is retained for legacy
+    // snapshots; the next validated server response will stamp the owner.
+    if (requestedUser && dataUser && requestedUser !== dataUser) return null;
+    return data;
 }
 
 //同步设置
@@ -9502,12 +9512,13 @@ let myPlaylistFilterText = '';
 
 function filterMyPlaylists(value) {
     myPlaylistFilterText = String(value || '').trim().toLowerCase();
-    renderMyPlaylists(window.currentListData || currentListData);
+    renderMyPlaylists(getActiveListData());
 }
 
 // 与网络“歌单”页面分开呈现用户自己的歌单。卡片采用同一套结构，
 // 点击后继续复用上面的 songlist-detail-view，保证列表详情 UI 完全一致。
 function renderMyPlaylists(data) {
+    data = data || getActiveListData();
     const grid = document.getElementById('my-playlists-grid');
     const countEl = document.getElementById('my-playlists-count');
     const allLists = Array.isArray(data?.userList) ? data.userList : [];
@@ -9547,8 +9558,9 @@ window.renderMyPlaylists = renderMyPlaylists;
 window.filterMyPlaylists = filterMyPlaylists;
 
 function handleMyPlaylistCardClick(listId) {
-    const list = Array.isArray(currentListData?.userList)
-        ? currentListData.userList.find(item => String(item?.id) === String(listId))
+    const activeData = getActiveListData();
+    const list = Array.isArray(activeData?.userList)
+        ? activeData.userList.find(item => String(item?.id) === String(listId))
         : null;
     if (!list) return;
     window._myPlaylistView = true;
@@ -9712,7 +9724,8 @@ async function handleCreateList() {
 const songloftSyncTimers = new Map();
 
 async function syncSongloftPlaylist(listId, silent = false) {
-    const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
+    const activeData = getActiveListData();
+    const list = activeData?.userList?.find(item => String(item.id) === String(listId));
     if (!list || !isUserLoggedIn()) return null;
     const tokenHeaders = getUserAuthHeaders();
     if (!tokenHeaders['x-user-token']) return null;
@@ -9745,7 +9758,8 @@ function scheduleSongloftPlaylistSync(listId) {
 
 async function handleSongloftSyncList(listId, event) {
     if (event) event.stopPropagation();
-    const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
+    const activeData = getActiveListData();
+    const list = activeData?.userList?.find(item => String(item.id) === String(listId));
     if (!list) return;
     const confirmed = typeof showSelect !== 'function' || await showSelect('同步到 Songloft', `将“${list.name || '歌单'}”镜像同步到 Songloft（会同步新增、删除、重排和重命名；无法可靠匹配时会取消覆盖）。继续吗？`);
     if (!confirmed) return;

@@ -777,7 +777,7 @@ window.SongListManager = (function () {
             const next = currentState.page + delta;
             if (next < 1) return;
             loadList(next);
-            document.getElementById('songlist-grid').scrollTo({ top: 0, behavior: 'smooth' });
+            document.getElementById('view-songlist')?.scrollTo({ top: 0, behavior: 'smooth' });
         },
         openDetail: function (id, source) {
             if (window.ListSearch) window.ListSearch.resetState();

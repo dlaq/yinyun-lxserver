@@ -22,6 +22,15 @@ test('player and admin opt into mobile safe-area layout', () => {
   assert.match(playerCss, /\.hot-search-container\s*\{[\s\S]*?padding-top:\s*\.5rem\s*!important/)
   assert.match(playerHtml, /id="songlist-detail-view"[\s\S]*?overflow-y-auto custom-scrollbar/)
   assert.match(playerHtml, /id="sl-detail-list"\s+class="p-2 space-y-1 pb-20"/)
+  for (const id of ['view-songlist', 'view-my-playlists', 'view-leaderboard', 'view-localmusic']) {
+    assert.match(playerHtml, new RegExp(`id="${id}"[\\s\\S]*?yinyun-flow-view`))
+  }
+  for (const id of ['songlist-grid', 'my-playlists-grid', 'lb-songs-list', 'lm-list-container']) {
+    assert.match(playerHtml, new RegExp(`id="${id}"\\s+class="yinyun-flow-list`))
+  }
+  assert.match(playerCss, /\.yinyun-flow-view\s*\{[\s\S]*?overflow-y:\s*auto\s*!important/)
+  assert.match(playerCss, /\.yinyun-flow-list\s*\{[\s\S]*?overflow:\s*visible\s*!important/)
+  assert.match(playerCss, /#view-leaderboard > \.yinyun-flow-layout\s*\{[\s\S]*?flex:\s*none\s*!important/)
 
   const adminCss = read('public/style.css')
   assert.match(adminCss, /height:\s*100dvh/)
