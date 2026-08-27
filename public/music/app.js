@@ -1268,19 +1268,6 @@ function switchTab(tabId) {
         return;
     }
 
-    // A detail view is mounted into the tab that opened it. Switching tabs
-    // while it is still mounted used to leave the detail overlay visible in
-    // the old DOM tree; a delayed playback-resume callback could then switch
-    // the new tab back to `search`. Close it synchronously before changing
-    // the active view, except when the detail itself is returning to this tab
-    // during its normal close animation.
-    const detailManager = window.SongListManager;
-    if (detailManager?.isDetailOpen?.()
-        && detailManager?.getReturnTab?.() !== tabId) {
-        detailManager.closeDetailForTabSwitch?.();
-    }
-    if (tabId !== 'search') delete window._pendingResumeListId;
-
     document.querySelectorAll('[id^="view-"]').forEach(el => {
         el.classList.add('hidden');
         el.classList.remove('opacity-100');
@@ -1291,13 +1278,10 @@ function switchTab(tabId) {
     if (!activeView) return;
 
     activeView.classList.remove('hidden');
-    // Make the view visible immediately. The previous delayed opacity change
-    // could leave a large blank panel on Safari/WebKit when the main-thread
-    // timer was postponed by image/layout work.
-    activeView.classList.remove('opacity-0');
-    activeView.classList.add('opacity-100');
-    // Keep the state refresh asynchronous so tab changes do not block paint.
+    // small delay to allow display block to apply before opacity transition
     setTimeout(() => {
+        activeView.classList.remove('opacity-0');
+        activeView.classList.add('opacity-100');
         // [新增] 切换 Tab 时顺便检查并更新一次用户状态
         if (typeof updateUserUI === 'function') updateUserUI();
     }, 10);
@@ -1365,18 +1349,12 @@ function switchTab(tabId) {
 
     if (tabId === 'my-playlists') {
         document.getElementById('page-title').innerText = "我的歌单";
-        // A detail view can be closed while the account snapshot is being
-        // refreshed.  Prefer the same-account cached snapshot instead of
-        // rendering a transient null value as an empty playlist collection.
-        renderMyPlaylists(getActiveListData());
+        renderMyPlaylists(currentListData);
     }
 
     if (tabId === 'library-integration') {
         document.getElementById('page-title').innerText = '曲库联动';
-        const activation = window.LibraryIntegration?.activate?.();
-        if (activation && typeof activation.catch === 'function') {
-            activation.catch(error => console.warn('[LibraryIntegration] 页面激活失败:', error));
-        }
+        window.LibraryIntegration?.activate?.();
         window.LibraryIntegration?.setActive?.(true);
     } else {
         window.LibraryIntegration?.setActive?.(false);
@@ -8856,32 +8834,7 @@ function setActiveListData(listData) {
 }
 
 function getActiveListData() {
-    const data = currentListData || window.currentListData || window.myPersonalListData || null;
-    const requestedUser = normalizeSyncUsername(localStorage.getItem('lx_sync_user'));
-    const dataUser = normalizeSyncUsername(data?.username);
-    // Never use a cached snapshot belonging to another account while an
-    // account switch is in flight.  A missing owner is retained for legacy
-    // snapshots; the next validated server response will stamp the owner.
-    if (requestedUser && dataUser && requestedUser !== dataUser) return null;
-    return data;
-}
-
-// Detail navigation is a separate SPA state.  Background account refreshes
-// may finish after the user has opened or closed a local playlist; they must
-// not resurrect the old search/list view underneath the playlist grid.
-function setSongListDetailContext(context = {}) {
-    const open = Boolean(context?.open);
-    window.songListDetailActive = open;
-    if (!open) {
-        currentSearchScope = 'network';
-        window.currentSearchScope = 'network';
-        window.currentViewingListId = null;
-    }
-}
-window.setSongListDetailContext = setSongListDetailContext;
-
-function isSongListDetailActive() {
-    return Boolean(window.songListDetailActive || window.SongListManager?.isDetailOpen?.());
+    return currentListData || window.currentListData || window.myPersonalListData || null;
 }
 
 //同步设置
@@ -9527,12 +9480,8 @@ function renderMyLists(data) {
         const listId = window._pendingResumeListId;
         delete window._pendingResumeListId;
         console.log('[Resume] 正在同步本地播放列表上下文:', listId);
-        // 只在“搜索/本地列表”视图仍然是当前页面时恢复。否则一个旧的
-        // 播放状态回调会把用户刚打开的“我的歌单”或“曲库联动”切回
-        // search，表现为详情行和歌单卡片叠在一起、点击卡片只闪一下。
-        const searchView = document.getElementById('view-search');
-        const searchViewActive = searchView && !searchView.classList.contains('hidden');
-        if (!isSongListDetailActive() && searchViewActive) handleListClick(listId);
+        // 调用 handleListClick 以加载真实的列表数据并应用高亮
+        handleListClick(listId);
     }
 }
 
@@ -9553,13 +9502,12 @@ let myPlaylistFilterText = '';
 
 function filterMyPlaylists(value) {
     myPlaylistFilterText = String(value || '').trim().toLowerCase();
-    renderMyPlaylists(getActiveListData());
+    renderMyPlaylists(window.currentListData || currentListData);
 }
 
 // 与网络“歌单”页面分开呈现用户自己的歌单。卡片采用同一套结构，
 // 点击后继续复用上面的 songlist-detail-view，保证列表详情 UI 完全一致。
 function renderMyPlaylists(data) {
-    data = data || getActiveListData();
     const grid = document.getElementById('my-playlists-grid');
     const countEl = document.getElementById('my-playlists-count');
     const allLists = Array.isArray(data?.userList) ? data.userList : [];
@@ -9599,9 +9547,8 @@ window.renderMyPlaylists = renderMyPlaylists;
 window.filterMyPlaylists = filterMyPlaylists;
 
 function handleMyPlaylistCardClick(listId) {
-    const activeData = getActiveListData();
-    const list = Array.isArray(activeData?.userList)
-        ? activeData.userList.find(item => String(item?.id) === String(listId))
+    const list = Array.isArray(currentListData?.userList)
+        ? currentListData.userList.find(item => String(item?.id) === String(listId))
         : null;
     if (!list) return;
     window._myPlaylistView = true;
@@ -9613,7 +9560,6 @@ function handleMyPlaylistCardClick(listId) {
 }
 
 function handleListClick(listId, skipAutoUpdate = false) {
-    if (isSongListDetailActive()) return;
     exitListSecondaryModes();
 
     if (!currentListData) return;
@@ -9661,8 +9607,6 @@ function handleListClick(listId, skipAutoUpdate = false) {
     document.querySelectorAll('[id^="view-"]').forEach(el => el.classList.add('hidden'));
     const activeView = document.getElementById('view-search');
     activeView.classList.remove('hidden');
-    activeView.classList.remove('opacity-0');
-    activeView.classList.add('opacity-100');
 
     // [New] 为歌单搜索视图重新初始化 ListSearch
     initGlobalListSearch();
@@ -9768,8 +9712,7 @@ async function handleCreateList() {
 const songloftSyncTimers = new Map();
 
 async function syncSongloftPlaylist(listId, silent = false) {
-    const activeData = getActiveListData();
-    const list = activeData?.userList?.find(item => String(item.id) === String(listId));
+    const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
     if (!list || !isUserLoggedIn()) return null;
     const tokenHeaders = getUserAuthHeaders();
     if (!tokenHeaders['x-user-token']) return null;
@@ -9802,8 +9745,7 @@ function scheduleSongloftPlaylistSync(listId) {
 
 async function handleSongloftSyncList(listId, event) {
     if (event) event.stopPropagation();
-    const activeData = getActiveListData();
-    const list = activeData?.userList?.find(item => String(item.id) === String(listId));
+    const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
     if (!list) return;
     const confirmed = typeof showSelect !== 'function' || await showSelect('同步到 Songloft', `将“${list.name || '歌单'}”镜像同步到 Songloft（会同步新增、删除、重排和重命名；无法可靠匹配时会取消覆盖）。继续吗？`);
     if (!confirmed) return;
@@ -9849,7 +9791,7 @@ async function handleRenameList(listId, event) {
         if (typeof renderPlaylistAddGrid === 'function' && !document.getElementById('playlist-add-modal')?.classList.contains('hidden')) {
             renderPlaylistAddGrid();
         }
-        if (!isSongListDetailActive() && window.currentSearchScope === 'local_list' && window.currentViewingListId === listId) {
+        if (window.currentSearchScope === 'local_list' && window.currentViewingListId === listId) {
             handleListClick(listId, true);
         }
         showSuccess('歌单名称已更新');
@@ -10375,7 +10317,7 @@ async function handleRefreshList(listId, event, silent = false) {
         renderMyLists(currentListData);
 
         // 如果当前正处于该列表视图，刷新结果列表显示
-        if (!isSongListDetailActive() && window.currentViewingListId === listId) {
+        if (window.currentViewingListId === listId) {
             handleListClick(listId, true); // Skip auto-update to avoid loop
         }
 
@@ -10552,7 +10494,7 @@ async function refreshUserListData() {
         }
 
         // [New] If currently viewing a local list, refresh its contents in main view
-        if (!isSongListDetailActive() && window.currentSearchScope === 'local_list' && window.currentViewingListId) {
+        if (window.currentSearchScope === 'local_list' && window.currentViewingListId) {
             console.log('[Sync] Auto-refreshing current list view:', window.currentViewingListId);
             handleListClick(window.currentViewingListId, true); // true to skip background auto-update
         }
@@ -11771,7 +11713,7 @@ async function handleTogglePlaylist(listId, btnElement) {
         // 3. Immediate UI Refresh
         setActiveListData(activeListData);
         renderMyLists(activeListData);
-        if (!isSongListDetailActive() && window.currentSearchScope === 'local_list' && window.currentViewingListId) {
+        if (window.currentSearchScope === 'local_list' && window.currentViewingListId) {
             handleListClick(window.currentViewingListId, true);
         }
 

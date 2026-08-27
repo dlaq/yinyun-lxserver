@@ -460,7 +460,7 @@
 
                 <!-- Song List View -->
                 <div id="view-songlist"
-                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 yinyun-flow-view">
+                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 overflow-hidden">
 
                     <!-- Song List Toolbar -->
                     <div class="flex flex-col md:flex-row gap-3 mb-4 md:mb-6">
@@ -528,7 +528,7 @@
                     </div>
 
                     <!-- Song List Grid -->
-                    <div id="songlist-grid" class="yinyun-flow-list px-1 pb-6">
+                    <div id="songlist-grid" class="flex-1 overflow-y-auto px-1 pb-6 custom-scrollbar">
                         <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 md:gap-6"
                             id="songlist-container">
                             <!-- Cards will be injected here -->
@@ -737,7 +737,7 @@
 
                 <!-- Leaderboard View -->
                 <div id="view-leaderboard"
-                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 yinyun-flow-view">
+                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 overflow-hidden">
 
                     <!-- 顶部工具栏：增强手机端适配 -->
                     <div class="flex-shrink-0 flex items-center gap-2 md:gap-4 mb-4 md:mb-6">
@@ -775,7 +775,7 @@
 
                     <!-- 主内容区：增加响应式侧边栏遮罩容器 -->
                     <div
-                        class="flex-1 flex relative t-bg-panel rounded-2xl shadow-sm border t-border-main yinyun-flow-layout">
+                        class="flex-1 flex overflow-hidden relative t-bg-panel rounded-2xl shadow-sm border t-border-main">
 
                         <!-- 左侧：榜单列表（手机端默认隐藏，通过 toggleLbSidebar 切换） -->
                         <div id="lb-sidebar"
@@ -807,7 +807,7 @@
                         </div>
 
                         <!-- 右侧：歌曲列表区 -->
-                        <div id="lb-songs-container" class="flex-1 flex flex-col yinyun-flow-layout">
+                        <div id="lb-songs-container" class="flex-1 flex flex-col overflow-hidden">
                             <!-- ... (批量操作和搜索过滤维持原样) ... -->
                             <!-- 此处为了代码简洁，保留原有逻辑，仅外层容器调整 -->
                             <!-- 批量操作工具栏 -->
@@ -919,7 +919,7 @@
                             </div>
 
                             <!-- 歌曲列表 -->
-                            <div id="lb-songs-list" class="yinyun-flow-list p-2 space-y-1 pb-20">
+                            <div id="lb-songs-list" class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar pb-20">
                                 <!-- 歌曲行由 JS 注入 -->
                                 <div class="flex flex-col items-center justify-center py-20 t-text-muted">
                                     <i class="fas fa-chart-bar text-5xl mb-4 opacity-20"></i>
@@ -948,7 +948,7 @@
 
                 <!-- My Playlists View: the user's imported/created playlists, separate from network playlists. -->
                 <div id="view-my-playlists"
-                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 yinyun-flow-view">
+                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 overflow-hidden">
                     <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
                         <div>
                             <h2 class="text-2xl font-bold t-text-main">我的歌单</h2>
@@ -968,7 +968,7 @@
                         </div>
                     </div>
                     <div id="my-playlists-grid"
-                        class="yinyun-flow-list px-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 md:gap-6 content-start">
+                        class="flex-1 overflow-y-auto px-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 md:gap-6 content-start custom-scrollbar">
                         <div class="col-span-full py-20 text-center t-text-muted">请先在设置中登录音云账号</div>
                     </div>
                 </div>
@@ -1067,7 +1067,7 @@
 
                 <!-- Local Music View -->
                 <div id="view-localmusic"
-                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 yinyun-flow-view">
+                    class="absolute inset-0 flex flex-col px-2 pt-2 md:px-6 md:pt-6 pb-44 md:pb-32 hidden opacity-0 transition-all duration-300 overflow-hidden">
 
                     <!-- Settings and Filters Area -->
                     <div
@@ -1423,7 +1423,7 @@
 
                     <!-- List Area -->
                     <div id="lm-list-container"
-                        class="yinyun-flow-list p-2 space-y-1 pb-20 rounded-b-xl border border-t-0 t-border-main t-bg-panel">
+                        class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar pb-20 rounded-b-xl border border-t-0 t-border-main t-bg-panel">
                         <div class="text-center py-20 text-gray-500 animate-fade-in">
                             <i class="fas fa-circle-notch fa-spin text-4xl mb-4 text-emerald-500"></i>
                             <p class="font-bold tracking-wider">正在加载本地音乐...</p>

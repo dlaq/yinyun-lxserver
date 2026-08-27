@@ -33,12 +33,8 @@ window.SongListManager = (function () {
         isLocal: false,
         playlist: null,
         historyPushed: false,
-        historyBaseState: null,
-        historyBaseUrl: '',
     };
     let detailCloseTimer = null;
-    let detailGeneration = 0;
-    let detailClosing = false;
 
     function pushDetailHistory(detailType, listId) {
         const current = window.history.state;
@@ -47,17 +43,6 @@ window.SongListManager = (function () {
             && String(current.listId || '') === String(listId || '')) {
             detailState.historyPushed = true;
             return;
-        }
-
-        // Keep a copy of the entry that was active before the detail view was
-        // opened.  Closing the in-app back button restores this entry with
-        // replaceState instead of starting an asynchronous history traversal;
-        // Safari can deliver that traversal after a second playlist was
-        // already opened, which used to leave the UI and history out of sync.
-        const replacingDetail = current?.page === 'songlist-detail';
-        if (!replacingDetail) {
-            detailState.historyBaseState = current && typeof current === 'object' ? { ...current } : current ?? null;
-            detailState.historyBaseUrl = window.location.href;
         }
         window.history.pushState({
             ...(current && typeof current === 'object' ? current : {}),
@@ -68,58 +53,12 @@ window.SongListManager = (function () {
         detailState.historyPushed = true;
     }
 
-    function clearDetailHistoryMarker() {
-        detailState.historyPushed = false;
-        detailState.historyBaseState = null;
-        detailState.historyBaseUrl = '';
-    }
-
-    function restoreDetailHistory() {
-        if (window.history.state?.page === 'songlist-detail') {
-            try {
-                window.history.replaceState(
-                    detailState.historyBaseState ?? null,
-                    '',
-                    detailState.historyBaseUrl || window.location.href,
-                );
-            } catch (error) {
-                // A history restoration failure must not prevent the detail
-                // view from closing; the next navigation still has a clean
-                // in-memory state and can recover normally.
-                console.warn('[SongList] 恢复详情历史状态失败:', error);
-            }
-        }
-        clearDetailHistoryMarker();
-    }
-
     function ensureDetailHost(parentId) {
         const detailView = document.getElementById('songlist-detail-view');
         const parent = document.getElementById(parentId);
         if (detailView && parent && detailView.parentElement !== parent) parent.appendChild(detailView);
         detailState.hostParentId = parentId;
         return detailView;
-    }
-
-    function isDetailVisible() {
-        const detailView = document.getElementById('songlist-detail-view');
-        return Boolean(detailView && !detailView.classList.contains('hidden'));
-    }
-
-    function resetDetailCloseState() {
-        if (detailCloseTimer) {
-            clearTimeout(detailCloseTimer);
-            detailCloseTimer = null;
-        }
-        detailClosing = false;
-    }
-
-    function notifyDetailContext(open, detailType, listId) {
-        if (typeof window.setSongListDetailContext !== 'function') return;
-        window.setSongListDetailContext({
-            open: Boolean(open),
-            type: detailType || '',
-            listId: listId == null ? '' : String(listId),
-        });
     }
 
     function escapeHtml(value) {
@@ -342,13 +281,6 @@ window.SongListManager = (function () {
     }
 
     async function loadDetail(id, source, page = 1) {
-        if (page === 1) {
-            resetDetailCloseState();
-            detailGeneration += 1;
-            detailClosing = false;
-            notifyDetailContext(true, 'network', id);
-        }
-        const requestGeneration = detailGeneration;
         detailState.id = id;
         detailState.source = source;
         detailState.returnTab = 'songlist';
@@ -361,8 +293,6 @@ window.SongListManager = (function () {
 
         if (page === 1) {
             detailView.classList.remove('hidden');
-            detailView.classList.remove('pointer-events-none');
-            detailView.style.pointerEvents = '';
             document.getElementById('sl-detail-collect')?.classList.remove('hidden');
             setTimeout(() => detailView.classList.remove('translate-x-full'), 10);
             listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
@@ -401,13 +331,6 @@ window.SongListManager = (function () {
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
-
-            // A slow response from a detail that was already closed (or from a
-            // previous playlist) must never repopulate the current detail DOM.
-            if (requestGeneration !== detailGeneration
-                || String(detailState.id) !== String(id)
-                || detailState.source !== source
-                || detailState.isLocal) return;
 
             detailState.info = data.info;
 
@@ -448,7 +371,7 @@ window.SongListManager = (function () {
         }
     }
 
-    async function hydrateLocalDetailArtwork(list, listId, requestGeneration = detailGeneration) {
+    async function hydrateLocalDetailArtwork(list, listId) {
         if (!listId || !window.getUserAuthHeaders) return;
         try {
             const response = await fetch(`/api/v1/playlists/${encodeURIComponent(listId)}`, {
@@ -482,11 +405,7 @@ window.SongListManager = (function () {
                 };
             });
 
-            if (requestGeneration !== detailGeneration
-                || detailState.id !== String(listId)
-                || !detailState.isLocal
-                || detailClosing
-                || !isDetailVisible()) return;
+            if (detailState.id !== String(listId) || !detailState.isLocal) return;
             detailState.list = refreshedSongs;
             detailState.total = refreshedSongs.length;
             detailState.info.img = payload?.data?.artworkUrl || payload.artworkUrl || playlistArtwork(list, refreshedSongs);
@@ -498,10 +417,10 @@ window.SongListManager = (function () {
 
     function openLocalDetail(list) {
         if (!list) return;
-        resetDetailCloseState();
-        // A manual playlist open supersedes any automatic playback-resume
-        // navigation that may still be queued from the previous session.
-        delete window._pendingResumeListId;
+        if (detailCloseTimer) {
+            clearTimeout(detailCloseTimer);
+            detailCloseTimer = null;
+        }
         const songs = Array.isArray(list.list) ? list.list.map((song, index) => ({
             ...song,
             id: song.id || song.songmid || song.songId || song.hash || `local_${list.id}_${index}`,
@@ -518,8 +437,6 @@ window.SongListManager = (function () {
         detailState.page = 1;
         detailState.total = songs.length;
         detailState.list = songs;
-        detailGeneration += 1;
-        detailClosing = false;
         detailState.info = {
             name: list.name || '未命名歌单',
             author: '音云 · 我的歌单',
@@ -527,7 +444,6 @@ window.SongListManager = (function () {
             img: playlistArtwork(list, songs),
             desc: list.sourceListId ? '网络歌单导入的本地歌单，可继续在曲库联动中补齐。' : '音云用户歌单。',
         };
-        notifyDetailContext(true, 'local', detailState.id);
         // A local playlist detail is a real navigation state.  This makes the
         // iOS swipe-back/Android system back gesture close the detail view in
         // place instead of leaving the SPA (which previously made the account
@@ -539,8 +455,6 @@ window.SongListManager = (function () {
         const listContainer = document.getElementById('sl-detail-list');
         if (!detailView || !listContainer) return;
         detailView.classList.remove('hidden');
-        detailView.classList.remove('pointer-events-none');
-        detailView.style.pointerEvents = '';
         listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
         const collect = document.getElementById('sl-detail-collect');
         if (collect) collect.classList.add('hidden');
@@ -550,7 +464,7 @@ window.SongListManager = (function () {
         requestAnimationFrame(() => detailView.classList.remove('translate-x-full'));
         // Render immediately from the local snapshot, then replace stale local
         // cover URLs with fresh signed artwork without blocking navigation.
-        void hydrateLocalDetailArtwork(list, detailState.id, detailGeneration);
+        void hydrateLocalDetailArtwork(list, detailState.id);
     }
 
     // --- Rendering ---
@@ -863,7 +777,7 @@ window.SongListManager = (function () {
             const next = currentState.page + delta;
             if (next < 1) return;
             loadList(next);
-            document.getElementById('view-songlist')?.scrollTo({ top: 0, behavior: 'smooth' });
+            document.getElementById('songlist-grid').scrollTo({ top: 0, behavior: 'smooth' });
         },
         openDetail: function (id, source) {
             if (window.ListSearch) window.ListSearch.resetState();
@@ -900,62 +814,25 @@ window.SongListManager = (function () {
             const detailView = document.getElementById('songlist-detail-view');
             return Boolean(detailView && !detailView.classList.contains('hidden'));
         },
-        getReturnTab: function () {
-            return detailState.returnTab || (detailState.isLocal ? 'my-playlists' : 'songlist');
-        },
-        closeDetailForTabSwitch: function () {
-            this.closeCoverPicker();
-            delete window._pendingResumeListId;
-            restoreDetailHistory();
-            const detailView = document.getElementById('songlist-detail-view');
-            if (!detailView) {
-                notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
-                return;
-            }
-            if (detailCloseTimer) {
-                clearTimeout(detailCloseTimer);
-                detailCloseTimer = null;
-            }
-            detailClosing = false;
-            detailGeneration += 1;
-            detailView.classList.add('hidden', 'pointer-events-none');
-            detailView.classList.remove('translate-x-full');
-            detailView.style.pointerEvents = 'none';
-            ensureDetailHost(detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist'));
-            notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
-        },
         closeDetail: function (fromPopState = false) {
             this.closeCoverPicker();
-            if (detailClosing) return;
-            const detailView = document.getElementById('songlist-detail-view');
-            if (!detailView) {
-                restoreDetailHistory();
-                notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
+            if (!fromPopState
+                && detailState.historyPushed
+                && window.history.state?.page === 'songlist-detail') {
+                window.history.back();
                 return;
             }
-            // Physical/browser back has already moved to the base entry.  The
-            // in-app button is still on the detail entry; restore it now and
-            // never call history.back() from inside the SPA.
-            if (!fromPopState) restoreDetailHistory();
-            else clearDetailHistoryMarker();
-            delete window._pendingResumeListId;
-            detailClosing = true;
-            detailGeneration += 1;
-            detailView.classList.add('translate-x-full', 'pointer-events-none');
-            detailView.style.pointerEvents = 'none';
+            const detailView = document.getElementById('songlist-detail-view');
+            if (!detailView) return;
+            detailView.classList.add('translate-x-full');
             const returnTab = detailState.returnTab || 'songlist';
             const hostParentId = detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist');
-            // Invalidate delayed detail/account refreshes before the closing
-            // animation starts.  They must not re-open the old list view.
-            notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
+            detailState.historyPushed = false;
             if (detailCloseTimer) clearTimeout(detailCloseTimer);
             detailCloseTimer = setTimeout(() => {
                 detailView.classList.add('hidden');
-                detailView.classList.remove('translate-x-full');
-                detailView.style.pointerEvents = 'none';
                 ensureDetailHost(hostParentId);
                 switchTab(returnTab);
-                detailClosing = false;
                 detailCloseTimer = null;
             }, 300);
         },

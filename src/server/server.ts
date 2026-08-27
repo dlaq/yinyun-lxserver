@@ -821,7 +821,6 @@ const getPlaylistSyncStore = (username: string) => {
   }
   return store
 }
-const getPlaylistSyncRecords = () => global.lx.config.users.flatMap(user => getPlaylistSyncStore(user.name).list())
 const getPlaylistImportStore = (username: string) => {
   const key = getUserDirname(username)
   let store = playlistImportStores.get(key)
@@ -855,7 +854,6 @@ const handleApiV1 = createApiV1Handler({
   getSongloftClient: () => songloftClient,
   getSongloftSubsonicClient: () => songloftSubsonicClient,
   getPlaylistSyncStore,
-  getPlaylistSyncRecords,
   getPlaylistImportStore,
   getLegacyUser: verifyUserAuth,
 })
@@ -5906,7 +5904,6 @@ export const startServer = async (port: number, ip: string) => {
         getSongloftClient: () => songloftClient,
         getSongloftSubsonicClient: () => songloftSubsonicClient,
         getPlaylistSyncStore,
-        getPlaylistSyncRecords,
         getPlaylistImportStore,
         getLegacyUser: verifyUserAuth,
       }, task)

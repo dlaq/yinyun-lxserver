@@ -840,49 +840,6 @@ aside {
     color: var(--text-main);
 }
 
-/* Long-list views use one page-level scroller.  The former arrangement put a
- * second flex scroller inside each view, which left the title/tool bar fixed
- * and reduced the usable song area to a small box on phones.  Keeping the
- * list in normal flow lets the title, filters and pagination travel together
- * while preserving the bottom player reserve. */
-.yinyun-flow-view {
-    min-height: 0;
-    overflow-y: auto !important;
-    overflow-x: hidden !important;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-y: contain;
-}
-
-.yinyun-flow-list {
-    flex: none !important;
-    min-height: 0;
-    overflow: visible !important;
-}
-
-.yinyun-flow-layout {
-    min-width: 0;
-    overflow: visible !important;
-}
-
-#view-leaderboard > .yinyun-flow-layout {
-    flex: none !important;
-}
-
-#lb-songs-container.yinyun-flow-layout {
-    flex: 1 1 auto !important;
-}
-
-#lb-songs-list.yinyun-flow-list {
-    width: 100%;
-}
-
-@media (max-width: 1024px) {
-    #view-leaderboard > .yinyun-flow-layout,
-    #lb-songs-container.yinyun-flow-layout {
-        width: 100%;
-    }
-}
-
 /* ── 多选筛选标签组特有样式 ── */
 .lm-filter-tags {
     display: flex;

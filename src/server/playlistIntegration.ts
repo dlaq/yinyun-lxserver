@@ -433,25 +433,6 @@ export type PlaylistSyncRecord = {
 }
 
 /**
- * A Songloft playlist is a single mutable remote resource.  A stale or
- * duplicated ledger entry must not let one yinyun playlist overwrite another
- * playlist's remote target.  Keep the check side-effect free so it can be
- * applied before any Songloft rename/add/remove request.
- */
-export const findPlaylistSyncTargetConflict = (
-  records: PlaylistSyncRecord[],
-  syncId: string,
-  songloftPlaylistId: number | string,
-) => {
-  const targetId = Number(songloftPlaylistId)
-  if (!Number.isFinite(targetId) || targetId <= 0) return undefined
-  return records.find(record => (
-    record.syncId !== syncId
-    && Number(record.songloftPlaylistId) === targetId
-  ))
-}
-
-/**
  * A persisted snapshot of an imported third-party playlist.  The snapshot is
  * deliberately kept on the yinyun side: it is only a source-of-truth ledger
  * for matching and download decisions, never a Songloft/MusicHub download
@@ -559,17 +540,6 @@ export class PlaylistSyncStore {
   }
 
   get(syncId: string) { return this.payload.records.find(record => record.syncId === syncId) }
-
-  /** Return detached records for diagnostics and cross-account conflict checks. */
-  list() {
-    if (!this.loaded) this.load()
-    return this.payload.records.map(record => ({ ...record, lastCommonIds: [...record.lastCommonIds] }))
-  }
-
-  findBySongloftPlaylistId(songloftPlaylistId: number | string, excludeSyncId = '') {
-    if (!this.loaded) this.load()
-    return findPlaylistSyncTargetConflict(this.payload.records, excludeSyncId, songloftPlaylistId)
-  }
 
   upsert(record: PlaylistSyncRecord) {
     if (!this.loaded) this.load()

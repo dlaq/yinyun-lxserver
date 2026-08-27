@@ -14,7 +14,6 @@ import {
   playlistSyncConflicts,
   playlistReplacementSafetyIssue,
   preferExistingPlaylistCandidate,
-  findPlaylistSyncTargetConflict,
   toIntegrationTrack,
 } from '../src/server/playlistIntegration'
 
@@ -122,23 +121,6 @@ test('playlist replacement refuses an empty authoritative source by default', ()
   assert.equal(playlistReplacementSafetyIssue(3, [1, 2], [2]), null)
   assert.equal(playlistReplacementSafetyIssue(0, [1, 2], [], true), null)
   assert.equal(playlistReplacementSafetyIssue(0, [], []), null)
-})
-
-test('playlist sync rejects a remote target already mapped to another yinyun playlist', () => {
-  const records = [
-    {
-      syncId: 'dlaq:playlist-a', username: 'dlaq', name: '歌单 A', yinyunPlaylistId: 'playlist-a',
-      songloftPlaylistId: 229, enabled: true, lastCommonIds: ['song-1'], lastYinyunHash: 'a', lastSongloftHash: 'b', updatedAt: '',
-    },
-    {
-      syncId: 'other:playlist-b', username: 'other', name: '歌单 B', yinyunPlaylistId: 'playlist-b',
-      songloftPlaylistId: 204, enabled: true, lastCommonIds: [], lastYinyunHash: 'c', lastSongloftHash: 'd', updatedAt: '',
-    },
-  ]
-  assert.equal(findPlaylistSyncTargetConflict(records, 'dlaq:playlist-a', 229), undefined)
-  assert.equal(findPlaylistSyncTargetConflict(records, 'dlaq:playlist-a', 204)?.syncId, 'other:playlist-b')
-  assert.equal(findPlaylistSyncTargetConflict(records, 'other:playlist-b', '204'), undefined)
-  assert.equal(findPlaylistSyncTargetConflict(records, 'dlaq:playlist-a', 0), undefined)
 })
 
 test('playlist sync ledger survives a reload and writes atomically', async () => {
