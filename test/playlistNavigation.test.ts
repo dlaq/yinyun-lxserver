@@ -12,20 +12,22 @@ test('local playlist detail owns a history entry and restores its original host 
   assert.match(manager, /page:\s*'songlist-detail'/)
   assert.match(manager, /isDetailOpen:\s*function \(\)/)
   assert.match(manager, /closeDetail:\s*function \(fromPopState = false\)/)
-  assert.match(manager, /window\.history\.back\(\)/)
+  assert.match(manager, /historyBaseState/)
+  assert.match(manager, /window\.history\.replaceState\(/)
+  assert.match(manager, /restoreDetailHistory\(\)/)
+  assert.doesNotMatch(manager, /window\.history\.back\(\)/)
   assert.match(manager, /const hostParentId = detailState\.hostParentId \|\| \(detailState\.isLocal \? 'view-my-playlists' : 'view-songlist'\)/)
   assert.doesNotMatch(manager, /ensureDetailHost\('view-songlist'\);\s*switchTab\(returnTab\)/)
 })
 
-test('local playlist detail releases the closing overlay and ignores a stale back event', () => {
+test('local playlist detail releases the closing overlay without an asynchronous back race', () => {
   const manager = read('public/music/js/songlist_manager.js')
 
-  assert.match(manager, /let pendingDetailBack = false/)
-  assert.match(manager, /let suppressedDetailPopstates = 0/)
-  assert.match(manager, /pendingDetailBack = false[\s\S]*suppressedDetailPopstates \+= 1/)
   assert.match(manager, /classList\.add\('translate-x-full', 'pointer-events-none'\)/)
   assert.match(manager, /style\.pointerEvents = 'none'/)
-  assert.match(manager, /fromPopState && suppressedDetailPopstates > 0/)
+  assert.match(manager, /closeDetailForTabSwitch:\s*function \(\)/)
+  assert.match(manager, /delete window\._pendingResumeListId/)
+  assert.match(manager, /notifyDetailContext\(false, detailState\.isLocal \? 'local' : 'network', detailState\.id\)/)
 })
 
 test('local playlist detail isolates background refreshes from the list-search view', () => {
@@ -88,6 +90,23 @@ test('returning from a local playlist renders the validated cached account snaps
   assert.match(app, /function getActiveListData\(\)/)
   assert.match(app, /requestedUser && dataUser && requestedUser !== dataUser/)
   assert.match(app, /const activeData = getActiveListData\(\)/)
+})
+
+test('stale playback resume only restores a list while the search view is active', () => {
+  const app = read('public/music/app.js')
+
+  assert.match(app, /const searchView = document\.getElementById\('view-search'\)/)
+  assert.match(app, /const searchViewActive = searchView && !searchView\.classList\.contains\('hidden'\)/)
+  assert.match(app, /!isSongListDetailActive\(\) && searchViewActive\) handleListClick\(listId\)/)
+})
+
+test('switching away from an open detail closes it before changing the visible tab', () => {
+  const app = read('public/music/app.js')
+
+  assert.match(app, /const detailManager = window\.SongListManager/)
+  assert.match(app, /detailManager\?\.isDetailOpen\?\.\(\)/)
+  assert.match(app, /detailManager\.closeDetailForTabSwitch\?\.\(\)/)
+  assert.match(app, /activeView\.classList\.remove\('opacity-0'\)/)
 })
 
 test('Songloft synchronization protects read-only and duplicated remote targets', () => {

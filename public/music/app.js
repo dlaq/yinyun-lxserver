@@ -1268,6 +1268,19 @@ function switchTab(tabId) {
         return;
     }
 
+    // A detail view is mounted into the tab that opened it. Switching tabs
+    // while it is still mounted used to leave the detail overlay visible in
+    // the old DOM tree; a delayed playback-resume callback could then switch
+    // the new tab back to `search`. Close it synchronously before changing
+    // the active view, except when the detail itself is returning to this tab
+    // during its normal close animation.
+    const detailManager = window.SongListManager;
+    if (detailManager?.isDetailOpen?.()
+        && detailManager?.getReturnTab?.() !== tabId) {
+        detailManager.closeDetailForTabSwitch?.();
+    }
+    if (tabId !== 'search') delete window._pendingResumeListId;
+
     document.querySelectorAll('[id^="view-"]').forEach(el => {
         el.classList.add('hidden');
         el.classList.remove('opacity-100');
@@ -1278,10 +1291,13 @@ function switchTab(tabId) {
     if (!activeView) return;
 
     activeView.classList.remove('hidden');
-    // small delay to allow display block to apply before opacity transition
+    // Make the view visible immediately. The previous delayed opacity change
+    // could leave a large blank panel on Safari/WebKit when the main-thread
+    // timer was postponed by image/layout work.
+    activeView.classList.remove('opacity-0');
+    activeView.classList.add('opacity-100');
+    // Keep the state refresh asynchronous so tab changes do not block paint.
     setTimeout(() => {
-        activeView.classList.remove('opacity-0');
-        activeView.classList.add('opacity-100');
         // [新增] 切换 Tab 时顺便检查并更新一次用户状态
         if (typeof updateUserUI === 'function') updateUserUI();
     }, 10);
@@ -1357,7 +1373,10 @@ function switchTab(tabId) {
 
     if (tabId === 'library-integration') {
         document.getElementById('page-title').innerText = '曲库联动';
-        window.LibraryIntegration?.activate?.();
+        const activation = window.LibraryIntegration?.activate?.();
+        if (activation && typeof activation.catch === 'function') {
+            activation.catch(error => console.warn('[LibraryIntegration] 页面激活失败:', error));
+        }
         window.LibraryIntegration?.setActive?.(true);
     } else {
         window.LibraryIntegration?.setActive?.(false);
@@ -9508,8 +9527,12 @@ function renderMyLists(data) {
         const listId = window._pendingResumeListId;
         delete window._pendingResumeListId;
         console.log('[Resume] 正在同步本地播放列表上下文:', listId);
-        // 调用 handleListClick 以加载真实的列表数据并应用高亮
-        if (!isSongListDetailActive()) handleListClick(listId);
+        // 只在“搜索/本地列表”视图仍然是当前页面时恢复。否则一个旧的
+        // 播放状态回调会把用户刚打开的“我的歌单”或“曲库联动”切回
+        // search，表现为详情行和歌单卡片叠在一起、点击卡片只闪一下。
+        const searchView = document.getElementById('view-search');
+        const searchViewActive = searchView && !searchView.classList.contains('hidden');
+        if (!isSongListDetailActive() && searchViewActive) handleListClick(listId);
     }
 }
 
@@ -9638,6 +9661,8 @@ function handleListClick(listId, skipAutoUpdate = false) {
     document.querySelectorAll('[id^="view-"]').forEach(el => el.classList.add('hidden'));
     const activeView = document.getElementById('view-search');
     activeView.classList.remove('hidden');
+    activeView.classList.remove('opacity-0');
+    activeView.classList.add('opacity-100');
 
     // [New] 为歌单搜索视图重新初始化 ListSearch
     initGlobalListSearch();

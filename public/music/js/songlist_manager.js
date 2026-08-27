@@ -33,16 +33,12 @@ window.SongListManager = (function () {
         isLocal: false,
         playlist: null,
         historyPushed: false,
+        historyBaseState: null,
+        historyBaseUrl: '',
     };
     let detailCloseTimer = null;
     let detailGeneration = 0;
     let detailClosing = false;
-    // A close button first schedules history.back().  On iOS/Android the
-    // resulting popstate can arrive after the user has already tapped a
-    // different playlist.  Keep enough state to consume that stale traversal
-    // without closing the newly opened detail view.
-    let pendingDetailBack = false;
-    let suppressedDetailPopstates = 0;
 
     function pushDetailHistory(detailType, listId) {
         const current = window.history.state;
@@ -52,6 +48,17 @@ window.SongListManager = (function () {
             detailState.historyPushed = true;
             return;
         }
+
+        // Keep a copy of the entry that was active before the detail view was
+        // opened.  Closing the in-app back button restores this entry with
+        // replaceState instead of starting an asynchronous history traversal;
+        // Safari can deliver that traversal after a second playlist was
+        // already opened, which used to leave the UI and history out of sync.
+        const replacingDetail = current?.page === 'songlist-detail';
+        if (!replacingDetail) {
+            detailState.historyBaseState = current && typeof current === 'object' ? { ...current } : current ?? null;
+            detailState.historyBaseUrl = window.location.href;
+        }
         window.history.pushState({
             ...(current && typeof current === 'object' ? current : {}),
             page: 'songlist-detail',
@@ -59,6 +66,30 @@ window.SongListManager = (function () {
             listId: String(listId || ''),
         }, '');
         detailState.historyPushed = true;
+    }
+
+    function clearDetailHistoryMarker() {
+        detailState.historyPushed = false;
+        detailState.historyBaseState = null;
+        detailState.historyBaseUrl = '';
+    }
+
+    function restoreDetailHistory() {
+        if (window.history.state?.page === 'songlist-detail') {
+            try {
+                window.history.replaceState(
+                    detailState.historyBaseState ?? null,
+                    '',
+                    detailState.historyBaseUrl || window.location.href,
+                );
+            } catch (error) {
+                // A history restoration failure must not prevent the detail
+                // view from closing; the next navigation still has a clean
+                // in-memory state and can recover normally.
+                console.warn('[SongList] 恢复详情历史状态失败:', error);
+            }
+        }
+        clearDetailHistoryMarker();
     }
 
     function ensureDetailHost(parentId) {
@@ -468,10 +499,9 @@ window.SongListManager = (function () {
     function openLocalDetail(list) {
         if (!list) return;
         resetDetailCloseState();
-        if (pendingDetailBack) {
-            pendingDetailBack = false;
-            suppressedDetailPopstates += 1;
-        }
+        // A manual playlist open supersedes any automatic playback-resume
+        // navigation that may still be queued from the previous session.
+        delete window._pendingResumeListId;
         const songs = Array.isArray(list.list) ? list.list.map((song, index) => ({
             ...song,
             id: song.id || song.songmid || song.songId || song.hash || `local_${list.id}_${index}`,
@@ -870,55 +900,60 @@ window.SongListManager = (function () {
             const detailView = document.getElementById('songlist-detail-view');
             return Boolean(detailView && !detailView.classList.contains('hidden'));
         },
+        getReturnTab: function () {
+            return detailState.returnTab || (detailState.isLocal ? 'my-playlists' : 'songlist');
+        },
+        closeDetailForTabSwitch: function () {
+            this.closeCoverPicker();
+            delete window._pendingResumeListId;
+            restoreDetailHistory();
+            const detailView = document.getElementById('songlist-detail-view');
+            if (!detailView) {
+                notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
+                return;
+            }
+            if (detailCloseTimer) {
+                clearTimeout(detailCloseTimer);
+                detailCloseTimer = null;
+            }
+            detailClosing = false;
+            detailGeneration += 1;
+            detailView.classList.add('hidden', 'pointer-events-none');
+            detailView.classList.remove('translate-x-full');
+            detailView.style.pointerEvents = 'none';
+            ensureDetailHost(detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist'));
+            notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
+        },
         closeDetail: function (fromPopState = false) {
             this.closeCoverPicker();
-            if (fromPopState && suppressedDetailPopstates > 0) {
-                suppressedDetailPopstates -= 1;
-                pendingDetailBack = false;
-                // If a second playlist was opened before the first
-                // history.back() delivered its popstate, restore the history
-                // entry for that new detail.  Without this forward traversal
-                // the UI looks open while history points at the playlist page;
-                // the next click/back then gets interpreted as another close.
-                if (window.history.state?.page !== 'songlist-detail'
-                    && detailState.historyPushed
-                    && !detailClosing) {
-                    suppressedDetailPopstates += 1;
-                    window.history.forward();
-                }
-                return;
-            }
             if (detailClosing) return;
-            if (!fromPopState
-                && detailState.historyPushed
-                && window.history.state?.page === 'songlist-detail') {
-                pendingDetailBack = true;
-                detailState.historyPushed = false;
-                const pendingView = document.getElementById('songlist-detail-view');
-                if (pendingView) {
-                    pendingView.classList.add('translate-x-full', 'pointer-events-none');
-                    pendingView.style.pointerEvents = 'none';
-                }
-                window.history.back();
+            const detailView = document.getElementById('songlist-detail-view');
+            if (!detailView) {
+                restoreDetailHistory();
+                notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
                 return;
             }
-            const detailView = document.getElementById('songlist-detail-view');
-            if (!detailView) return;
+            // Physical/browser back has already moved to the base entry.  The
+            // in-app button is still on the detail entry; restore it now and
+            // never call history.back() from inside the SPA.
+            if (!fromPopState) restoreDetailHistory();
+            else clearDetailHistoryMarker();
+            delete window._pendingResumeListId;
             detailClosing = true;
             detailGeneration += 1;
             detailView.classList.add('translate-x-full', 'pointer-events-none');
             detailView.style.pointerEvents = 'none';
             const returnTab = detailState.returnTab || 'songlist';
             const hostParentId = detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist');
-            detailState.historyPushed = false;
-            pendingDetailBack = false;
+            // Invalidate delayed detail/account refreshes before the closing
+            // animation starts.  They must not re-open the old list view.
+            notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
             if (detailCloseTimer) clearTimeout(detailCloseTimer);
             detailCloseTimer = setTimeout(() => {
                 detailView.classList.add('hidden');
                 detailView.classList.remove('translate-x-full');
                 detailView.style.pointerEvents = 'none';
                 ensureDetailHost(hostParentId);
-                notifyDetailContext(false, detailState.isLocal ? 'local' : 'network', detailState.id);
                 switchTab(returnTab);
                 detailClosing = false;
                 detailCloseTimer = null;
