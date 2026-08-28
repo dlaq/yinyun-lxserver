@@ -30,6 +30,15 @@ test('browser back delegates local playlist detail before search history handlin
   assert.ok(handler.indexOf('SongListManager') < handler.indexOf('search-back-btn'))
 })
 
+test('returning from a local playlist keeps the mounted playlist grid without re-rendering the tab', () => {
+  const manager = read('public/music/js/songlist_manager.js')
+
+  assert.match(manager, /function keepReturnTabVisible\(tabId\)/)
+  assert.match(manager, /view\.classList\.remove\('hidden', 'opacity-0'\)/)
+  assert.match(manager, /if \(!keepReturnTabVisible\('my-playlists'\)\) switchTab\('my-playlists'\)/)
+  assert.match(manager, /if \(!keepReturnTabVisible\(returnTab\)\) switchTab\(returnTab\)/)
+})
+
 test('account sync rejects malformed, stale-account, and empty replacement snapshots', () => {
   const app = read('public/music/app.js')
 

@@ -61,6 +61,17 @@ window.SongListManager = (function () {
         return detailView;
     }
 
+    function keepReturnTabVisible(tabId) {
+        const view = document.getElementById(`view-${tabId}`);
+        if (!view || view.classList.contains('hidden')) return false;
+        // The return view is already mounted underneath the detail overlay.
+        // Do not call switchTab here: it hides every view and rebuilds the
+        // playlist grid, which is visible as a one-frame refresh on mobile.
+        view.classList.remove('hidden', 'opacity-0');
+        view.classList.add('opacity-100');
+        return true;
+    }
+
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, char => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -450,7 +461,7 @@ window.SongListManager = (function () {
         // playlists appear to vanish on the next render).
         pushDetailHistory('local', detailState.id);
         if (window.ListSearch) window.ListSearch.resetState();
-        switchTab('my-playlists');
+        if (!keepReturnTabVisible('my-playlists')) switchTab('my-playlists');
         const detailView = ensureDetailHost('view-my-playlists');
         const listContainer = document.getElementById('sl-detail-list');
         if (!detailView || !listContainer) return;
@@ -832,7 +843,7 @@ window.SongListManager = (function () {
             detailCloseTimer = setTimeout(() => {
                 detailView.classList.add('hidden');
                 ensureDetailHost(hostParentId);
-                switchTab(returnTab);
+                if (!keepReturnTabVisible(returnTab)) switchTab(returnTab);
                 detailCloseTimer = null;
             }, 300);
         },
