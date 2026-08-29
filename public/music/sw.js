@@ -1,4 +1,4 @@
-const BUILD_HASH = 'bfddac4';
+const BUILD_HASH = '4a0ab39';
 const CACHE_PREFIX = 'yinyun-player-';
 const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
 const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;
@@ -89,19 +89,23 @@ const putIfCacheable = async (cacheName, request, response) => {
 };
 
 const networkFirstNavigation = async (request) => {
+    const runtimeCache = await caches.open(RUNTIME_CACHE_NAME);
+    const precache = await caches.open(PRECACHE_NAME);
     try {
         const response = await fetch(request);
         return await putIfCacheable(RUNTIME_CACHE_NAME, request, response);
     } catch {
-        return (await caches.match(request, { ignoreSearch: true })) ||
-            (await caches.match(OFFLINE_URL, { ignoreSearch: true })) ||
+        return (await runtimeCache.match(request, { ignoreSearch: true })) ||
+            (await precache.match(request, { ignoreSearch: true })) ||
+            (await precache.match(OFFLINE_URL, { ignoreSearch: true })) ||
             Response.error();
     }
 };
 
 const staleWhileRevalidate = async (event, request, pathname) => {
     const cacheName = PRECACHE_PATHS.has(pathname) ? PRECACHE_NAME : RUNTIME_CACHE_NAME;
-    const cached = await caches.match(request, { ignoreSearch: true });
+    const cache = await caches.open(cacheName);
+    const cached = await cache.match(request, { ignoreSearch: true });
     const network = fetch(request).then(response => putIfCacheable(cacheName, request, response));
 
     if (cached) {

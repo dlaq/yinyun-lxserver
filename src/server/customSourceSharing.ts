@@ -11,6 +11,17 @@ export interface SourceShare {
 
 const getSharesPath = () => path.join(global.lx.userPath, 'source', 'shares.json')
 
+const writeTextAtomic = (filePath: string, content: string) => {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(temporary, content, 'utf-8')
+    fs.renameSync(temporary, filePath)
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+  }
+}
+
 const getConfiguredUsers = () => new Set(
   global.lx.config.users.map(user => normalizeUsername(user.name)),
 )
@@ -80,8 +91,7 @@ export const readSourceShares = (): SourceShare[] => {
 
 export const writeSourceShares = (shares: SourceShare[]) => {
   const sharesPath = getSharesPath()
-  fs.mkdirSync(path.dirname(sharesPath), { recursive: true })
-  fs.writeFileSync(sharesPath, JSON.stringify(shares, null, 2), 'utf-8')
+  writeTextAtomic(sharesPath, JSON.stringify(shares, null, 2))
 }
 
 export const getSourceShare = (owner: string, sourceId: string) => {

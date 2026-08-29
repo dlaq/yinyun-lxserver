@@ -9760,9 +9760,10 @@ async function syncSongloftPlaylist(listId, silent = false) {
     const response = await fetch('/api/v1/integration/playlists/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...tokenHeaders },
-        // 用户歌单是音云侧的来源；用 replace 让删除、重排和改名也能同步，
-        // 服务器会在无法可靠匹配时拒绝覆盖，避免误删 Songloft 歌曲。
-        body: JSON.stringify({ yinyunPlaylistId: list.id, direction: 'push', mode: 'replace' }),
+        // Player-side and automatic synchronization are deliberately append-only.
+        // Destructive replacement belongs exclusively to the administrator
+        // integration panel, where a fresh dry-run and explicit target are required.
+        body: JSON.stringify({ yinyunPlaylistId: list.id, direction: 'push', mode: 'merge' }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload?.error?.message || payload?.message || `Songloft 同步失败（${response.status}）`);
@@ -9788,7 +9789,7 @@ async function handleSongloftSyncList(listId, event) {
     if (event) event.stopPropagation();
     const list = currentListData?.userList?.find(item => String(item.id) === String(listId));
     if (!list) return;
-    const confirmed = typeof showSelect !== 'function' || await showSelect('同步到 Songloft', `将“${list.name || '歌单'}”镜像同步到 Songloft（会同步新增、删除、重排和重命名；无法可靠匹配时会取消覆盖）。继续吗？`);
+    const confirmed = typeof showSelect !== 'function' || await showSelect('同步到 Songloft', `将“${list.name || '歌单'}”安全追加到 Songloft（只补充可可靠匹配的歌曲，不删除远端已有歌曲）。继续吗？`);
     if (!confirmed) return;
     try {
         await syncSongloftPlaylist(listId, false);

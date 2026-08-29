@@ -53,6 +53,24 @@ test('Songloft client renames a playlist through the native PUT API', async () =
   assert.deepEqual(renamed, { url: 'http://songloft/api/v1/playlists/42', method: 'PUT', body: JSON.stringify({ name: '新歌单名' }) })
 })
 
+test('Songloft client rejects malformed or contradictory playlist snapshots instead of treating them as empty', async () => {
+  const responses = [
+    { data: {} },
+    { songs: [], total: 2 },
+    { songs: [{ id: 7, title: 'Song', artist: 'Artist' }], total: 1 },
+  ]
+  const fetchImpl = (async (input: string | URL) => {
+    const url = String(input)
+    if (url.endsWith('/auth/login')) return new Response(JSON.stringify({ access_token: 'token-snapshot' }), { status: 200 })
+    return new Response(JSON.stringify(responses.shift()), { status: 200 })
+  }) as typeof fetch
+  const client = new SongloftClient({ baseUrl: 'http://songloft/api/v1', username: 'u', password: 'p', fetchImpl })
+
+  await assert.rejects(client.getPlaylistSongs(42), /did not contain a songs array/)
+  await assert.rejects(client.getPlaylistSongs(42), /count is inconsistent/)
+  assert.equal((await client.getPlaylistSongs(42)).length, 1)
+})
+
 test('Subsonic client emits token authentication and maps playlist entries', async () => {
   let requestUrl = ''
   const fetchImpl = (async (input: string | URL) => {

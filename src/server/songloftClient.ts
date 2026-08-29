@@ -149,8 +149,9 @@ export class SongloftClient {
 
   async listPlaylists() {
     const body = await this.requestJson('/playlists?limit=1000&offset=0')
-    const playlists = bodyValue(body, 'playlists') || []
-    return Array.isArray(playlists) ? playlists as SongloftPlaylist[] : []
+    const playlists = bodyValue(body, 'playlists')
+    if (!Array.isArray(playlists)) throw new SongloftRequestError(502, 'Songloft playlist response did not contain a playlists array')
+    return playlists as SongloftPlaylist[]
   }
 
   async createPlaylist(name: string, description = '') {
@@ -175,8 +176,20 @@ export class SongloftClient {
 
   async getPlaylistSongs(playlistId: number) {
     const body = await this.requestJson(`/playlists/${encodeURIComponent(String(playlistId))}/songs?limit=100000&offset=0`)
-    const songs = bodyValue(body, 'songs') || []
-    return Array.isArray(songs) ? songs.map(mapSong) : []
+    const songs = bodyValue(body, 'songs')
+    if (!Array.isArray(songs)) {
+      throw new SongloftRequestError(502, 'Songloft playlist response did not contain a songs array')
+    }
+    const totalValue = bodyValue(body, 'total')
+    const total = totalValue === undefined || totalValue === null ? songs.length : Number(totalValue)
+    if (!Number.isFinite(total) || total < 0 || total !== songs.length) {
+      throw new SongloftRequestError(502, 'Songloft playlist response count is inconsistent', {
+        playlistId,
+        returned: songs.length,
+        total: totalValue,
+      })
+    }
+    return songs.map(mapSong)
   }
 
   async addPlaylistSongs(playlistId: number, songIds: Array<number | string>) {

@@ -66,7 +66,9 @@ export const syncAdminPlaylist = async (body: any) => {
     throw new AdminUserSyncError(400, 'same_playlist', '源歌单与目标歌单不能相同')
   }
 
-  const lockKey = `${fromUser}:${sourcePlaylistId}->${toUser}:${targetPlaylistId || 'new'}`
+  // The target owns the mutable state. Locking by source -> target allowed two
+  // different source playlists to write the same target concurrently.
+  const lockKey = `target:${toUser}:${targetPlaylistId || 'new-playlist'}`
   if (activePlaylistCopies.has(lockKey)) {
     throw new AdminUserSyncError(409, 'playlist_sync_in_progress', '该跨用户歌单同步正在进行中')
   }
@@ -90,7 +92,7 @@ export const syncAdminPlaylist = async (body: any) => {
     if (targetPlaylistId && !targetPlaylist) {
       throw new AdminUserSyncError(404, 'target_playlist_not_found', '目标歌单不存在')
     }
-    if (mode === 'overwrite' && sourceSongs.length === 0 && targetPlaylist?.list?.length && body?.allowEmptyOverwrite !== true) {
+    if (mode === 'overwrite' && sourceSongs.length === 0 && targetPlaylist?.list?.length) {
       throw new AdminUserSyncError(409, 'empty_source_playlist', '源歌单为空，已取消覆盖以保护目标歌单')
     }
 
@@ -121,9 +123,25 @@ export const syncAdminPlaylist = async (body: any) => {
         await targetSpace.listManage.listDataManage.listMusicAdd(resolvedTargetId, sourceSongs, 'bottom')
       }
       await targetSpace.listManage.createSnapshot()
-    } catch (error) {
-      if (created) await targetSpace.listManage.listDataManage.userListsRemove([resolvedTargetId])
-      else await targetSpace.listManage.listDataManage.listMusicOverwrite(resolvedTargetId, previousSongs)
+    } catch (error: any) {
+      try {
+        if (created) await targetSpace.listManage.listDataManage.userListsRemove([resolvedTargetId])
+        else await targetSpace.listManage.listDataManage.listMusicOverwrite(resolvedTargetId, previousSongs)
+        // Persist the restored state as well. Without this snapshot a failure
+        // during the first snapshot could leave the next restart observing the
+        // half-written target instead of the in-memory rollback.
+        await targetSpace.listManage.createSnapshot()
+        const restored = (await targetSpace.listManage.getListData()).userList.find(playlist => playlist.id === resolvedTargetId)
+        if (created ? restored : JSON.stringify(restored?.list || []) !== JSON.stringify(previousSongs)) {
+          throw new Error('playlist rollback verification failed')
+        }
+      } catch (rollbackError: any) {
+        throw new AdminUserSyncError(
+          500,
+          'playlist_sync_rollback_failed',
+          `跨用户歌单同步失败且目标恢复未完成: ${rollbackError?.message || rollbackError}`,
+        )
+      }
       throw error
     }
 

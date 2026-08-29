@@ -124,4 +124,29 @@ test('administrator playlist sync appends by song ID and protects a populated ta
     (error: any) => error?.code === 'empty_source_playlist',
   )
   assert.equal((await bob.listManage.getListData()).userList.find(item => item.id === 'target')?.list.length, 3)
+
+  const originalSnapshot = bob.listManage.createSnapshot.bind(bob.listManage)
+  let failSnapshotOnce = true
+  bob.listManage.createSnapshot = async () => {
+    if (failSnapshotOnce) {
+      failSnapshotOnce = false
+      throw new Error('simulated snapshot failure')
+    }
+    return await originalSnapshot()
+  }
+  try {
+    await assert.rejects(
+      adminSync.syncAdminPlaylist({
+        fromUser: 'alice', toUser: 'bob', sourcePlaylistId: 'source', targetPlaylistId: 'target', mode: 'overwrite',
+      }),
+      /simulated snapshot failure/,
+    )
+    assert.deepEqual(
+      (await bob.listManage.getListData()).userList.find(item => item.id === 'target')?.list.map(item => item.id),
+      ['wy_1', 'wy_2', 'local_shared_track'],
+    )
+    assert.equal((await bob.listManage.getListData()).userList.find(item => item.id === 'target')?.list[0]?.name, 'Existing')
+  } finally {
+    bob.listManage.createSnapshot = originalSnapshot
+  }
 })

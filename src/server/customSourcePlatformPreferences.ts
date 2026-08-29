@@ -11,6 +11,17 @@ export interface SourcePlatformPreference {
 
 const PREFERENCES_FILENAME = 'platform-preferences.json'
 
+const writeTextAtomic = (filePath: string, content: string) => {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(temporary, content, 'utf-8')
+    fs.renameSync(temporary, filePath)
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+  }
+}
+
 const normalizePlatforms = (value: unknown): string[] => {
   if (!Array.isArray(value)) return []
   return Array.from(new Set(value
@@ -64,8 +75,7 @@ export const readSourcePlatformPreferences = (username: string): SourcePlatformP
 
 const writeSourcePlatformPreferences = (username: string, preferences: SourcePlatformPreference[]) => {
   const preferencesPath = getPreferencesPath(username)
-  fs.mkdirSync(path.dirname(preferencesPath), { recursive: true })
-  fs.writeFileSync(preferencesPath, JSON.stringify(preferences, null, 2), 'utf-8')
+  writeTextAtomic(preferencesPath, JSON.stringify(preferences, null, 2))
 }
 
 export const getEnabledSourcePlatforms = (

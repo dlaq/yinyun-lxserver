@@ -92,3 +92,15 @@ test('network playlist refresh cannot persist a transient empty source response'
   assert.match(refresh, /if \(synced === false\) throw/)
   assert.match(refresh, /current\.list = previousList/)
 })
+
+test('player and automatic Songloft synchronization are append-only', () => {
+  const app = read('public/music/app.js')
+  const start = app.indexOf('async function syncSongloftPlaylist')
+  const end = app.indexOf('\nfunction scheduleSongloftPlaylistSync', start)
+  const sync = app.slice(start, end)
+
+  assert.ok(start >= 0)
+  assert.match(sync, /direction: 'push', mode: 'merge'/)
+  assert.doesNotMatch(sync, /mode: 'replace'/)
+  assert.match(app, /安全追加到 Songloft/)
+})

@@ -107,6 +107,8 @@ class ApiError extends Error {
 
 const revokedTokens = new Map<string, number>()
 const activePlaylistSyncs = new Set<string>()
+const pendingPlaylistReplacePreviews = new Map<string, { fingerprint: string; expiresAt: number }>()
+const PLAYLIST_REPLACE_PREVIEW_TTL_MS = 5 * 60_000
 let songloftMatchingCache: { client: SongloftClient; tracks: IntegrationTrack[]; expiresAt: number } | null = null
 let songloftMatchingPromise: Promise<IntegrationTrack[]> | null = null
 const SONGLOFT_MATCHING_CACHE_TTL = 60_000
@@ -180,6 +182,85 @@ const DEFAULT_HEALTH_SETTINGS: HealthSettings = {
 }
 const healthStateCache = new Map<string, HealthState>()
 let healthScheduler: NodeJS.Timeout | null = null
+
+type PlaylistReplaceAudit = {
+  id: string
+  status: 'pending' | 'completed' | 'rolled_back' | 'rollback_failed'
+  username: string
+  yinyunPlaylistId: string
+  songloftPlaylistId: number
+  sourceTrackCount: number
+  originalRemoteIds: number[]
+  desiredRemoteIds: number[]
+  addedIds: number[]
+  removedIds: number[]
+  originalRemoteName: string
+  desiredRemoteName: string
+  originalRemoteHash: string
+  desiredRemoteHash: string
+  createdAt: string
+  updatedAt: string
+  error?: string
+  rollbackError?: string
+  finalRemoteIds?: number[]
+}
+
+const playlistReplaceAuditFile = (username: string, auditId: string) => {
+  const dataPath = String((global as any).lx?.dataPath || path.join(process.cwd(), 'data'))
+  return path.join(dataPath, 'playlist-replace-backups', encodeURIComponent(username), `${auditId}.json`)
+}
+
+const persistPlaylistReplaceAudit = async (audit: PlaylistReplaceAudit) => {
+  const filename = playlistReplaceAuditFile(audit.username, audit.id)
+  await fs.promises.mkdir(path.dirname(filename), { recursive: true })
+  const temporary = `${filename}.${process.pid}.${Date.now()}.tmp`
+  await fs.promises.writeFile(temporary, `${JSON.stringify(audit, null, 2)}\n`, 'utf8')
+  await fs.promises.rename(temporary, filename)
+}
+
+const orderedRemoteIdsHash = (ids: number[]) => crypto.createHash('sha256').update(JSON.stringify(ids)).digest('hex')
+const sameOrderedRemoteIds = (left: number[], right: number[]) => left.length === right.length && left.every((id, index) => id === right[index])
+type PlaylistReplacePlanIdentity = {
+  username: string
+  yinyunPlaylistId: string
+  songloftPlaylistId: number
+  sourceTrackCount: number
+  originalRemoteIds: number[]
+  desiredRemoteIds: number[]
+}
+
+const playlistReplacePlanFingerprint = (input: PlaylistReplacePlanIdentity) => crypto.createHash('sha256').update(JSON.stringify({
+  version: 1,
+  ...input,
+  originalRemoteHash: orderedRemoteIdsHash(input.originalRemoteIds),
+  desiredRemoteHash: orderedRemoteIdsHash(input.desiredRemoteIds),
+})).digest('hex')
+
+const discardExpiredPlaylistReplacePreviews = (now = Date.now()) => {
+  for (const [token, preview] of pendingPlaylistReplacePreviews) {
+    if (preview.expiresAt <= now) pendingPlaylistReplacePreviews.delete(token)
+  }
+}
+
+const issuePlaylistReplaceConfirmation = (input: PlaylistReplacePlanIdentity) => {
+  const now = Date.now()
+  discardExpiredPlaylistReplacePreviews(now)
+  const token = crypto.randomBytes(24).toString('base64url')
+  pendingPlaylistReplacePreviews.set(token, {
+    fingerprint: playlistReplacePlanFingerprint(input),
+    expiresAt: now + PLAYLIST_REPLACE_PREVIEW_TTL_MS,
+  })
+  return token
+}
+
+const consumePlaylistReplaceConfirmation = (token: string, input: PlaylistReplacePlanIdentity) => {
+  const now = Date.now()
+  discardExpiredPlaylistReplacePreviews(now)
+  const preview = pendingPlaylistReplacePreviews.get(token)
+  if (!preview) return false
+  pendingPlaylistReplacePreviews.delete(token)
+  return preview.expiresAt > now && preview.fingerprint === playlistReplacePlanFingerprint(input)
+}
 
 const healthStateFile = (username: string) => {
   const dataPath = String((global as any).lx?.dataPath || path.join(process.cwd(), 'data'))
@@ -2357,19 +2438,27 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (!['push', 'pull', 'merge'].includes(direction)) throw new ApiError(400, 'invalid_sync_direction', '同步方向必须是 push、pull 或 merge')
       if (!['merge', 'replace'].includes(mode)) throw new ApiError(400, 'invalid_sync_mode', '同步模式必须是 merge 或 replace')
       if (mode === 'replace' && direction === 'pull') throw new ApiError(400, 'invalid_sync_mode', 'pull 方向不支持 replace 模式')
-      const hasExplicitRemoteTarget = body.songloftPlaylistId !== undefined && body.songloftPlaylistId !== null && String(body.songloftPlaylistId).trim()
+      const hasExplicitRemoteTarget = Boolean(body.songloftPlaylistId !== undefined && body.songloftPlaylistId !== null && String(body.songloftPlaylistId).trim())
       if (!isAdmin && (direction !== 'push' || mode !== 'merge' || hasExplicitRemoteTarget)) {
         throw new ApiError(403, 'playlist_sync_mode_forbidden', '播放器用户只能使用“音云 → Songloft”的安全追加同步')
+      }
+      if (mode === 'replace') {
+        if (direction !== 'push') throw new ApiError(400, 'playlist_replace_direction_invalid', '覆盖同步只允许明确的音云 → Songloft 方向')
+        if (!hasExplicitRemoteTarget) throw new ApiError(400, 'playlist_replace_target_required', '覆盖同步必须明确选择 Songloft 目标歌单')
+        if (body.allowEmptyReplace === true) throw new ApiError(400, 'playlist_empty_replace_forbidden', '不允许通过同步接口清空 Songloft 歌单')
+      } else if (body.dryRun === true || body.replaceConfirmation) {
+        throw new ApiError(400, 'playlist_replace_options_invalid', '预演和覆盖确认参数只适用于 replace 模式')
       }
       const syncLockKey = `${username}:${yinyunPlaylistId}`
       if (activePlaylistSyncs.has(syncLockKey)) throw new ApiError(409, 'playlist_sync_in_progress', '该音云歌单正在同步，请等待当前任务完成')
       activePlaylistSyncs.add(syncLockKey)
+      let remoteSyncLockKey = ''
       try {
       const client = requireSongloftClient(deps)
       const yinyunPlaylist = await getPlaylist(username, yinyunPlaylistId)
       const playlists = await client.listPlaylists()
       const store = deps.getPlaylistSyncStore?.(username)
-      store?.load()
+      const syncRecords = store?.load() || []
       const syncId = `${username}:${yinyunPlaylistId}`
       const previous = store?.get(syncId)
       let songloftPlaylist: any
@@ -2402,12 +2491,25 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 
       const remotePlaylistId = Number(songloftPlaylist.id)
       if (!Number.isFinite(remotePlaylistId) || remotePlaylistId <= 0) throw new ApiError(502, 'invalid_songloft_playlist', 'Songloft 歌单 ID 无效')
-      if (['mapped', 'explicit'].includes(playlistResolution) && normalizePlaylistName(songloftPlaylist.name) !== normalizePlaylistName(yinyunPlaylist.name)) {
+      const conflictingMapping = syncRecords.find(record => record.enabled && record.syncId !== syncId && Number(record.songloftPlaylistId) === remotePlaylistId)
+      if (conflictingMapping) {
+        throw new ApiError(409, 'songloft_playlist_already_mapped', '该 Songloft 歌单已映射到另一个音云歌单，请先解除旧映射', {
+          conflictingYinyunPlaylistId: conflictingMapping.yinyunPlaylistId,
+          songloftPlaylistId: remotePlaylistId,
+        })
+      }
+      remoteSyncLockKey = `songloft:${remotePlaylistId}`
+      if (activePlaylistSyncs.has(remoteSyncLockKey)) throw new ApiError(409, 'songloft_playlist_sync_in_progress', '该 Songloft 目标歌单正在被其它同步任务写入')
+      activePlaylistSyncs.add(remoteSyncLockKey)
+      const renameRemotePlaylistIfNeeded = async () => {
+        if (!['mapped', 'explicit'].includes(playlistResolution) || normalizePlaylistName(songloftPlaylist.name) === normalizePlaylistName(yinyunPlaylist.name)) return false
         try {
           await client.renamePlaylist(remotePlaylistId, yinyunPlaylist.name)
           songloftPlaylist.name = yinyunPlaylist.name
+          return true
         } catch (error: any) {
           console.warn('[PlaylistSync] Songloft 歌单重命名失败，保留映射:', error?.message || error)
+          return false
         }
       }
       const initialLocalTracks = yinyunPlaylist.list.map((item: any) => toIntegrationTrack(deps.normalizeSongInfo(item)))
@@ -2423,7 +2525,8 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         // and the new flat download path. For playlist writes either exact
         // title/artist entity is valid, so duplicate identities are deterministic
         // instead of blocking the whole playlist as ambiguous.
-        const currentIds = Array.from(new Set(remotePlaylistTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)))
+        const currentRawIds = remotePlaylistTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)
+        const currentIds = Array.from(new Set(currentRawIds))
         const currentIdSet = new Set(currentIds.map(String))
         const matches = matchTracks(initialLocalTracks, library, SHARED_LIBRARY_MATCH_OPTIONS)
           .map(match => preferExistingPlaylistCandidate(match, currentIdSet))
@@ -2444,7 +2547,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         const removedIds = mode === 'replace' ? currentIds.filter(id => !desiredSet.has(id)) : []
         const addedIds = desiredIds.filter(id => !currentIds.includes(id))
         const safetyIssue = mode === 'replace'
-          ? playlistReplacementSafetyIssue(initialLocalTracks.length, currentIds, desiredIds, isAdmin && body.allowEmptyReplace === true)
+          ? playlistReplacementSafetyIssue(initialLocalTracks.length, currentIds, desiredIds)
           : null
         if (safetyIssue) {
           const message = safetyIssue === 'empty_source_playlist'
@@ -2456,11 +2559,114 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
             desiredRemoteTracks: desiredIds.length,
           })
         }
+        let confirmationToken = ''
+        if (mode === 'replace') {
+          const declaredValue = songloftPlaylist.songCount ?? songloftPlaylist.song_count
+          const declaredCount = declaredValue === undefined || declaredValue === null ? null : Number(declaredValue)
+          const confirmedRemoteTracks = await client.getPlaylistSongs(remotePlaylistId)
+          const confirmedRawIds = confirmedRemoteTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)
+          if (currentRawIds.length !== remotePlaylistTracks.length || confirmedRawIds.length !== confirmedRemoteTracks.length) {
+            throw new ApiError(409, 'playlist_replace_invalid_remote_ids', 'Songloft 目标歌单存在缺失或无效的歌曲 ID，已取消覆盖同步')
+          }
+          if (currentRawIds.length !== currentIds.length || confirmedRawIds.length !== new Set(confirmedRawIds).size) {
+            throw new ApiError(409, 'playlist_replace_duplicate_remote_ids', 'Songloft 目标歌单包含重复歌曲，已取消覆盖；请先人工确认重复项')
+          }
+          if (!sameOrderedRemoteIds(currentIds, confirmedRawIds)
+            || (declaredCount !== null && (!Number.isFinite(declaredCount) || declaredCount !== confirmedRawIds.length))) {
+            throw new ApiError(409, 'playlist_replace_remote_snapshot_unstable', 'Songloft 目标歌单两次读取结果或声明数量不一致，已取消覆盖同步', {
+              firstReadCount: currentIds.length,
+              secondReadCount: confirmedRawIds.length,
+              declaredCount,
+            })
+          }
+          remotePlaylistTracks = confirmedRemoteTracks
+          const planIdentity: PlaylistReplacePlanIdentity = {
+            username,
+            yinyunPlaylistId,
+            songloftPlaylistId: remotePlaylistId,
+            sourceTrackCount: initialLocalTracks.length,
+            originalRemoteIds: currentIds,
+            desiredRemoteIds: desiredIds,
+          }
+          const preview = {
+            sourceTracks: initialLocalTracks.length,
+            currentRemoteTracks: currentIds.length,
+            desiredRemoteTracks: desiredIds.length,
+            addCount: addedIds.length,
+            removeCount: removedIds.length,
+            reorder: !sameOrderedRemoteIds(currentIds, desiredIds),
+            originalRemoteHash: orderedRemoteIdsHash(currentIds),
+            desiredRemoteHash: orderedRemoteIdsHash(desiredIds),
+          }
+          if (body.dryRun === true) {
+            confirmationToken = issuePlaylistReplaceConfirmation(planIdentity)
+            return {
+              dryRun: true,
+              confirmationToken,
+              preview,
+              matches: matches.map(publicTrackMatch),
+              unmatched: [],
+              addedIds,
+              removedIds,
+              reordered: preview.reorder,
+            }
+          }
+          if (!consumePlaylistReplaceConfirmation(String(body.replaceConfirmation || ''), planIdentity)) {
+            throw new ApiError(409, 'playlist_replace_confirmation_required', '覆盖计划已变化或尚未预演，请重新预演并确认本次覆盖', preview)
+          }
+        }
+        let audit: PlaylistReplaceAudit | null = null
+        const originalRemoteName = String(songloftPlaylist.name || '')
+        let remoteNameChanged = false
+        if (mode === 'replace') {
+          const now = new Date().toISOString()
+          audit = {
+            id: `replace_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`,
+            status: 'pending',
+            username,
+            yinyunPlaylistId,
+            songloftPlaylistId: remotePlaylistId,
+            sourceTrackCount: initialLocalTracks.length,
+            originalRemoteIds: [...currentIds],
+            desiredRemoteIds: [...desiredIds],
+            addedIds: [...addedIds],
+            removedIds: [...removedIds],
+            originalRemoteName,
+            desiredRemoteName: String(yinyunPlaylist.name || ''),
+            originalRemoteHash: orderedRemoteIdsHash(currentIds),
+            desiredRemoteHash: orderedRemoteIdsHash(desiredIds),
+            createdAt: now,
+            updatedAt: now,
+          }
+          try {
+            await persistPlaylistReplaceAudit(audit)
+          } catch (error: any) {
+            throw new ApiError(500, 'playlist_replace_backup_failed', '无法持久化 Songloft 写前备份，已取消覆盖同步', { message: error?.message || String(error) })
+          }
+        }
+        remoteNameChanged = await renameRemotePlaylistIfNeeded()
         const restoreOriginalRemoteIds = async () => {
           const latest = await client.getPlaylistSongs(remotePlaylistId)
-          const latestIds = new Set(latest.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null))
-          const missingOriginal = currentIds.filter(id => !latestIds.has(id))
+          let latestIds = Array.from(new Set(latest.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)))
+          const originalSet = new Set(currentIds)
+          const missingOriginal = currentIds.filter(id => !latestIds.includes(id))
           if (missingOriginal.length) await client.addPlaylistSongs(remotePlaylistId, missingOriginal)
+          const afterAdd = await client.getPlaylistSongs(remotePlaylistId)
+          latestIds = Array.from(new Set(afterAdd.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)))
+          const unexpected = latestIds.filter(id => !originalSet.has(id))
+          for (const id of unexpected) await client.removePlaylistSong(remotePlaylistId, id)
+          if (currentIds.length) await client.reorderPlaylist(remotePlaylistId, currentIds)
+          const restored = await client.getPlaylistSongs(remotePlaylistId)
+          const restoredIds = restored.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)
+          if (!sameOrderedRemoteIds(restoredIds, currentIds)) {
+            throw new Error(`rollback verification mismatch: expected ${currentIds.length}, received ${restoredIds.length}`)
+          }
+          if (remoteNameChanged && originalRemoteName) {
+            await client.renamePlaylist(remotePlaylistId, originalRemoteName)
+            songloftPlaylist.name = originalRemoteName
+          }
+          remotePlaylistTracks = restored
+          return restoredIds
         }
         // Add first. If Songloft or the network fails halfway through, the
         // remote playlist remains a safe superset instead of losing entries.
@@ -2469,20 +2675,53 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
           for (const id of removedIds) await client.removePlaylistSong(remotePlaylistId, id)
           if (mode === 'replace' && desiredIds.length) await client.reorderPlaylist(remotePlaylistId, desiredIds)
           remotePlaylistTracks = await client.getPlaylistSongs(remotePlaylistId)
-          if (mode === 'replace' && desiredIds.length) {
-            const verifiedIds = new Set(remotePlaylistTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null))
-            const missingDesired = desiredIds.filter(id => !verifiedIds.has(id))
-            if (missingDesired.length) {
-              await restoreOriginalRemoteIds()
-              throw new ApiError(502, 'playlist_replace_verification_failed', 'Songloft 覆盖结果校验失败，已尝试恢复同步前歌曲', {
-                missingDesired,
-                restoredRemoteIds: currentIds,
+          const verifiedIds = remotePlaylistTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)
+          if (mode === 'replace' && !sameOrderedRemoteIds(verifiedIds, desiredIds)) {
+            throw new ApiError(502, 'playlist_replace_verification_failed', 'Songloft 覆盖结果与预演集合不一致，正在恢复写前快照', {
+              expectedCount: desiredIds.length,
+              receivedCount: verifiedIds.length,
+              backupId: audit?.id,
+            })
+          }
+          if (mode === 'merge') {
+            const verifiedSet = new Set(verifiedIds)
+            const missingAdded = addedIds.filter(id => !verifiedSet.has(id))
+            if (missingAdded.length) throw new ApiError(502, 'playlist_merge_verification_failed', 'Songloft 追加后校验失败，但未执行任何删除', { missingAdded })
+          }
+          if (audit) {
+            audit.status = 'completed'
+            audit.updatedAt = new Date().toISOString()
+            audit.finalRemoteIds = [...verifiedIds]
+            await persistPlaylistReplaceAudit(audit)
+          }
+        } catch (error: any) {
+          if (mode === 'replace' && audit) {
+            audit.error = error?.message || String(error)
+            let restoredIds: number[]
+            try {
+              restoredIds = await restoreOriginalRemoteIds()
+            } catch (restoreError: any) {
+              audit.status = 'rollback_failed'
+              audit.rollbackError = restoreError?.message || String(restoreError)
+              audit.updatedAt = new Date().toISOString()
+              try { await persistPlaylistReplaceAudit(audit) } catch { /* retain the original restore failure */ }
+              console.error('[PlaylistSync] 覆盖失败且恢复原歌单未完成:', restoreError?.message || restoreError)
+              throw new ApiError(502, 'playlist_replace_rollback_failed', 'Songloft 覆盖失败且自动恢复未完成，请使用写前备份人工恢复', {
+                backupId: audit.id,
+                expectedRemoteIds: audit.originalRemoteIds,
               })
             }
-          }
-        } catch (error) {
-          try { await restoreOriginalRemoteIds() } catch (restoreError: any) {
-            console.error('[PlaylistSync] 覆盖失败且恢复原歌单未完成:', restoreError?.message || restoreError)
+            audit.status = 'rolled_back'
+            audit.finalRemoteIds = restoredIds
+            audit.updatedAt = new Date().toISOString()
+            try {
+              await persistPlaylistReplaceAudit(audit)
+            } catch (auditError: any) {
+              console.error('[PlaylistSync] 原歌单已恢复，但回滚审计状态写入失败:', auditError?.message || auditError)
+              throw new ApiError(500, 'playlist_replace_audit_update_failed', 'Songloft 原歌单已恢复，但审计状态写入失败，请检查持久化目录', {
+                backupId: audit.id,
+              })
+            }
           }
           throw error
         }
@@ -2492,6 +2731,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
           removedIds,
           reordered: mode === 'replace' && desiredIds.length > 0,
           unmatched: unmatched.map(publicTrackMatch),
+          backupId: audit?.id || null,
         }
       }
 
@@ -2520,6 +2760,14 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       }
 
       if (direction === 'push' || direction === 'merge') result.push = await push()
+      if (result.push?.dryRun === true) {
+        result.counts = {
+          yinyunTracks: initialLocalTracks.length,
+          songloftTracks: remotePlaylistTracks.length,
+        }
+        success(res, result)
+        return true
+      }
       if (direction === 'pull' || direction === 'merge') {
         // A merge observes the remote list after the push so remote-only local
         // files can flow back into the yinyun playlist in the same operation.
@@ -2559,6 +2807,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       }
       success(res, result)
       } finally {
+        if (remoteSyncLockKey) activePlaylistSyncs.delete(remoteSyncLockKey)
         activePlaylistSyncs.delete(syncLockKey)
       }
       return true

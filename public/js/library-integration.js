@@ -1054,8 +1054,8 @@
     function updateSyncMode() {
         const direction = el('integration-sync-direction').value;
         const replace = [...el('integration-sync-mode').options].find(option => option.value === 'replace');
-        replace.disabled = direction === 'pull';
-        if (direction === 'pull' && el('integration-sync-mode').value === 'replace') el('integration-sync-mode').value = 'merge';
+        replace.disabled = direction !== 'push';
+        if (direction !== 'push' && el('integration-sync-mode').value === 'replace') el('integration-sync-mode').value = 'merge';
     }
 
     async function syncPlaylist() {
@@ -1068,13 +1068,32 @@
         };
         const remoteId = el('integration-songloft-playlist').value;
         if (remoteId) body.songloftPlaylistId = Number(remoteId);
-        const confirmed = typeof showSelect !== 'function' || await showSelect('确认同步歌单', `方向：${body.direction}\n模式：${body.mode}\n确认继续吗？`);
-        if (!confirmed) return;
         setBusy('integration-sync-btn', true, '同步中');
         try {
+            if (body.mode === 'replace') {
+                if (body.direction !== 'push') throw new Error('覆盖同步只允许“音云 → Songloft”方向');
+                if (!body.songloftPlaylistId) throw new Error('覆盖同步必须明确选择 Songloft 目标歌单');
+                const preview = await api('/api/v1/integration/playlists/sync', {
+                    method: 'POST',
+                    body: JSON.stringify({ ...body, dryRun: true }),
+                });
+                const plan = preview.push?.preview;
+                const confirmationToken = preview.push?.confirmationToken;
+                if (!plan || !confirmationToken) throw new Error('服务器未返回可确认的覆盖预演，请勿继续');
+                const confirmed = typeof showSelect !== 'function' || await showSelect(
+                    '确认覆盖 Songloft 歌单',
+                    `源歌单：${plan.sourceTracks} 首\n远端当前：${plan.currentRemoteTracks} 首\n覆盖后：${plan.desiredRemoteTracks} 首\n新增：${plan.addCount} 首\n删除：${plan.removeCount} 首\n\n本次操作会先保存远端歌曲 ID 快照，写后严格校验，失败时自动回滚。确认执行吗？`,
+                    { danger: plan.removeCount > 0 },
+                );
+                if (!confirmed) return;
+                body.replaceConfirmation = confirmationToken;
+            } else {
+                const confirmed = typeof showSelect !== 'function' || await showSelect('确认同步歌单', `方向：${body.direction}\n模式：${body.mode}\n安全追加不会删除 Songloft 已有歌曲。确认继续吗？`);
+                if (!confirmed) return;
+            }
             const data = await api('/api/v1/integration/playlists/sync', { method: 'POST', body: JSON.stringify(body) });
             const output = el('integration-sync-result');
-            output.textContent = JSON.stringify({ playlistResolution: data.playlistResolution, counts: data.counts, push: data.push && { addedIds: data.push.addedIds, removedIds: data.push.removedIds, unmatched: data.push.unmatched?.length }, pull: data.pull && { added: data.pull.added, unmatched: data.pull.unmatched?.length }, conflicts: data.conflicts }, null, 2);
+            output.textContent = JSON.stringify({ playlistResolution: data.playlistResolution, counts: data.counts, push: data.push && { addedIds: data.push.addedIds, removedIds: data.push.removedIds, unmatched: data.push.unmatched?.length, backupId: data.push.backupId }, pull: data.pull && { added: data.pull.added, unmatched: data.pull.unmatched?.length }, conflicts: data.conflicts }, null, 2);
             output.classList.remove('hidden');
             const resolution = data.playlistResolution === 'existing_name' ? '已使用同名 Songloft 歌单' : data.playlistResolution === 'created' ? '已创建 Songloft 歌单' : '已使用指定 Songloft 歌单';
             if (typeof showSuccess === 'function') showSuccess(`歌单同步完成 · ${resolution}`);

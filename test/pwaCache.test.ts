@@ -142,6 +142,9 @@ test('PWA caching bypasses private and large responses and updates per build', (
     assert.match(worker, /request\.headers\.has\('range'\)/)
     assert.match(worker, /url\.pathname === '\/js\/config\.js'/)
     assert.match(worker, /cacheName\.startsWith\(CACHE_PREFIX\)/)
+    assert.match(worker, /const cache = await caches\.open\(cacheName\)/)
+    assert.match(worker, /const cached = await cache\.match\(request, \{ ignoreSearch: true \}\)/)
+    assert.doesNotMatch(worker, /const cached = await caches\.match\(request/)
   }
 
   assert.match(playerPwa, /updateViaCache: 'none'/)

@@ -115,11 +115,10 @@ test('authoritative playlist replacement clears historical conflict warnings', (
   assert.deepEqual(playlistSyncConflicts('merge', 'merge', ['removed_on_one_side'], []), ['removed_on_one_side'])
 })
 
-test('playlist replacement refuses an empty authoritative source by default', () => {
+test('playlist replacement never infers a destructive clear from an empty source', () => {
   assert.equal(playlistReplacementSafetyIssue(0, [1, 2], []), 'empty_source_playlist')
   assert.equal(playlistReplacementSafetyIssue(3, [1, 2], []), 'empty_resolved_playlist')
   assert.equal(playlistReplacementSafetyIssue(3, [1, 2], [2]), null)
-  assert.equal(playlistReplacementSafetyIssue(0, [1, 2], [], true), null)
   assert.equal(playlistReplacementSafetyIssue(0, [], []), null)
 })
 

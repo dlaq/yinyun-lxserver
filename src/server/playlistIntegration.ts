@@ -404,16 +404,15 @@ export const playlistSyncConflicts = (
  * Empty input is not a meaningful authoritative state for a destructive
  * cross-system replace. It is commonly produced by a transient empty snapshot
  * or a UI race, and historically caused a populated Songloft playlist to be
- * reduced to zero. An explicit opt-in is kept for API clients that genuinely
- * intend to clear a remote playlist.
+ * reduced to zero. Clearing a remote playlist is never inferred from a sync
+ * request; it must be implemented as a separate, explicitly audited action.
  */
 export const playlistReplacementSafetyIssue = (
   sourceTrackCount: number,
   currentRemoteIds: Array<number | string>,
   desiredRemoteIds: Array<number | string>,
-  allowEmptyReplace = false,
 ) => {
-  if (allowEmptyReplace || currentRemoteIds.length === 0) return null
+  if (currentRemoteIds.length === 0) return null
   if (sourceTrackCount === 0) return 'empty_source_playlist'
   if (desiredRemoteIds.length === 0) return 'empty_resolved_playlist'
   return null

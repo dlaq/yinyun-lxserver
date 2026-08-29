@@ -42,6 +42,17 @@ const getUserDir = (username: string) => path.join(global.lx.userPath, getUserDi
 const getSettingsPath = (username: string) => path.join(getUserDir(username), File.userSettingsJSON)
 const getSharesPath = (username: string) => path.join(getUserDir(username), File.userPlaylistSharesJSON)
 
+const writeTextAtomic = (filePath: string, content: string) => {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(temporary, content, 'utf8')
+    fs.renameSync(temporary, filePath)
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
+  }
+}
+
 const readJsonObject = (filePath: string): Record<string, any> => {
   if (!fs.existsSync(filePath)) return {}
   try {
@@ -75,9 +86,7 @@ const readShares = (username: string): PlaylistShareRecord[] => {
 }
 
 const writeShares = (username: string, shares: PlaylistShareRecord[]) => {
-  const userDir = getUserDir(username)
-  if (!fs.existsSync(userDir)) fs.mkdirSync(userDir, { recursive: true })
-  fs.writeFileSync(getSharesPath(username), JSON.stringify(shares, null, 2), 'utf8')
+  writeTextAtomic(getSharesPath(username), JSON.stringify(shares, null, 2))
 }
 
 const cloneSongs = (songs: LX.Music.MusicInfo[]): LX.Music.MusicInfo[] => JSON.parse(JSON.stringify(songs))
@@ -93,7 +102,7 @@ export const setPlaylistSharingEnabled = (username: string, enabled: boolean) =>
   if (!fs.existsSync(userDir)) fs.mkdirSync(userDir, { recursive: true })
   const settings = readJsonObject(getSettingsPath(username))
   settings.enablePlaylistSharing = enabled
-  fs.writeFileSync(getSettingsPath(username), JSON.stringify(settings, null, 2), 'utf8')
+  writeTextAtomic(getSettingsPath(username), JSON.stringify(settings, null, 2))
   return enabled
 }
 

@@ -1,5 +1,9 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import * as dns from 'node:dns'
+import * as http from 'node:http'
+import * as https from 'node:https'
+import * as net from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'http'
 import { extractMetadata, loadUserApi, initUserApis, getApiStatus } from './userApi'
 import { normalizeUsername } from '@/utils/username'
@@ -46,10 +50,25 @@ export interface AccountSyncSource {
     content: string
 }
 
-const readBody = async (req: IncomingMessage): Promise<string> => new Promise((resolve, reject) => {
+const MAX_SOURCE_SCRIPT_BYTES = 2 * 1024 * 1024
+const SOURCE_IMPORT_TIMEOUT_MS = 15_000
+
+const readBody = async (req: IncomingMessage, limit = MAX_SOURCE_SCRIPT_BYTES): Promise<string> => new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
-    req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
+    let size = 0
+    let oversized = false
+    req.on('data', chunk => {
+        if (oversized) return
+        const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        size += value.length
+        if (size > limit) {
+            oversized = true
+            reject(new Error('Request body is too large'))
+            return
+        }
+        chunks.push(value)
+    })
+    req.on('end', () => { if (!oversized) resolve(Buffer.concat(chunks).toString('utf-8')) })
     req.on('error', reject)
 })
 
@@ -305,7 +324,7 @@ export const restoreOwnedSourcesFromSync = async (username: string, values: Acco
     }
 
     writeSources(owner, restored)
-    fs.writeFileSync(path.join(sourceDir, 'order.json'), JSON.stringify(restored.map(source => source.id), null, 2))
+    writeFileAtomic(path.join(sourceDir, 'order.json'), JSON.stringify(restored.map(source => source.id), null, 2))
     for (const source of restored) {
         setEnabledSourcePlatforms(owner, owner, source.id, selectedPlatforms.get(source.id) || source.supportedSources, source.supportedSources)
     }
@@ -444,19 +463,63 @@ const saveSource = async (
     })
 }
 
-const downloadScript = async (targetUrl: string, depth = 0): Promise<string> => {
+export const isDisallowedSourceImportAddress = (rawAddress: string): boolean => {
+    const address = rawAddress.toLowerCase().replace(/^\[|\]$/g, '').split('%')[0]
+    const mappedV4 = address.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1]
+    if (mappedV4) return isDisallowedSourceImportAddress(mappedV4)
+    if (net.isIP(address) === 6) {
+        return address === '::' || address === '::1' || address.startsWith('fc') || address.startsWith('fd') || /^fe[89ab]/.test(address)
+    }
+    if (net.isIP(address) !== 4) return true
+    const [a, b, c] = address.split('.').map(Number)
+    return a === 0 || a === 10 || a === 127 ||
+        (a === 100 && b >= 64 && b <= 127) ||
+        (a === 169 && b === 254) ||
+        (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) ||
+        (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+        (a === 198 && (b === 18 || b === 19)) ||
+        (a === 198 && b === 51 && c === 100) ||
+        (a === 203 && b === 0 && c === 113) ||
+        a >= 224
+}
+
+const resolvePublicSourceAddresses = async (hostname: string) => {
+    const normalizedHostname = hostname.replace(/^\[|\]$/g, '')
+    const literalFamily = net.isIP(normalizedHostname)
+    const addresses = literalFamily
+        ? [{ address: normalizedHostname, family: literalFamily }]
+        : await dns.promises.lookup(normalizedHostname, { all: true, verbatim: true })
+    if (!addresses.length || addresses.some(item => isDisallowedSourceImportAddress(item.address))) {
+        throw new Error('Source URL must resolve only to public network addresses')
+    }
+    return addresses
+}
+
+export const downloadSourceScript = async (targetUrl: string, depth = 0): Promise<string> => {
     if (depth > 5) throw new Error('Too many redirects')
     const parsedUrl = new URL(targetUrl)
     if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
         throw new Error('Only HTTP and HTTPS URLs are supported')
     }
-    const protocol = parsedUrl.protocol === 'https:' ? require('https') : require('http')
+    if (parsedUrl.username || parsedUrl.password) throw new Error('Source URL credentials are not allowed')
+    const addresses = await resolvePublicSourceAddresses(parsedUrl.hostname)
+    const protocol = parsedUrl.protocol === 'https:' ? https : http
     return new Promise((resolve, reject) => {
-        protocol.get(parsedUrl, (response: any) => {
+        const request = protocol.get(parsedUrl, {
+            // Pin the connection to an address validated above. Re-resolving in
+            // the HTTP client would reopen a DNS-rebinding window.
+            lookup: ((...args: any[]) => {
+                const callback = args[args.length - 1]
+                const options = args[1]
+                if (options?.all) callback(null, addresses)
+                else callback(null, addresses[0].address, addresses[0].family)
+            }) as any,
+        }, (response: any) => {
             const statusCode = Number(response.statusCode || 0)
             if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
                 response.resume()
-                resolve(downloadScript(new URL(response.headers.location, parsedUrl).toString(), depth + 1))
+                resolve(downloadSourceScript(new URL(response.headers.location, parsedUrl).toString(), depth + 1))
                 return
             }
             if (statusCode !== 200) {
@@ -465,10 +528,20 @@ const downloadScript = async (targetUrl: string, depth = 0): Promise<string> => 
                 return
             }
             const chunks: Buffer[] = []
-            response.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)))
+            let size = 0
+            response.on('data', (chunk: Buffer) => {
+                size += chunk.length
+                if (size > MAX_SOURCE_SCRIPT_BYTES) {
+                    request.destroy(new Error('Source script exceeds the 2 MiB limit'))
+                    return
+                }
+                chunks.push(Buffer.from(chunk))
+            })
             response.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
             response.on('error', reject)
-        }).on('error', reject)
+        })
+        request.setTimeout(SOURCE_IMPORT_TIMEOUT_MS, () => request.destroy(new Error('Source import timed out')))
+        request.on('error', reject)
     })
 }
 
@@ -518,7 +591,7 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse, us
     try {
         const { url, filename, allowUnsafeVM } = JSON.parse(await readBody(req))
         if (!url || typeof url !== 'string') throw new Error('Invalid source URL')
-        const content = await downloadScript(url)
+        const content = await downloadSourceScript(url)
         await saveSource(req, res, username, filename || path.basename(new URL(url).pathname) || 'source.js', content, !!allowUnsafeVM, url)
     } catch (error: any) {
         console.error('[CustomSource] Import error:', error)
@@ -730,7 +803,7 @@ export async function handleReorder(req: IncomingMessage, res: ServerResponse, u
         }
         ordered.push(...sourceMap.values())
         writeSources(owner, ordered)
-        fs.writeFileSync(path.join(getSourceDir(owner), 'order.json'), JSON.stringify(ordered.map(source => source.id), null, 2))
+        writeFileAtomic(path.join(getSourceDir(owner), 'order.json'), JSON.stringify(ordered.map(source => source.id), null, 2))
         await initUserApis(owner)
         sendJson(res, 200, { success: true })
     } catch (error: any) {
@@ -756,7 +829,7 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse, us
             try {
                 const order = JSON.parse(fs.readFileSync(orderPath, 'utf-8'))
                 if (Array.isArray(order)) {
-                    fs.writeFileSync(orderPath, JSON.stringify(order.filter(id => id !== targetId), null, 2))
+                    writeFileAtomic(orderPath, JSON.stringify(order.filter(id => id !== targetId), null, 2))
                 }
             } catch { }
         }
