@@ -5,19 +5,22 @@ import test from 'node:test'
 
 const read = (relativePath: string): string => fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8')
 
-test('local playlist detail owns a history entry and restores its original host on back', () => {
+test('local playlist detail owns a numbered history entry and restores its original host on back', () => {
   const manager = read('public/music/js/songlist_manager.js')
 
   assert.match(manager, /pushDetailHistory\('local', detailState\.id\)/)
   assert.match(manager, /page:\s*'songlist-detail'/)
+  assert.match(manager, /songlistNavigationId:\s*navigationId/)
   assert.match(manager, /isDetailOpen:\s*function \(\)/)
   assert.match(manager, /closeDetail:\s*function \(fromPopState = false\)/)
+  assert.match(manager, /pendingBackNavigationId = detailState\.navigationId/)
+  assert.match(manager, /beginDetailClose\(\);\s*window\.history\.back\(\)/)
   assert.match(manager, /window\.history\.back\(\)/)
   assert.match(manager, /const hostParentId = detailState\.hostParentId \|\| \(detailState\.isLocal \? 'view-my-playlists' : 'view-songlist'\)/)
   assert.doesNotMatch(manager, /ensureDetailHost\('view-songlist'\);\s*switchTab\(returnTab\)/)
 })
 
-test('browser back delegates local playlist detail before search history handling', () => {
+test('browser back is settled by the playlist navigation state before generic detail handling', () => {
   const app = read('public/music/app.js')
   const start = app.indexOf("window.addEventListener('popstate'")
   const end = app.indexOf('\n});', start)
@@ -25,18 +28,42 @@ test('browser back delegates local playlist detail before search history handlin
 
   assert.ok(start >= 0)
   assert.match(handler, /isLyricViewOpen/)
+  assert.match(handler, /SongListManager\?\.handlePopState\?\.\(e\.state\)/)
   assert.match(handler, /SongListManager\?\.isDetailOpen\?\.\(\)/)
   assert.match(handler, /SongListManager\.closeDetail\(true\)/)
+  assert.ok(handler.indexOf('handlePopState') < handler.indexOf('isDetailOpen'))
   assert.ok(handler.indexOf('SongListManager') < handler.indexOf('search-back-btn'))
+})
+
+test('a new playlist click waits for the matching back transition instead of being closed by it', () => {
+  const manager = read('public/music/js/songlist_manager.js')
+
+  assert.match(manager, /function queueDetailOpen\(kind, payload\)/)
+  assert.match(manager, /pendingDetailOpen = \{ kind, payload \}/)
+  assert.match(manager, /if \(pendingBackNavigationId !== null \|\| detailPhase !== 'closed' \|\| !pendingDetailOpen\) return/)
+  assert.match(manager, /pendingBackNavigationId = null;\s*detailState\.historyPushed = false;\s*openQueuedDetail\(\)/)
+  assert.match(manager, /if \(queueDetailOpen\('local', list\)\) return/)
 })
 
 test('returning from a local playlist keeps the mounted playlist grid without re-rendering the tab', () => {
   const manager = read('public/music/js/songlist_manager.js')
+  const app = read('public/music/app.js')
 
   assert.match(manager, /function keepReturnTabVisible\(tabId\)/)
   assert.match(manager, /view\.classList\.remove\('hidden', 'opacity-0'\)/)
   assert.match(manager, /if \(!keepReturnTabVisible\('my-playlists'\)\) switchTab\('my-playlists'\)/)
   assert.match(manager, /if \(!keepReturnTabVisible\(returnTab\)\) switchTab\(returnTab\)/)
+  assert.match(app, /function getMyPlaylistRenderSignature\(data\)/)
+  assert.match(app, /if \(grid\.dataset\.renderSignature === renderSignature\) return/)
+})
+
+test('delayed playback resume restores only the queue and cannot navigate away from the active tab', () => {
+  const app = read('public/music/app.js')
+
+  assert.match(app, /window\._pendingResumeQueueListId = state\.listId \|\| 'default'/)
+  assert.match(app, /const restoredList = findListById\(data, listId\)/)
+  assert.match(app, /currentPlaylist = restoredList/)
+  assert.doesNotMatch(app, /window\._pendingResumeListId/)
 })
 
 test('account sync rejects malformed, stale-account, and empty replacement snapshots', () => {

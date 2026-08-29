@@ -33,8 +33,13 @@ window.SongListManager = (function () {
         isLocal: false,
         playlist: null,
         historyPushed: false,
+        navigationId: 0,
     };
     let detailCloseTimer = null;
+    let detailNavigationSequence = 0;
+    let pendingBackNavigationId = null;
+    let pendingDetailOpen = null;
+    let detailPhase = 'closed';
 
     function pushDetailHistory(detailType, listId) {
         const current = window.history.state;
@@ -42,15 +47,20 @@ window.SongListManager = (function () {
             && current.detailType === detailType
             && String(current.listId || '') === String(listId || '')) {
             detailState.historyPushed = true;
-            return;
+            detailState.navigationId = Number(current.songlistNavigationId) || ++detailNavigationSequence;
+            return detailState.navigationId;
         }
+        const navigationId = ++detailNavigationSequence;
         window.history.pushState({
             ...(current && typeof current === 'object' ? current : {}),
             page: 'songlist-detail',
             detailType,
             listId: String(listId || ''),
+            songlistNavigationId: navigationId,
         }, '');
         detailState.historyPushed = true;
+        detailState.navigationId = navigationId;
+        return navigationId;
     }
 
     function ensureDetailHost(parentId) {
@@ -70,6 +80,64 @@ window.SongListManager = (function () {
         view.classList.remove('hidden', 'opacity-0');
         view.classList.add('opacity-100');
         return true;
+    }
+
+    function queueDetailOpen(kind, payload) {
+        if (pendingBackNavigationId === null && detailPhase !== 'closing') return false;
+        // A UI back operation owns the current history traversal until its
+        // popstate arrives.  Queue, rather than opening underneath that stale
+        // traversal: the old event must never close the next playlist.
+        pendingDetailOpen = { kind, payload };
+        return true;
+    }
+
+    function openQueuedDetail() {
+        if (pendingBackNavigationId !== null || detailPhase !== 'closed' || !pendingDetailOpen) return;
+        const next = pendingDetailOpen;
+        pendingDetailOpen = null;
+        if (next.kind === 'local') openLocalDetail(next.payload);
+        else loadDetail(next.payload.id, next.payload.source);
+    }
+
+    function beginDetailClose() {
+        const detailView = document.getElementById('songlist-detail-view');
+        if (!detailView || detailPhase === 'closed') return;
+        detailPhase = 'closing';
+        detailView.style.pointerEvents = 'none';
+        detailView.classList.add('translate-x-full');
+        const returnTab = detailState.returnTab || 'songlist';
+        const hostParentId = detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist');
+        if (detailCloseTimer) clearTimeout(detailCloseTimer);
+        detailCloseTimer = setTimeout(() => {
+            detailView.classList.add('hidden');
+            detailView.style.pointerEvents = '';
+            ensureDetailHost(hostParentId);
+            if (!keepReturnTabVisible(returnTab)) switchTab(returnTab);
+            detailCloseTimer = null;
+            detailPhase = 'closed';
+            openQueuedDetail();
+        }, 300);
+    }
+
+    function handleDetailPopState(nextState) {
+        if (pendingBackNavigationId !== null) {
+            // This is the completion of the UI back request.  The visual close
+            // already started synchronously, so only settle the matching
+            // history transition here.
+            pendingBackNavigationId = null;
+            detailState.historyPushed = false;
+            openQueuedDetail();
+            return true;
+        }
+        if (detailPhase !== 'closed'
+            && Number(nextState?.songlistNavigationId || 0) !== detailState.navigationId) {
+            // Browser/gesture back: there was no UI close request, so consume
+            // the history event and close the currently rendered detail once.
+            detailState.historyPushed = false;
+            beginDetailClose();
+            return true;
+        }
+        return false;
     }
 
     function escapeHtml(value) {
@@ -292,6 +360,7 @@ window.SongListManager = (function () {
     }
 
     async function loadDetail(id, source, page = 1) {
+        if (page === 1 && queueDetailOpen('network', { id, source })) return;
         detailState.id = id;
         detailState.source = source;
         detailState.returnTab = 'songlist';
@@ -303,9 +372,14 @@ window.SongListManager = (function () {
         const listContainer = document.getElementById('sl-detail-list');
 
         if (page === 1) {
+            detailPhase = 'opening';
             detailView.classList.remove('hidden');
+            detailView.style.pointerEvents = '';
             document.getElementById('sl-detail-collect')?.classList.remove('hidden');
             setTimeout(() => detailView.classList.remove('translate-x-full'), 10);
+            setTimeout(() => {
+                if (detailPhase === 'opening' && detailState.id === id) detailPhase = 'open';
+            }, 20);
             listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
 
             // Clear old data to prevent flickering
@@ -428,6 +502,7 @@ window.SongListManager = (function () {
 
     function openLocalDetail(list) {
         if (!list) return;
+        if (queueDetailOpen('local', list)) return;
         if (detailCloseTimer) {
             clearTimeout(detailCloseTimer);
             detailCloseTimer = null;
@@ -466,13 +541,18 @@ window.SongListManager = (function () {
         const listContainer = document.getElementById('sl-detail-list');
         if (!detailView || !listContainer) return;
         detailView.classList.remove('hidden');
+        detailView.style.pointerEvents = '';
+        detailPhase = 'opening';
         listContainer.innerHTML = '<div class="flex items-center justify-center py-20"><i class="fas fa-spinner fa-spin text-4xl text-emerald-500"></i></div>';
         const collect = document.getElementById('sl-detail-collect');
         if (collect) collect.classList.add('hidden');
         window.viewingPlaylist = detailState.list;
         window.ListSearch?.init('songlist', { renderCallback: () => window.SongListManager.renderDetail(), getList: () => detailState.list });
         renderDetail();
-        requestAnimationFrame(() => detailView.classList.remove('translate-x-full'));
+        requestAnimationFrame(() => {
+            detailView.classList.remove('translate-x-full');
+            if (detailPhase === 'opening') detailPhase = 'open';
+        });
         // Render immediately from the local snapshot, then replace stale local
         // cover URLs with fresh signed artwork without blocking navigation.
         void hydrateLocalDetailArtwork(list, detailState.id);
@@ -823,29 +903,37 @@ window.SongListManager = (function () {
         },
         isDetailOpen: function () {
             const detailView = document.getElementById('songlist-detail-view');
-            return Boolean(detailView && !detailView.classList.contains('hidden'));
+            return Boolean(detailView && detailPhase !== 'closed' && !detailView.classList.contains('hidden'));
+        },
+        handlePopState: handleDetailPopState,
+        getNavigationState: function () {
+            return {
+                phase: detailPhase,
+                navigationId: detailState.navigationId,
+                pendingBackNavigationId,
+                queuedDetailKind: pendingDetailOpen?.kind || '',
+            };
         },
         closeDetail: function (fromPopState = false) {
             this.closeCoverPicker();
+            if (detailPhase === 'closed') return;
+            if (fromPopState) {
+                pendingBackNavigationId = null;
+                detailState.historyPushed = false;
+                beginDetailClose();
+                return;
+            }
             if (!fromPopState
                 && detailState.historyPushed
-                && window.history.state?.page === 'songlist-detail') {
+                && window.history.state?.page === 'songlist-detail'
+                && Number(window.history.state?.songlistNavigationId || 0) === detailState.navigationId) {
+                pendingBackNavigationId = detailState.navigationId;
+                beginDetailClose();
                 window.history.back();
                 return;
             }
-            const detailView = document.getElementById('songlist-detail-view');
-            if (!detailView) return;
-            detailView.classList.add('translate-x-full');
-            const returnTab = detailState.returnTab || 'songlist';
-            const hostParentId = detailState.hostParentId || (detailState.isLocal ? 'view-my-playlists' : 'view-songlist');
             detailState.historyPushed = false;
-            if (detailCloseTimer) clearTimeout(detailCloseTimer);
-            detailCloseTimer = setTimeout(() => {
-                detailView.classList.add('hidden');
-                ensureDetailHost(hostParentId);
-                if (!keepReturnTabVisible(returnTab)) switchTab(returnTab);
-                detailCloseTimer = null;
-            }, 300);
+            beginDetailClose();
         },
         toggleTagSelector,
         playSong: function (index) {

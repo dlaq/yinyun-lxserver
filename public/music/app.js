@@ -5683,6 +5683,8 @@ async function restorePlaybackState() {
         }
 
         // 2. 恢复播放列表 (优先从持久化队列恢复)
+        const needsLocalQueueFallback = !(state.playlist && state.playlist.length > 0)
+            && (state.scope === 'local_list' || state.scope === 'local_all');
         if (state.playlist && state.playlist.length > 0) {
             currentPlaylist = state.playlist;
             currentPlayingScope = state.scope || 'network';
@@ -5713,8 +5715,11 @@ async function restorePlaybackState() {
         setTimeout(() => {
             if (state.scope === 'network') {
                 renderResults(currentPlaylist);
-            } else if (state.scope === 'local_list' || state.scope === 'local_all') {
-                window._pendingResumeListId = state.listId || 'default';
+            } else if (needsLocalQueueFallback) {
+                // Restore only the playback queue after account data arrives.
+                // A resume task must never navigate the visible UI or re-render
+                // another tab after the user has already started interacting.
+                window._pendingResumeQueueListId = state.listId || 'default';
             }
 
             // 初始化音频源但不立即播放（除非设置了自动播放，当前 playSong handles resumeTime）
@@ -7313,6 +7318,9 @@ window.addEventListener('popstate', (e) => {
 
     // 2. 本地歌单详情页是 SPA 内部导航。优先消费它自己的 history
     // entry，避免 iOS 侧滑/Android 系统返回直接离开页面并丢失账号列表。
+    if (window.SongListManager?.handlePopState?.(e.state)) {
+        return;
+    }
     if (window.SongListManager?.isDetailOpen?.()) {
         window.SongListManager.closeDetail(true);
         return;
@@ -9475,13 +9483,19 @@ function renderMyLists(data) {
     initFavoriteSidebarSortable(container);
     refreshFavoritesChildrenHeight();
 
-    // [Resume] 处理本地列表的自动恢复跳转
-    if (window._pendingResumeListId) {
-        const listId = window._pendingResumeListId;
-        delete window._pendingResumeListId;
-        console.log('[Resume] 正在同步本地播放列表上下文:', listId);
-        // 调用 handleListClick 以加载真实的列表数据并应用高亮
-        handleListClick(listId);
+    // [Resume] Account data can complete after the initial playback state.
+    // Restore the missing queue without changing the active tab/search scope.
+    if (window._pendingResumeQueueListId) {
+        const listId = window._pendingResumeQueueListId;
+        delete window._pendingResumeQueueListId;
+        const restoredList = findListById(data, listId);
+        if (Array.isArray(restoredList) && restoredList.length > 0) {
+            currentPlaylist = restoredList;
+            currentPlayingScope = listId === 'love' ? 'local_all' : 'local_list';
+            currentIndex = Math.min(Math.max(currentIndex, 0), currentPlaylist.length - 1);
+            renderQueue();
+            console.log('[Resume] 已恢复本地播放队列，不切换当前页面:', listId);
+        }
     }
 }
 
@@ -9500,6 +9514,28 @@ function getMyPlaylistArtwork(list) {
 
 let myPlaylistFilterText = '';
 
+function getMyPlaylistRenderSignature(data) {
+    const lists = Array.isArray(data?.userList) ? data.userList : [];
+    return JSON.stringify([
+        normalizeSyncUsername(data?.username),
+        myPlaylistFilterText,
+        ...lists.map(list => {
+            const songs = Array.isArray(list?.list) ? list.list : [];
+            return [
+                String(list?.id || ''),
+                String(list?.name || ''),
+                String(list?.author || list?.creator?.name || ''),
+                String(list?.sourceListId || ''),
+                String(list?.coverUrl || list?.artworkUrl || list?.cover || ''),
+                String(list?.coverSongId || ''),
+                String(list?.updatedAt || list?.locationUpdateTime || list?.createdAt || ''),
+                songs.length,
+                String(songs[0]?.id || songs[0]?.songmid || songs[0]?.songId || songs[0]?.hash || ''),
+            ];
+        }),
+    ]);
+}
+
 function filterMyPlaylists(value) {
     myPlaylistFilterText = String(value || '').trim().toLowerCase();
     renderMyPlaylists(window.currentListData || currentListData);
@@ -9514,12 +9550,16 @@ function renderMyPlaylists(data) {
     const lists = myPlaylistFilterText ? allLists.filter(item => String(item?.name || '').toLowerCase().includes(myPlaylistFilterText)) : allLists;
     if (countEl) countEl.textContent = String(allLists.length);
     if (!grid) return;
+    const renderSignature = getMyPlaylistRenderSignature(data);
+    if (grid.dataset.renderSignature === renderSignature) return;
     if (!data) {
         grid.innerHTML = '<div class="col-span-full py-20 text-center t-text-muted">请先在设置中登录音云账号</div>';
+        grid.dataset.renderSignature = renderSignature;
         return;
     }
     if (!lists.length) {
         grid.innerHTML = '<div class="col-span-full py-20 text-center t-text-muted"><i class="fas fa-music text-3xl mb-3 opacity-40"></i><p>还没有我的歌单</p><button type="button" onclick="handleCreateList()" class="mt-4 px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm">新建歌单</button></div>';
+        grid.dataset.renderSignature = renderSignature;
         return;
     }
     grid.innerHTML = lists.map(list => {
@@ -9540,6 +9580,7 @@ function renderMyPlaylists(data) {
             <div class="mt-3"><h3 class="text-sm font-bold t-text-main line-clamp-2 leading-snug group-hover:text-emerald-500 transition-colors" title="${escapeHtmlText(name)}">${escapeHtmlText(name)}</h3><p class="text-xs t-text-muted mt-1.5 truncate">${escapeHtmlText(author)}</p><p class="text-[11px] text-gray-400 mt-0.5 truncate">${escapeHtmlText(time)}</p><div class="flex items-center gap-3 mt-1.5 text-[11px] text-gray-400 font-medium"><span><i class="fas fa-music text-[10px] mr-1"></i>${songs.length}</span></div></div>
         </div>`;
     }).join('');
+    grid.dataset.renderSignature = renderSignature;
     if (typeof window.lazyLoadImages === 'function') window.lazyLoadImages();
 }
 
