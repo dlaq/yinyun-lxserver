@@ -71,7 +71,8 @@ test('lazy local covers refresh an expired user token once', () => {
   const playerApp = read('public/music/app.js')
   assert.match(playerApp, /url\.pathname === '\/api\/v1\/player\/music\/cache\/cover'/)
   assert.match(playerApp, /img\.dataset\.authRetry !== 'true'/)
-  assert.match(playerApp, /ensureUserAuthToken\(\{ force: true \}\)/)
+  assert.match(playerApp, /ensureUserAuthToken\(\{ force: true, staleToken \}\)/)
+  assert.match(playerApp, /force && staleToken && userToken && userToken !== staleToken/)
   assert.match(playerApp, /retryUrl\.searchParams\.set\('token', token\)/)
 })
 

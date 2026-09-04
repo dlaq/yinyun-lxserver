@@ -516,6 +516,7 @@ let userTokenRefreshPromise = null;
 
 async function ensureUserAuthToken(options = {}) {
     const force = options.force === true;
+    const staleToken = typeof options.staleToken === 'string' ? options.staleToken : '';
     const username = normalizeSyncUsername(localStorage.getItem('lx_sync_user'));
 
     if (!username) {
@@ -527,6 +528,12 @@ async function ensureUserAuthToken(options = {}) {
         return false;
     }
     if (userToken && !force) return true;
+    // Several lazy images can fail with the same expired token a few
+    // milliseconds apart.  Once one request has rotated the refresh token,
+    // later failures from that old access token must reuse the new access
+    // token instead of rotating the session again and invalidating each
+    // other's retries.
+    if (force && staleToken && userToken && userToken !== staleToken) return true;
     if (!userRefreshToken) {
         if (force) {
             userToken = null;
@@ -3506,7 +3513,8 @@ function lazyLoadImages(root = document) {
             // image failures continue to fall back immediately.
             if (img.dataset.authRetry !== 'true' && isRefreshableUserCover(src)) {
                 img.dataset.authRetry = 'true';
-                const refreshed = await ensureUserAuthToken({ force: true });
+                const staleToken = new URL(src, window.location.origin).searchParams.get('token') || '';
+                const refreshed = await ensureUserAuthToken({ force: true, staleToken });
                 const token = localStorage.getItem('lx_user_token') || '';
                 if (refreshed && token) {
                     const retryUrl = new URL(src, window.location.origin);
