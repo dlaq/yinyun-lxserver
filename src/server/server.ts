@@ -47,6 +47,21 @@ import { getUserIsAdmin, withUserRole } from '@/userRoles'
 import crypto from 'node:crypto'
 import needle from 'needle'
 import { MusicTagger, MetaPicture } from './musicTagger'
+import { NetworkPlaylistMonitor } from './networkPlaylistMonitor'
+import {
+  createExternalMusicLibrary,
+  type ExternalMusicLibrary,
+  getExternalLibraryInfo,
+  getExternalLocation,
+  listAllExternalMusicLibraries,
+  removeExternalMusicLibrary,
+} from './externalMusicLibraries'
+
+const networkPlaylistMonitor = new NetworkPlaylistMonitor({
+  getUsers: () => global.lx.config.users,
+  musicSdk,
+  normalizeSongInfo,
+})
 
 /** 生成随机 sessionId */
 const generateSessionId = () => crypto.randomBytes(32).toString('hex')
@@ -469,6 +484,7 @@ export const reloadServerData = async () => {
   } catch (err: any) {
     startupLog.error('Failed to re-init user APIs:', err.message)
   }
+  networkPlaylistMonitor.start()
 
   return true
 }
@@ -1092,6 +1108,26 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
     if (apiNamespace === 'admin' || apiNamespace === 'player') {
 
+      if (pathname === '/api/v1/player/network-playlists/status' && req.method === 'GET') {
+        const username = verifyUserAuth(req)
+        if (!username) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Unauthorized' })); return }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ success: true, data: networkPlaylistMonitor.getStatus(username) }))
+        return
+      }
+
+      if (pathname === '/api/v1/player/network-playlists/check' && req.method === 'POST') {
+        const username = verifyUserAuth(req)
+        if (!username) { res.writeHead(401, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, message: 'Unauthorized' })); return }
+        void networkPlaylistMonitor.checkAndGetStatus(username).then(data => {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ success: true, data }))
+        }).catch(error => {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: error?.message || 'Network playlist check failed' }))
+        })
+        return
+      }
 
       if (pathname === '/api/v1/admin/login' && req.method === 'POST') {
         void readBody(req).then(body => {
@@ -1112,6 +1148,64 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           }
         })
         return
+      }
+
+      if (pathname === '/api/v1/admin/external-libraries') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['frontend.password']) {
+          res.writeHead(401)
+          res.end('Unauthorized')
+          return
+        }
+        if (req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify(listAllExternalMusicLibraries().map(getExternalLibraryInfo)))
+          return
+        }
+        if (req.method === 'POST') {
+          void readBody(req).then(body => {
+            try {
+              const payload = JSON.parse(body)
+              const library = createExternalMusicLibrary(payload.username, payload.name)
+              res.writeHead(201, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify(getExternalLibraryInfo(library)))
+            } catch (error: any) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, message: error.message || 'Invalid external library' }))
+            }
+          })
+          return
+        }
+      }
+
+      const externalLibraryMatch = pathname.match(/^\/api\/v1\/admin\/external-libraries\/([^/]+)(?:\/(rescan))?$/)
+      if (externalLibraryMatch) {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['frontend.password']) {
+          res.writeHead(401)
+          res.end('Unauthorized')
+          return
+        }
+        const libraryId = decodeURIComponent(externalLibraryMatch[1])
+        if (req.method === 'DELETE' && !externalLibraryMatch[2]) {
+          const removed = removeExternalMusicLibrary(libraryId)
+          if (!removed) { res.writeHead(404); res.end('External library not found'); return }
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true, removed: true }))
+          return
+        }
+        if (req.method === 'POST' && externalLibraryMatch[2] === 'rescan') {
+          const library = listAllExternalMusicLibraries().find(item => item.id === libraryId) as ExternalMusicLibrary | undefined
+          if (!library) { res.writeHead(404); res.end('External library not found'); return }
+          void fileCache.syncCacheIndex(library.username, ['music'], getExternalLocation(library)).then(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(getExternalLibraryInfo(library)))
+          }).catch(error => {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, message: error.message || 'Rescan failed' }))
+          })
+          return
+        }
       }
 
       // The web player is a user-facing application.  Keep only the four
@@ -1299,6 +1393,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 dataPath,
               })
               saveUsers()
+              networkPlaylistMonitor.reloadUser(normalizedName)
 
               res.writeHead(200)
               res.end(JSON.stringify({ success: true }))
@@ -1378,6 +1473,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     user.dataPath = newDataPath
                     saveUserTokenConfig(normalizedNewName, getUserTokenConfig(normalizedNewName))
                     void initUserApis(currentName).then(() => initUserApis(normalizedNewName))
+                    networkPlaylistMonitor.reloadUser(currentName)
+                    networkPlaylistMonitor.reloadUser(normalizedNewName)
 
                     handleFinalUpdate()
                   } catch (err: any) {
@@ -1443,6 +1540,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                   // 断开该用户的连接
                   clearUserRuntimeState(targetName)
                   global.lx.config.users.splice(idx, 1)
+                  networkPlaylistMonitor.reloadUser(targetName)
                   void initUserApis(targetName)
                   deletedCount++
                 }
@@ -2099,6 +2197,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             }
 
             fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
+            networkPlaylistMonitor.reloadUser(resolvedUsername!)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true }))
           } catch (err: any) {
@@ -2992,12 +3091,19 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             res.end('Unauthorized')
             return
           }
+          const requestedLocation = urlObj.searchParams.get('location') || undefined
+          if (requestedLocation && !fileCache.isStorageLocationReadable(username, reqUsername, requestedLocation)) {
+            res.writeHead(403)
+            res.end('Invalid storage location')
+            return
+          }
           fileCache.serveCacheFile(
             req,
             res,
             decodeURIComponent(filename),
             reqUsername,
             requestedFolder as fileCache.CacheFolder | undefined,
+            requestedLocation,
           )
           return
         }
@@ -3139,7 +3245,13 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           res.end('Missing filename')
           return
         }
-        const cover = await fileCache.getCacheCover(filename, owner) as any
+        const location = urlObj.searchParams.get('location') || undefined
+        if (location && !fileCache.isStorageLocationReadable(username, owner, location)) {
+          res.writeHead(403)
+          res.end('Invalid storage location')
+          return
+        }
+        const cover = await fileCache.getCacheCover(filename, owner, location) as any
         if (cover && cover.data) {
           res.writeHead(200, {
             'Content-Type': cover.mime || 'image/jpeg',
@@ -3169,13 +3281,19 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               : (legacyFilenames ? (Array.isArray(legacyFilenames) ? legacyFilenames : [legacyFilenames]) : [])
             if (rawItems.length === 0) throw new Error('Missing items')
 
-            const deleteItems: Array<{ filename: string; folder?: fileCache.CacheFolder }> = rawItems.map((item: any) => {
+            const deleteItems: Array<{ filename: string; folder?: fileCache.CacheFolder; storageLocation?: string }> = rawItems.map((item: any) => {
               if (typeof item === 'string') return { filename: item }
               if (!item || typeof item.filename !== 'string') throw new Error('Invalid delete item')
               if (item.folder !== undefined && item.folder !== 'cache' && item.folder !== 'music') {
                 throw new Error('Invalid folder')
               }
-              return { filename: item.filename, folder: item.folder }
+              if (item.storageLocation && !fileCache.isStorageLocationAllowed(username, item.storageLocation)) {
+                throw new Error('Invalid or unauthorized storage location')
+              }
+              if (item.storageLocation?.startsWith('external:')) {
+                throw new Error('外部音乐库为只读目录，不能删除文件')
+              }
+              return { filename: item.filename, folder: item.folder, storageLocation: item.storageLocation }
             })
 
             // A normal account may manage playlists and its download queue,
@@ -5809,6 +5927,9 @@ export const startServer = async (port: number, ip: string) => {
       for (const user of global.lx.config.users) {
         void fileCache.syncCacheIndex(user.name)
       }
+      for (const library of listAllExternalMusicLibraries() as ExternalMusicLibrary[]) {
+        void fileCache.syncCacheIndex(library.username, ['music'], getExternalLocation(library))
+      }
     }
   }
 
@@ -5871,6 +5992,7 @@ export const startServer = async (port: number, ip: string) => {
   } catch (err: any) {
     console.error('[Server] Failed to initialize user APIs:', err.message)
   }
+  networkPlaylistMonitor.start()
 
   const scanAfterYinyunDownload = readIntegrationValue('SONGLOFT_SCAN_ON_DOWNLOAD', 'songloft.scanOnDownload').toLowerCase() !== 'false'
   let songloftScanTimer: ReturnType<typeof setTimeout> | null = null

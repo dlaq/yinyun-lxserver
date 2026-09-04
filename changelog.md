@@ -1,5 +1,60 @@
 # Changelog
 
+## v1.6.6 (2026-09-02)
+
+### 元信息补全
+
+- 修复本地音乐“补全元信息”未将 `Album Artist` 写入音频标签的问题。
+- 补全后重新读取音频文件即可获得正确的专辑艺术家信息；未提供专辑艺术家时回退到歌曲歌手。
+
+## v1.6.5 (2026-09-02)
+
+### 专辑艺术家元数据
+
+- 本地音乐、外部音乐库和下载文件支持读取并保存 `Album Artist` 元数据。
+- 本地音频优先读取内嵌的 `ALBUMARTIST`；没有该标签时回退到歌曲艺术家。
+- 扫描旧索引时会自动补齐专辑艺术家字段，不需要删除音乐文件或重建数据目录。
+- `/api/v1` 和 Subsonic 输出专辑艺术家；歌曲演唱者仍保留在 `artist/singer` 字段，多艺术家专辑不会被错误合并。
+- 增加专辑艺术家搜索和专辑归属处理，兼容只读外部音乐库。
+
+## v1.6.4
+
+### 移除局域网投放
+
+- 移除 Web 播放器中的 DLNA/UPnP 投放按钮和弹窗。
+- 移除 DLNA 设备发现、媒体会话和控制 API。
+- 移除服务端投放模块及其测试。
+- 外部音乐库仍可通过本地音乐、网页播放和 Subsonic 使用。
+
+## v1.6.3 (2026-08-24)
+
+### External music libraries
+
+- Added administrator-managed external music library configurations using `/server/external/<username>/<library-name>`.
+- External libraries are recursively indexed and available in Local Music, Web playback, and Subsonic.
+- External indexes are stored under `/server/data/external-index`; read-only mounts never receive metadata, lyric, rename, remaster, cleanup, or delete writes.
+- Added ownership checks for external storage locations and admin controls for add, rescan, and remove-configuration operations.
+- Documented the recommended `:ro` Docker Compose mapping and clarified that removing a configuration does not delete host music files.
+
+## v1.6.2 (2026-08-24)
+
+### Server-side network playlist monitoring
+
+- Moved network playlist update checks from the browser timer to a persistent server background task.
+- Checks continue after the browser is closed and follow each user's enable switch and interval.
+- Persisted per-playlist status keeps update indicators and records the last error without losing the previous update state.
+
+### LAN casting
+
+- Added DLNA/UPnP MediaRenderer discovery and server-side casting controls for play, pause, stop, and volume.
+- Only files already present in the current user's server cache or music directory can be cast.
+- Added short-lived cast sessions so a renderer can stream from the NAS without browser authentication headers.
+- AirPlay, Chromecast, and private speaker protocols such as XiaoAI are not claimed as supported in this release.
+
+### Upgrade notes
+
+- This release keeps the existing data directories and `/api/v1` structure. No migration is required.
+
 ## v1.6.1 (2026-08-19)
 
 ### 管理配置持久化

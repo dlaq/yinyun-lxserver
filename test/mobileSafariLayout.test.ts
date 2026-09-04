@@ -23,6 +23,21 @@ test('player and admin opt into mobile safe-area layout', () => {
   assert.match(playerHtml, /id="songlist-detail-view"[\s\S]*?overflow-y-auto custom-scrollbar/)
   assert.match(playerHtml, /id="sl-detail-list"\s+class="p-2 space-y-1 pb-20"/)
 
+  for (const viewId of ['view-songlist', 'view-my-playlists', 'view-leaderboard', 'view-localmusic']) {
+    assert.match(
+      playerHtml,
+      new RegExp(`id="${viewId}"[\\s\\S]{0,260}?overflow-y-auto[\\s\\S]{0,120}?md:overflow-hidden`),
+      `${viewId} must use the page as the mobile scroll container`,
+    )
+  }
+  for (const listId of ['songlist-grid', 'my-playlists-grid', 'lb-songs-list', 'lm-list-container']) {
+    assert.match(
+      playerHtml,
+      new RegExp(`id="${listId}"[\\s\\S]{0,260}?overflow-visible[\\s\\S]{0,160}?md:overflow-y-auto`),
+      `${listId} must not create a nested mobile scroll box`,
+    )
+  }
+
   const adminCss = read('public/style.css')
   assert.match(adminCss, /height:\s*100dvh/)
   assert.match(adminCss, /safe-area-inset-top/)

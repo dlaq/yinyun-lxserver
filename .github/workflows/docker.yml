@@ -51,6 +51,18 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run regression tests
+        run: npm test
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Build server and static assets
+        run: npm run build
+
       # Add QEMU for multi-platform build
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

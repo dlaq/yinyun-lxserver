@@ -93,6 +93,18 @@ test('network playlist refresh cannot persist a transient empty source response'
   assert.match(refresh, /current\.list = previousList/)
 })
 
+test('background network playlist status patches badges without re-rendering playlists', () => {
+  const app = read('public/music/app.js')
+  const start = app.indexOf('function applyNetworkListStatusesV162')
+  const end = app.indexOf('\nasync function loadNetworkListStatusesV162', start)
+  const applyStatuses = app.slice(start, end)
+
+  assert.ok(start >= 0)
+  assert.match(applyStatuses, /querySelectorAll\('\[data-network-list-status\]'\)/)
+  assert.doesNotMatch(applyStatuses, /renderMyLists\(/)
+  assert.match(app, /data-network-list-status=/)
+})
+
 test('player and automatic Songloft synchronization are append-only', () => {
   const app = read('public/music/app.js')
   const start = app.indexOf('async function syncSongloftPlaylist')

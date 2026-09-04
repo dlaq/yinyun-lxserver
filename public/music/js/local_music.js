@@ -1421,7 +1421,8 @@ window.LocalMusicManager = {
                     item.coverCheckedSize || item.size || 0,
                     1
                 ].join('-');
-                const coverUrl = `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(libraryOwner)}&folder=music${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}&v=${encodeURIComponent(coverVersion)}`;
+                const locationQuery = item.storageLocation ? `&location=${encodeURIComponent(item.storageLocation)}` : '';
+                const coverUrl = `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(libraryOwner)}&folder=${encodeURIComponent(item.folder || 'music')}${locationQuery}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}&v=${encodeURIComponent(coverVersion)}`;
                 coverHtml = `<img data-src="${this.escapeAttr(coverUrl)}" data-lm-cover-index="${index}" src="/_player/assets/logo.svg" loading="lazy" fetchpriority="low" class="lazy-image lm-cover-image is-placeholder w-10 h-10 md:w-12 md:h-12 rounded-lg object-cover shadow-sm flex-shrink-0 border t-border-main mr-2.5 md:mr-4 ml-0.5 md:ml-3">`;
             }
 
@@ -1824,8 +1825,8 @@ window.LocalMusicManager = {
         const songInfo = {
             ...item.songInfo,
             // Reconstruct full URL locally
-            url: `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(item))}/${encodeURIComponent(item.filename)}?folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
-            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(this.getLibraryOwner(item))}&folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            url: `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(item))}/${encodeURIComponent(item.filename)}?folder=${encodeURIComponent(item.folder || 'music')}${item.storageLocation ? `&location=${encodeURIComponent(item.storageLocation)}` : ''}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(this.getLibraryOwner(item))}&folder=${encodeURIComponent(item.folder || 'music')}${item.storageLocation ? `&location=${encodeURIComponent(item.storageLocation)}` : ''}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
             isLocal: true,
             folder: item.folder,
             _localOwner: this.getLibraryOwner(item)
@@ -1835,8 +1836,8 @@ window.LocalMusicManager = {
         // We might want to construct a playlist of local tracks.
         const playlist = this.displayData.map(d => ({
             ...d.songInfo,
-            url: `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(d))}/${encodeURIComponent(d.filename)}?folder=${d.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
-            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(d.filename)}&user=${encodeURIComponent(this.getLibraryOwner(d))}&folder=${d.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            url: `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(d))}/${encodeURIComponent(d.filename)}?folder=${encodeURIComponent(d.folder || 'music')}${d.storageLocation ? `&location=${encodeURIComponent(d.storageLocation)}` : ''}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
+            pic: `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(d.filename)}&user=${encodeURIComponent(this.getLibraryOwner(d))}&folder=${encodeURIComponent(d.folder || 'music')}${d.storageLocation ? `&location=${encodeURIComponent(d.storageLocation)}` : ''}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`,
             isLocal: true,
             _localOwner: this.getLibraryOwner(d)
         }));
@@ -1896,7 +1897,7 @@ window.LocalMusicManager = {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({
-                    items: items.map(item => ({ filename: item.filename, folder: item.folder }))
+                    items: items.map(item => ({ filename: item.filename, folder: item.folder, storageLocation: item.storageLocation }))
                 })
             });
             const result = await res.json();
@@ -2162,7 +2163,7 @@ window.LocalMusicManager = {
         if (!item) return;
         const username = (window.currentListData && window.currentListData.username) || localStorage.getItem('lx_sync_user') || '';
         const authToken = (window.getUserAuthHeaders ? window.getUserAuthHeaders()['x-user-token'] : null) || localStorage.getItem('lx_user_token') || '';
-        const url = `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(item))}/${encodeURIComponent(item.filename)}?folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`;
+        const url = `/api/v1/player/music/cache/file/${encodeURIComponent(this.getLibraryOwner(item))}/${encodeURIComponent(item.filename)}?folder=${encodeURIComponent(item.folder || 'music')}${item.storageLocation ? `&location=${encodeURIComponent(item.storageLocation)}` : ''}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`;
 
         const a = document.createElement('a');
         a.href = url;
@@ -2186,7 +2187,7 @@ window.LocalMusicManager = {
         // Use a slight delay to prevent browser from blocking multiple downloads
         targets.forEach((item, idx) => {
             setTimeout(() => {
-                const url = `/api/v1/player/music/cache/file/${encodeURIComponent(username)}/${encodeURIComponent(item.filename)}?folder=${item.folder}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`;
+                const url = `/api/v1/player/music/cache/file/${encodeURIComponent(username)}/${encodeURIComponent(item.filename)}?folder=${item.folder}${item.storageLocation ? `&location=${encodeURIComponent(item.storageLocation)}` : ''}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`;
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = item.filename;

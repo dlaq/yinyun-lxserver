@@ -13,6 +13,10 @@ services:
       # Mount the shared host library at that user root so external copies,
       # yinyun downloads, Songloft and Navidrome all see the same files.
       - ./music:/server/music/${LX_MUSIC_USER:-admin}
+      # Registered external libraries are indexed and streamed read-only.
+      # Keep the host root configurable so changing domains or hosts never
+      # requires rebuilding the image.
+      - ${EXTERNAL_MUSIC_ROOT:-./external}:/server/external:ro
     environment:
       NODE_ENV: production
       TZ: Asia/Shanghai

@@ -180,6 +180,7 @@ try {
 }
 window.settings = settings; // 显式挂载到 window
 window.networkListUpdateMap = new Set();
+window.networkListStatusMap = new Map();
 let networkListAutoCheckTimer = null;
 
 function escapeHtmlText(value) {
@@ -231,91 +232,68 @@ function parseNetworkListAutoCheckInterval(value) {
     return Math.max(intervalMs, minIntervalMs);
 }
 
+// The server owns monitoring and persistence. The browser only patches status
+// badges so a background check never destroys playlist navigation state.
+function applyNetworkListStatusesV162(statuses) {
+    window.networkListUpdateMap.clear();
+    window.networkListStatusMap.clear();
+    (Array.isArray(statuses) ? statuses : []).forEach(status => {
+        if (!status || !status.listId) return;
+        window.networkListStatusMap.set(String(status.listId), status);
+        if (status.changed) window.networkListUpdateMap.add(String(status.listId));
+    });
+    document.querySelectorAll('[data-network-list-status]').forEach(element => {
+        const status = window.networkListStatusMap.get(String(element.dataset.networkListStatus || ''));
+        const visible = Boolean(status?.changed || status?.error);
+        element.classList.toggle('hidden', !visible);
+        element.classList.toggle('bg-rose-500', Boolean(status?.changed && !status?.error));
+        element.classList.toggle('bg-amber-500', Boolean(status?.error));
+        element.textContent = status?.error ? '?' : '!';
+        element.title = status?.error ? `检测失败：${status.error}` : '歌单有更新';
+        element.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    });
+}
+
+async function loadNetworkListStatusesV162() {
+    if (!isUserLoggedIn()) return [];
+    const response = await fetch('/api/v1/player/network-playlists/status', {
+        headers: getUserAuthHeaders(), cache: 'no-store'
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const statuses = payload.data || [];
+    applyNetworkListStatusesV162(statuses);
+    return statuses;
+}
+
 function setupNetworkListAutoCheck() {
     if (networkListAutoCheckTimer) {
         clearInterval(networkListAutoCheckTimer);
         networkListAutoCheckTimer = null;
     }
-    if (!settings.autoUpdateNetworkList) {
-        return;
-    }
-    const intervalMs = parseNetworkListAutoCheckInterval(settings.networkListAutoCheckInterval);
-    if (intervalMs === null || intervalMs <= 0) {
-        return;
-    }
-    networkListAutoCheckTimer = setInterval(() => {
-        checkNetworkListUpdates().catch(err => console.error('[AutoCheck] 网络歌单检测失败:', err));
-    }, intervalMs);
-    console.log('[AutoCheck] 已设置网络歌单自动检测间隔：', settings.networkListAutoCheckInterval, '(', intervalMs, 'ms )');
+    if (isUserLoggedIn()) loadNetworkListStatusesV162().catch(err => console.warn('[NetworkPlaylist] status load failed:', err));
 }
 
 async function checkNetworkListUpdates(manual = false) {
-    if (!currentListData || !Array.isArray(currentListData.userList) || currentListData.userList.length === 0) {
-        if (manual && window.showToast) showToast('info', '当前没有可检查的网络歌单', 3000);
-        return;
+    if (!isUserLoggedIn()) {
+        if (manual && window.showToast) showToast('info', '请先登录同步账户', 3000);
+        return [];
     }
-
-    const targetLists = currentListData.userList.filter(l => l && l.sourceListId && l.source);
-    if (targetLists.length === 0) {
-        if (manual && window.showToast) showToast('info', '当前没有可检查的网络歌单', 3000);
-        return;
-    }
-
-    const changedLists = [];
-    const failedLists = [];
-
-    for (const list of targetLists) {
-        try {
-            const url = `${API_BASE}/songList/detail?source=${encodeURIComponent(list.source)}&id=${encodeURIComponent(list.sourceListId)}&page=1`;
-            const res = await fetch(url, {
-                headers: getUserAuthHeaders(),
-                cache: 'no-store',
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
-            if (!data || !Array.isArray(data.list)) {
-                throw new Error('远端歌单数据不完整');
-            }
-
-            const remoteList = data.list.map(item => {
-                const formatted = formatSongToLxMusicStandard(item);
-                if (!formatted.source) formatted.source = list.source;
-                return formatted;
-            });
-
-            const localList = Array.isArray(list.list) ? list.list : [];
-            const sameLength = localList.length === remoteList.length;
-            const sameIds = sameLength && localList.every((item, index) => item && remoteList[index] && String(item.id || '') === String(remoteList[index].id || '') && String(item.source || '') === String(remoteList[index].source || ''));
-            if (!sameIds) {
-                window.networkListUpdateMap.add(list.id);
-                changedLists.push(list.name || list.id || list.sourceListId);
-            } else {
-                window.networkListUpdateMap.delete(list.id);
-            }
-        } catch (err) {
-            console.error('[CheckNetworkListUpdates] 检查失败:', list.name || list.id || list.sourceListId, err);
-            failedLists.push(list.name || list.id || list.sourceListId);
-        }
-    }
-
-    if (typeof renderMyLists === 'function') {
-        renderMyLists(currentListData);
-    }
-
+    const response = await fetch('/api/v1/player/network-playlists/check', {
+        method: 'POST', headers: getUserAuthHeaders(), cache: 'no-store'
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.success === false) throw new Error(payload.message || `HTTP ${response.status}`);
+    const statuses = payload.data || [];
+    applyNetworkListStatusesV162(statuses);
+    const changed = statuses.filter(item => item.changed);
+    const failed = statuses.filter(item => item.error);
     if (manual) {
-        const changedListNames = changedLists.map(escapeHtmlText);
-        const failedListNames = failedLists.map(escapeHtmlText);
-        if (changedLists.length > 0) {
-            showSuccess(`检测到 ${changedLists.length} 个歌单已更新：${changedListNames.join('、')}`);
-        } else if (failedLists.length === 0) {
-            showSuccess('所有网络歌单均为最新状态');
-        }
-        if (failedLists.length > 0) {
-            showError(`部分歌单检测失败：${failedListNames.join('、')}`);
-        }
-    } else if (changedLists.length > 0 && window.showToast) {
-        showToast('info', `检测到 ${changedLists.length} 个网络歌单有更新`, 5000);
+        if (changed.length) showSuccess(`检测到 ${changed.length} 个网络歌单有更新`);
+        else if (!failed.length) showSuccess('所有网络歌单均为最新状态');
+        if (failed.length) showError(`${failed.length} 个网络歌单检测失败`);
     }
+    return statuses;
 }
 
 window.checkNetworkListUpdates = checkNetworkListUpdates;
@@ -6925,7 +6903,7 @@ function renderCacheList() {
         const authToken = (window.getUserAuthHeaders ? window.getUserAuthHeaders()['x-user-token'] : null)
             || localStorage.getItem('lx_user_token') || '';
         const coverUrl = item.hasCover
-            ? `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(username)}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`
+            ? `/api/v1/player/music/cache/cover?filename=${encodeURIComponent(item.filename)}&user=${encodeURIComponent(username)}${item.storageLocation ? `&location=${encodeURIComponent(item.storageLocation)}` : ''}${authToken ? `&token=${encodeURIComponent(authToken)}` : ''}`
             : '/_player/assets/logo.svg';
 
         return `
@@ -7131,7 +7109,7 @@ async function removeCacheItem(index) {
         const res = await fetch('/api/v1/player/music/cache/remove', {
             method: 'POST',
             headers: headers,
-            body: JSON.stringify({ items: [{ filename: item.filename, folder: item.folder }] })
+            body: JSON.stringify({ items: [{ filename: item.filename, folder: item.folder, storageLocation: item.storageLocation }] })
         });
 
         const result = await res.json();
@@ -7164,7 +7142,7 @@ async function batchDeleteCache() {
             method: 'POST',
             headers: headers,
             body: JSON.stringify({
-                items: deleteItems.map(item => ({ filename: item.filename, folder: item.folder }))
+                items: deleteItems.map(item => ({ filename: item.filename, folder: item.folder, storageLocation: item.storageLocation }))
             })
         });
 
@@ -9220,6 +9198,7 @@ async function handleLocalLogin(options = {}) {
                 if (currentListData) currentListData.username = user;
                 window.myPersonalListData = currentListData;
                 renderMyLists(listData);
+                setupNetworkListAutoCheck();
                 await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
                 updateSyncStatus(`<i class="fas fa-check-circle text-emerald-500"></i> ${background ? '已同步' : '已同步'} (用户: ${user})`);
                 if (requiredLoginVisible) hideRequiredLoginModal();
@@ -9411,9 +9390,9 @@ function renderMyLists(data) {
         const showExternalOps = listObj && listObj.sourceListId && listObj.source;
         let opsHtml = '';
         if (showExternalOps) {
-            const updateBadge = window.networkListUpdateMap && window.networkListUpdateMap.has(id)
-                ? `<span class="inline-flex items-center justify-center w-4 h-4 rounded-full bg-rose-500 text-white text-[10px] font-bold mr-2" title="歌单有更新">!</span>`
-                : '';
+            const listStatus = window.networkListStatusMap?.get(String(id));
+            const statusVisible = Boolean(listStatus?.changed || listStatus?.error);
+            const updateBadge = `<span data-network-list-status="${escapeHtmlText(id)}" class="${statusVisible ? 'inline-flex' : 'hidden'} items-center justify-center w-4 h-4 rounded-full ${listStatus?.error ? 'bg-amber-500' : 'bg-rose-500'} text-white text-[10px] font-bold mr-2" title="${escapeHtmlText(listStatus?.error ? `检测失败：${listStatus.error}` : '歌单有更新')}" aria-hidden="${statusVisible ? 'false' : 'true'}">${listStatus?.error ? '?' : '!'}</span>`;
             opsHtml = `
                 <i class="fas fa-sync-alt refresh-btn text-gray-400 hover:text-emerald-500 hidden group-hover:block flex-shrink-0 text-[10px] mr-2 transition-all active:rotate-180" 
                    title="更新歌单内容" 
@@ -9568,12 +9547,18 @@ function renderMyPlaylists(data) {
         const songs = Array.isArray(list?.list) ? list.list : [];
         const cover = getMyPlaylistArtwork(list);
         const source = list?.sourceListId ? '网络歌单导入' : '音云歌单';
+        const networkStatus = window.networkListStatusMap?.get(id);
+        const networkStatusVisible = Boolean(networkStatus?.changed || networkStatus?.error);
+        const networkStatusBadge = list?.sourceListId
+            ? `<span data-network-list-status="${escapeHtmlText(id)}" class="${networkStatusVisible ? 'inline-flex' : 'hidden'} absolute top-2 right-2 z-10 items-center justify-center w-6 h-6 rounded-full ${networkStatus?.error ? 'bg-amber-500' : 'bg-rose-500'} text-white text-xs font-bold shadow" title="${escapeHtmlText(networkStatus?.error ? `检测失败：${networkStatus.error}` : '歌单有更新')}" aria-hidden="${networkStatusVisible ? 'false' : 'true'}">${networkStatus?.error ? '?' : '!'}</span>`
+            : '';
         const author = String(list?.author || list?.creator?.name || source);
         const updatedAt = list?.updatedAt || list?.locationUpdateTime || list?.createdAt;
         const parsedTime = updatedAt ? new Date(typeof updatedAt === 'number' ? updatedAt : String(updatedAt)) : null;
         const time = parsedTime && Number.isFinite(parsedTime.getTime()) ? parsedTime.toISOString().slice(0, 10) : '—';
         return `<div class="group cursor-pointer" role="button" tabindex="0" aria-label="打开歌单 ${escapeHtmlText(name)}" onclick="handleMyPlaylistCardClick('${escapeHtmlText(id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();handleMyPlaylistCardClick('${escapeHtmlText(id)}')}">
             <div class="relative aspect-square overflow-hidden rounded-2xl shadow-md transition-all group-hover:shadow-xl group-hover:-translate-y-1">
+                ${networkStatusBadge}
                 <img data-src="${escapeHtmlText(cover)}" src="/_player/assets/logo.svg" alt="${escapeHtmlText(name)}" loading="lazy" class="lazy-image w-full h-full object-cover dynamic-logo is-placeholder" onerror="this.src='/_player/assets/logo.svg'; this.classList.add('is-placeholder');">
                 <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"><div class="w-12 h-12 bg-emerald-500 rounded-full flex items-center justify-center text-white shadow-lg transform scale-50 group-hover:scale-100 transition-transform duration-300"><i class="fas fa-play ml-1"></i></div></div>
             </div>
@@ -12229,6 +12214,7 @@ window.toggleLyrics = toggleLyrics;
 window.toggleFavorites = toggleFavorites;
 window.handleFavoritesClick = handleFavoritesClick;
 window.handleListClick = handleListClick;
+
 window.handleCreateList = handleCreateList;
 window.handleRefreshList = handleRefreshList;
 window.handleJumpToOriginalList = handleJumpToOriginalList;
