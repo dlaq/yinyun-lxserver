@@ -69,11 +69,15 @@ test('the first authenticated local-library visit shows a loading state', () => 
 
 test('lazy local covers refresh an expired user token once', () => {
   const playerApp = read('public/music/app.js')
+  const server = read('src/server/server.ts')
   assert.match(playerApp, /url\.pathname === '\/api\/v1\/player\/music\/cache\/cover'/)
   assert.match(playerApp, /img\.dataset\.authRetry !== 'true'/)
   assert.match(playerApp, /ensureUserAuthToken\(\{ force: true, staleToken \}\)/)
   assert.match(playerApp, /force && staleToken && userToken && userToken !== staleToken/)
   assert.match(playerApp, /retryUrl\.searchParams\.set\('token', token\)/)
+  assert.match(server, /getCacheRequestUsername\(req, urlToken\)/)
+  assert.match(server, /verifyUserAuthToken\(req, getRequestUserToken\(req, urlToken\)\)/)
+  assert.doesNotMatch(server, /\['x-user-token'\]\s*=\s*urlToken/)
 })
 
 test('pre-login initialization does not mutate cache config or call protected cache stats', () => {
