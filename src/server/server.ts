@@ -32,7 +32,7 @@ import { completePlaylistReplacement, createApiV1Handler } from './apiV1'
 import { PlaylistImportStore, PlaylistSyncStore } from './playlistIntegration'
 import { SongloftClient, SubsonicClient } from './songloftClient'
 import { APP_VERSION, APP_VERSION_TAG } from '@/version'
-import { classifyApiNamespace } from './apiNamespace'
+import { allowsPlayerQueryToken, classifyApiNamespace } from './apiNamespace'
 import {
   PlaylistSharingError,
   createPlaylistShare,
@@ -1361,10 +1361,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           pathname === '/api/v1/player/user/logout' ||
           pathname === '/api/v1/player/user/auth/verify'
         )
-        const querySessionUser = urlObj.searchParams.get('token')
-          ? getConfiguredUsername(userSessions.get(String(urlObj.searchParams.get('token')))?.username)
-          : null
-        if (!publicAuthPath && !verifyUserAuth(req) && !querySessionUser) {
+        // Browser media elements cannot attach x-user-token headers.  Accept a
+        // URL credential only for the three read-only media GET endpoints that
+        // need it, and validate it through the same service as header tokens.
+        // Never let a query credential authorize mutations or unrelated player
+        // APIs: URLs can leak through history, logs, and referrer metadata.
+        const queryTokenAllowed = allowsPlayerQueryToken(pathname, req.method)
+        const queryToken = queryTokenAllowed ? urlObj.searchParams.get('token') : null
+        const queryTokenUser = queryToken ? verifyUserAuthToken(req, queryToken) : null
+        if (!publicAuthPath && !verifyUserAuth(req) && !queryTokenUser) {
           res.writeHead(401, {
             'Content-Type': 'application/json; charset=utf-8',
             'Cache-Control': 'no-store',

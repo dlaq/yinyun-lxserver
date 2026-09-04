@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import path from 'node:path'
-import { classifyApiNamespace } from '../src/server/apiNamespace'
+import { allowsPlayerQueryToken, classifyApiNamespace } from '../src/server/apiNamespace'
 
 test('classifies each API v1 namespace without rewriting paths', () => {
   assert.equal(classifyApiNamespace('/api/v1/auth/login'), 'native')
@@ -16,6 +16,16 @@ test('rejects only the removed unversioned API namespace', () => {
   assert.equal(classifyApiNamespace('/api/login'), 'legacy')
   assert.equal(classifyApiNamespace('/api-v1'), 'none')
   assert.equal(classifyApiNamespace('/rest/ping.view'), 'none')
+})
+
+test('allows query credentials only on read-only player media endpoints', () => {
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/cover', 'GET'), true)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/file/dlaq/song.flac', 'GET'), true)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/download', 'GET'), true)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/cover', 'POST'), false)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/file', 'GET'), false)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/remove', 'GET'), false)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/user/settings', 'GET'), false)
 })
 
 test('server route implementation uses versioned paths directly', () => {
