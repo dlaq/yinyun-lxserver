@@ -1393,6 +1393,18 @@ function switchTab(tabId) {
 
     if (tabId === 'localmusic') {
         document.getElementById('page-title').innerText = "本地音乐";
+        const localMusic = window.LocalMusicManager;
+        if (localMusic) {
+            localMusic.syncLocationSelector();
+            localMusic.resetFilters();
+            // Navigation owns the activation lifecycle.  Do not rely on the
+            // local-music script monkey-patching switchTab: script/deferred
+            // initialization order could overwrite that wrapper and leave a
+            // logged-in user permanently looking at the pre-login placeholder.
+            void localMusic.fetchData(localMusic.hasLoadedOnce);
+        }
+    } else if (window.LocalMusicManager?.batchMode) {
+        window.LocalMusicManager.toggleBatchMode();
     }
 
     // Collapse Favorites if leaving

@@ -59,9 +59,11 @@ test('shared local-library songs retain a durable playlist identity', () => {
 })
 
 test('the first authenticated local-library visit shows a loading state', () => {
+  const playerApp = read('public/music/app.js')
   const localMusic = read('public/music/js/local_music.js')
   assert.match(localMusic, /hasLoadedOnce: false/)
-  assert.match(localMusic, /fetchData\(window\.LocalMusicManager\.hasLoadedOnce\)/)
+  assert.match(playerApp, /void localMusic\.fetchData\(localMusic\.hasLoadedOnce\)/)
+  assert.doesNotMatch(localMusic, /window\.switchTab\s*=\s*function/)
   assert.match(localMusic, /if \(result\.success\) \{\s*this\.hasLoadedOnce = true/)
 })
 

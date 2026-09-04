@@ -836,26 +836,9 @@ window.LocalMusicManager = {
         this.fetchData();
         this.syncRemasterVisibility();
 
-        // Listen to tab switch to trigger refresh if we are on this tab
-        const origSwitchTab = window.switchTab;
-        window.switchTab = function (tabId) {
-            origSwitchTab(tabId);
-            if (tabId === 'localmusic') {
-                window.LocalMusicManager.syncLocationSelector();
-                window.LocalMusicManager.resetFilters();
-                // The pre-login placeholder says that authentication is
-                // required.  Keep the first authenticated fetch visible so a
-                // large shared library does not misleadingly show that stale
-                // message while the network request is still running.  Later
-                // visits refresh silently because valid rows already exist.
-                window.LocalMusicManager.fetchData(window.LocalMusicManager.hasLoadedOnce);
-            } else {
-                // Auto exit batch mode when leaving
-                if (window.LocalMusicManager.batchMode) {
-                    window.LocalMusicManager.toggleBatchMode();
-                }
-            }
-        };
+        // Tab activation is coordinated by the main navigation state machine.
+        // Keeping it there avoids a script-order race caused by replacing the
+        // global switchTab function from this independently loaded module.
     },
 
     syncLocationSelector() {
