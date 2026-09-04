@@ -61,6 +61,24 @@ interface ApiV1Dependencies {
   serverVersion: string
   getAuthSecret: () => string
   getUsers: () => Array<{ name: string; password: string; isAdmin?: boolean }>
+  loginUserSession?: (username: string, password: string, ip: string) => Promise<{
+    token: string
+    accessToken: string
+    refreshToken?: string
+    username: string
+    expiresAt?: number
+    credentialVersion?: number
+  } | null>
+  refreshUserSession?: (refreshToken: string) => Promise<{
+    token: string
+    accessToken: string
+    refreshToken?: string
+    username: string
+    expiresAt?: number
+    credentialVersion?: number
+  } | null>
+  logoutUserSession?: (accessToken: string) => Promise<void>
+  verifyUserAccessToken?: (accessToken: string) => { username: string } | null
   isAdminRequest?: (req: IncomingMessage) => boolean
   isAdminUser: (username: string) => boolean
   musicSdk: any
@@ -605,14 +623,19 @@ const getBearerToken = (req: IncomingMessage) => {
 
 const requireUser = (req: IncomingMessage, deps: ApiV1Dependencies, url?: URL) => {
   const token = getBearerToken(req)
-  let payload = token ? verifyApiToken(token, deps.getAuthSecret(), 'access') : null
+  const persistedSession = token ? deps.verifyUserAccessToken?.(token) : null
+  let payload = persistedSession ? null : token ? verifyApiToken(token, deps.getAuthSecret(), 'access') : null
   if (!payload && url?.searchParams.get('token')) {
     const mediaToken = url.searchParams.get('token')!
     const mediaPayload = verifyApiToken(mediaToken, deps.getAuthSecret(), 'media')
     const trackId = url.pathname.match(/^\/api\/v1\/library\/tracks\/([^/]+)\/(?:stream|cover)$/)?.[1]
     if (mediaPayload && trackId && mediaPayload.trackId === decodeURIComponent(trackId)) payload = mediaPayload
   }
-  const username = payload ? tryNormalizeUsername(payload.sub) : deps.getLegacyUser?.(req) || null
+  const username = persistedSession
+    ? tryNormalizeUsername(persistedSession.username)
+    : payload
+      ? tryNormalizeUsername(payload.sub)
+      : deps.getLegacyUser?.(req) || null
   if (!username || !deps.getUsers().some(user => user.name === username)) {
     throw new ApiError(401, 'unauthorized', '登录状态无效或已过期')
   }
@@ -1954,14 +1977,34 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     if (pathname === `${API_PREFIX}/auth/login` && req.method === 'POST') {
       const body = await readJson(req)
       const username = tryNormalizeUsername(body.username)
-      const user = username && deps.getUsers().find(item => item.name === username && item.password === body.password)
-      if (!user) throw new ApiError(401, 'invalid_credentials', '用户名或密码错误')
-      success(res, issueSession(user.name, deps.getAuthSecret()))
+      const configured = username && deps.getUsers().find(item => item.name === username)
+      if (!configured) throw new ApiError(401, 'invalid_credentials', '用户名或密码错误')
+      if (deps.loginUserSession) {
+        // Do not trust X-Forwarded-For from an arbitrary client. A deployment
+        // that needs the original reverse-proxy address must first introduce a
+        // trusted-proxy allowlist; otherwise the login-rate-limit key is trivial
+        // to rotate by spoofing this header.
+        const ip = String(req.socket.remoteAddress || 'unknown')
+        const session = await deps.loginUserSession(configured.name, String(body.password || ''), ip)
+        if (!session) throw new ApiError(401, 'invalid_credentials', '用户名或密码错误')
+        success(res, session)
+      } else {
+        if (configured.password !== body.password) throw new ApiError(401, 'invalid_credentials', '用户名或密码错误')
+        success(res, issueSession(configured.name, deps.getAuthSecret()))
+      }
       return true
     }
 
     if (pathname === `${API_PREFIX}/auth/refresh` && req.method === 'POST') {
       const body = await readJson(req)
+      if (deps.refreshUserSession) {
+        const session = await deps.refreshUserSession(String(body.refreshToken || ''))
+        if (!session || !deps.getUsers().some(item => item.name === session.username)) {
+          throw new ApiError(401, 'invalid_refresh_token', '刷新令牌无效或已过期')
+        }
+        success(res, session)
+        return true
+      }
       const payload = verifyApiToken(body.refreshToken, deps.getAuthSecret(), 'refresh')
       const username = payload ? tryNormalizeUsername(payload.sub) : null
       if (!username || !deps.getUsers().some(item => item.name === username)) {
@@ -1974,6 +2017,11 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 
     if (pathname === `${API_PREFIX}/auth/logout` && req.method === 'POST') {
       const token = getBearerToken(req)
+      if (token && deps.logoutUserSession) {
+        await deps.logoutUserSession(token)
+        success(res, { loggedOut: true })
+        return true
+      }
       const payload = token ? verifyApiToken(token, deps.getAuthSecret(), 'access') : null
       if (token && payload) revokedTokens.set(token, payload.exp * 1000)
       success(res, { loggedOut: true })

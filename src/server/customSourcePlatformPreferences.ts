@@ -135,3 +135,14 @@ export const removeSourcePlatformPreferences = (owner: string, sourceId: string)
     if (filtered.length !== preferences.length) writeSourcePlatformPreferences(username, filtered)
   }
 }
+
+export const removeUserSourcePlatformPreferences = (deletedUsername: string) => {
+  const deleted = normalizeUsername(deletedUsername)
+  for (const user of global.lx.config.users) {
+    const username = normalizeUsername(user.name)
+    if (username === deleted) continue
+    const preferences = readSourcePlatformPreferences(username)
+    const filtered = preferences.filter(item => item.owner !== deleted)
+    if (filtered.length !== preferences.length) writeSourcePlatformPreferences(username, filtered)
+  }
+}

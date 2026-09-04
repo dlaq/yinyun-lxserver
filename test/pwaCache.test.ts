@@ -11,7 +11,7 @@ const readPrecacheUrls = (relativePath: string): string[] => {
   const source = read(relativePath)
   const block = source.match(/const PRECACHE_URLS = \[([\s\S]*?)\];/)?.[1]
   assert.ok(block, `${relativePath} must declare PRECACHE_URLS`)
-  return [...block.matchAll(/'([^']+)'/g)].map(match => match[1])
+  return [...block.matchAll(/["']([^"']+)["']/g)].map(match => match[1])
 }
 
 const resolvePlayerAsset = (url: string): string => {
@@ -134,22 +134,33 @@ test('PWA caching bypasses private and large responses and updates per build', (
   const adminHtml = read('public/index.html')
   const buildHashScript = read('scripts/update-build-hash.js')
   const prepareBuild = read('scripts/prepare-build.mjs')
+  const generatePrecache = read('scripts/generate-pwa-precache.mjs')
 
   for (const worker of [playerWorker, adminWorker]) {
     assert.match(worker, /const BUILD_HASH = '[^']+';/)
     assert.match(worker, /startsWith\('\/api\/'\)/)
     assert.match(worker, /startsWith\('\/rest\/'\)/)
     assert.match(worker, /request\.headers\.has\('range'\)/)
-    assert.match(worker, /url\.pathname === '\/js\/config\.js'/)
+    assert.match(worker, /const CONFIG_PATH = '\/js\/config\.js'/)
+    assert.match(worker, /CONFIG_CACHE_KEY/)
+    assert.match(worker, /networkFirstConfig/)
+    assert.match(worker, /fetch\(CONFIG_PATH, \{ cache: 'no-store'/)
+    assert.match(worker, /networkFirstAsset/)
+    assert.match(worker, /cacheFirstHashedAsset/)
     assert.match(worker, /cacheName\.startsWith\(CACHE_PREFIX\)/)
-    assert.match(worker, /const cache = await caches\.open\(cacheName\)/)
-    assert.match(worker, /const cached = await cache\.match\(request, \{ ignoreSearch: true \}\)/)
     assert.doesNotMatch(worker, /const cached = await caches\.match\(request/)
+    const installBlock = worker.match(/self\.addEventListener\('install'[\s\S]*?self\.addEventListener\('fetch'/)?.[0] || ''
+    assert.doesNotMatch(installBlock, /skipWaiting/)
+    assert.match(worker, /event\.data\?\.type === 'SKIP_WAITING'/)
   }
 
   assert.match(playerPwa, /updateViaCache: 'none'/)
   assert.match(playerPwa, /CLEAR_RUNTIME_CACHES/)
   assert.match(playerPwa, /controllerchange/)
+  assert.match(playerPwa, /isPlaybackIdle/)
+  assert.match(playerPwa, /offerPendingUpdate/)
+  assert.match(playerPwa, /window\.confirm/)
+  assert.match(playerPwa, /pwa-offline-indicator/)
   assert.match(playerPwa, /const isDefaultHttpPort = location\.port === '' \|\| location\.port === '80'/)
   assert.match(playerPwa, /location\.protocol === 'http:' && isDefaultHttpPort/)
   assert.match(playerPwa, /target\.protocol = 'https:'/)
@@ -165,8 +176,13 @@ test('PWA caching bypasses private and large responses and updates per build', (
   assert.doesNotMatch(playerPwa, /const checkForUpdates = async/)
   assert.doesNotMatch(playerApp, /Promise\.all\(keys\.map\(k => caches\.delete\(k\)\)\)/)
   assert.match(playerApp, /key\.startsWith\('yinyun-player-'\) && key\.endsWith\('-runtime'\)/)
+  assert.match(playerApp, /function sanitizeCachedPlaylistArtwork/)
+  assert.match(playerApp, /function isSignedLocalArtwork/)
   assert.match(buildHashScript, /public', 'music', 'sw\.js'/)
   assert.match(buildHashScript, /public', 'sw\.js'/)
+  assert.match(generatePrecache, /PRECACHE:START/)
+  assert.match(generatePrecache, /public\/music\/sw\.js|public', 'music', 'sw\.js/)
+  assert.ok(prepareBuild.indexOf('generate-pwa-precache.mjs') < prepareBuild.indexOf('update-build-hash.js'))
   assert.ok(prepareBuild.indexOf('build-pwa-icons.mjs') < prepareBuild.indexOf('update-build-hash.js'))
   assert.ok(prepareBuild.indexOf('build-tailwind.mjs') < prepareBuild.indexOf('update-build-hash.js'))
 })

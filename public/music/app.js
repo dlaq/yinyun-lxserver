@@ -352,6 +352,46 @@ function getAdminAuthHeaders() {
 }
 window.getAdminAuthHeaders = getAdminAuthHeaders;
 
+function isSignedLocalArtwork(value) {
+    if (typeof value !== 'string' || !value) return false;
+    try {
+        const url = new URL(value, window.location.origin);
+        const localCover = /^\/api\/v1\/(?:library\/tracks\/[^/]+\/cover|player\/music\/cache\/cover)$/.test(url.pathname);
+        return url.origin === window.location.origin && localCover && url.searchParams.has('token');
+    } catch {
+        return false;
+    }
+}
+window.isSignedLocalArtwork = isSignedLocalArtwork;
+
+function sanitizeCachedPlaylistArtwork(data) {
+    if (!data || typeof data !== 'object') return data;
+    const safe = typeof structuredClone === 'function'
+        ? structuredClone(data)
+        : JSON.parse(JSON.stringify(data));
+    const clearArtwork = (item) => {
+        if (!item || typeof item !== 'object') return;
+        for (const key of ['img', 'picUrl', '_artworkUrl', 'artworkUrl', 'coverUrl']) {
+            if (isSignedLocalArtwork(item[key])) delete item[key];
+        }
+        if (item.meta && typeof item.meta === 'object' && isSignedLocalArtwork(item.meta.picUrl)) {
+            item.meta = { ...item.meta };
+            delete item.meta.picUrl;
+        }
+    };
+    const lists = [
+        { list: safe.defaultList },
+        { list: safe.loveList },
+        ...(Array.isArray(safe.userList) ? safe.userList : []),
+    ];
+    for (const playlist of lists) {
+        clearArtwork(playlist);
+        if (Array.isArray(playlist.list)) playlist.list.forEach(clearArtwork);
+    }
+    return safe;
+}
+window.sanitizeCachedPlaylistArtwork = sanitizeCachedPlaylistArtwork;
+
 async function hydratePersonalPlaylistArtwork(data) {
     if (!data) return data;
     const lists = [
@@ -9182,9 +9222,10 @@ async function handleLocalLogin(options = {}) {
             // file on a LAN NAS; showing a verified, same-account cache keeps
             // the player usable while the fresh snapshot is fetched below.
             try {
-                const cachedList = await window.ListStore?.get?.();
+                const cachedList = sanitizeCachedPlaylistArtwork(await window.ListStore?.get?.());
                 const cachedOwner = String(cachedList?.username || '').trim();
                 if (cachedList && (!cachedOwner || cachedOwner === user)) {
+                    await window.ListStore.set(cachedList).catch(() => {});
                     currentListData = { ...cachedList, username: user };
                     window.myPersonalListData = currentListData;
                     renderMyLists(currentListData);
@@ -10441,8 +10482,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 1. Restore cached list data (from IndexedDB) for logged in user only
     try {
-        const cachedList = await window.ListStore.get();
+        const cachedList = sanitizeCachedPlaylistArtwork(await window.ListStore.get());
         if (cachedList && isUserLoggedIn()) {
+            await window.ListStore.set(cachedList).catch(() => {});
             currentListData = cachedList;
             const savedUser = localStorage.getItem('lx_sync_user');
             if (savedUser && currentListData) {

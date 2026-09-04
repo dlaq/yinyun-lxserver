@@ -57,9 +57,10 @@ const readJsonObject = (filePath: string): Record<string, any> => {
   if (!fs.existsSync(filePath)) return {}
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected a JSON object')
+    return parsed
+  } catch (error: any) {
+    throw new Error(`Playlist sharing settings are unavailable: ${error?.message || error}`)
   }
 }
 
@@ -68,7 +69,7 @@ const readShares = (username: string): PlaylistShareRecord[] => {
   if (!fs.existsSync(filePath)) return []
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-    if (!Array.isArray(parsed)) return []
+    if (!Array.isArray(parsed)) throw new Error('expected a JSON array')
     const cutoff = Date.now() - SHARE_EXPIRY_MS
     const valid = parsed.filter(item =>
       item &&
@@ -80,8 +81,8 @@ const readShares = (username: string): PlaylistShareRecord[] => {
     ) as PlaylistShareRecord[]
     if (valid.length !== parsed.length) writeShares(username, valid)
     return valid
-  } catch {
-    return []
+  } catch (error: any) {
+    throw new Error(`Playlist sharing inbox is unavailable for ${username}: ${error?.message || error}`)
   }
 }
 
@@ -222,5 +223,19 @@ export const respondToPlaylistShare = async (username: string, shareId: unknown,
     }
   } finally {
     processingShares.delete(shareId)
+  }
+}
+
+export const removePlaylistSharesForUser = (deletedUsername: string) => {
+  const deleted = normalizeUsername(deletedUsername)
+  for (const user of global.lx.config.users) {
+    const username = normalizeUsername(user.name)
+    if (username === deleted) continue
+    const shares = readShares(username)
+    const filtered = shares.filter(share => share.fromUser !== deleted && share.toUser !== deleted)
+    if (filtered.length !== shares.length) writeShares(username, filtered)
+  }
+  for (const processing of [...processingShares]) {
+    if (processing.startsWith(`${deleted}:`)) processingShares.delete(processing)
   }
 }

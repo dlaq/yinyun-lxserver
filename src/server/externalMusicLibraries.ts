@@ -156,6 +156,20 @@ export const removeExternalMusicLibrary = (id: string): ExternalMusicLibrary | n
   return library
 }
 
+export const removeExternalMusicLibrariesForUser = (usernameValue: string) => {
+  const username = normalizeUsername(usernameValue)
+  const libraries = readLibraries()
+  const removed = libraries.filter(item => item.username === username)
+  if (!removed.length) return 0
+  writeLibraries(libraries.filter(item => item.username !== username))
+  for (const library of removed) {
+    // External originals are deliberately never removed; only generated index data is disposable.
+    const indexDir = path.join(getDataPath(), 'external-index', library.username, library.id)
+    fs.rmSync(indexDir, { recursive: true, force: true })
+  }
+  return removed.length
+}
+
 export const getExternalLibraryContainerPath = (library: ExternalMusicLibrary) => `/server/external/${library.username}/${library.name}`
 
 export const getExternalLibraryInfo = (library: ExternalMusicLibrary) => ({

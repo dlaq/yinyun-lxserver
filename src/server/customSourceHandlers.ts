@@ -98,12 +98,24 @@ const getSourceDir = (username: string) => {
     return getUserSourcePath(assertUsername(username))
 }
 
+const isSafeSourceId = (value: unknown): value is string => typeof value === 'string' &&
+    value.length > 0 && value !== '.' && value !== '..' && path.basename(value) === value
+
+const isStoredSource = (value: unknown): value is StoredSource => Boolean(
+    value && typeof value === 'object' &&
+    isSafeSourceId((value as any).id) &&
+    typeof (value as any).name === 'string' &&
+    Array.isArray((value as any).supportedSources) &&
+    (value as any).supportedSources.every((source: unknown) => typeof source === 'string' && source.length > 0) &&
+    typeof (value as any).enabled === 'boolean',
+)
+
 const readSources = (username: string): StoredSource[] => {
     const metaPath = path.join(getSourceDir(username), 'sources.json')
     if (!fs.existsSync(metaPath)) return []
     try {
         const value = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
-        if (!Array.isArray(value)) throw new Error(`Invalid source metadata for ${username}`)
+        if (!Array.isArray(value) || !value.every(isStoredSource)) throw new Error(`Invalid source metadata for ${username}`)
         return value
     } catch (error: any) {
         throw new Error(`Source metadata is unavailable for ${username}: ${error?.message || error}`)
@@ -178,7 +190,7 @@ export const getAdminOwnedSourceState = (username: string): AdminOwnedSourceStat
     let order = sources.map(item => item.metadata.id)
     if (fs.existsSync(orderPath)) {
         const parsed: unknown = JSON.parse(fs.readFileSync(orderPath, 'utf8'))
-        if (!Array.isArray(parsed) || parsed.some(id => typeof id !== 'string' || !sourceIds.has(id))) {
+        if (!Array.isArray(parsed) || new Set(parsed).size !== parsed.length || parsed.some(id => typeof id !== 'string' || !sourceIds.has(id))) {
             throw new Error(`Source order is invalid for ${owner}`)
         }
         order = [...new Set(parsed), ...order.filter(id => !(parsed as string[]).includes(id))] as string[]
@@ -240,85 +252,6 @@ export const restoreAdminOwnedSourceState = async (state: AdminOwnedSourceState)
         throw new Error(`Source state verification failed for ${owner}`)
     }
     return restored
-}
-
-export const syncOwnedSourcesForAdmin = async (
-    fromUsername: string,
-    rawTargetUsers: unknown,
-    rawMode: unknown,
-    rawSourceIds?: unknown,
-) => {
-    const owner = assertUsername(fromUsername)
-    if (!Array.isArray(rawTargetUsers) || rawTargetUsers.length === 0) throw new Error('At least one target user is required')
-    const mode = rawMode === 'overwrite' ? 'overwrite' : rawMode === 'append' ? 'append' : null
-    if (!mode) throw new Error('mode must be append or overwrite')
-    const targetUsers = [...new Set(rawTargetUsers.map(target => assertUsername(String(target))))].filter(target => target !== owner)
-    if (!targetUsers.length) throw new Error('At least one different target user is required')
-
-    const allSources = readSources(owner)
-    const selectedIds = rawSourceIds == null
-        ? allSources.map(source => source.id)
-        : Array.isArray(rawSourceIds)
-            ? [...new Set(rawSourceIds.map(id => String(id || '').trim()).filter(Boolean))]
-            : []
-    if (!selectedIds.length) throw new Error('At least one source is required')
-    const selectedSources = selectedIds.map(id => {
-        const source = allSources.find(item => item.id === id)
-        if (!source) throw new Error(`Source not found: ${id}`)
-        const scriptPath = path.join(getSourceDir(owner), source.id)
-        if (!fs.existsSync(scriptPath)) throw new Error(`Source script not found: ${source.id}`)
-        return {
-            source: { ...source, supportedSources: [...source.supportedSources] },
-            content: fs.readFileSync(scriptPath, 'utf-8'),
-            enabledSources: getEnabledSourcePlatforms(owner, owner, source.id, source.supportedSources),
-        }
-    })
-
-    const results = []
-    for (const targetUser of targetUsers) {
-        const targetDir = getSourceDir(targetUser)
-        const previous = readSources(targetUser)
-        const next = previous.map(source => ({ ...source, supportedSources: [...source.supportedSources] }))
-        const copied: string[] = []
-        const overwritten: string[] = []
-        const skipped: string[] = []
-
-        for (const selected of selectedSources) {
-            const existingIndex = next.findIndex(source => source.id === selected.source.id)
-            if (existingIndex >= 0 && mode === 'append') {
-                skipped.push(selected.source.id)
-                continue
-            }
-            const targetSource: StoredSource = {
-                ...selected.source,
-                supportedSources: [...selected.source.supportedSources],
-                uploadTime: new Date().toISOString(),
-            }
-            writeFileAtomic(path.join(targetDir, targetSource.id), selected.content)
-            if (existingIndex >= 0) {
-                next.splice(existingIndex, 1, targetSource)
-                removeSourceShare(targetUser, targetSource.id)
-                overwritten.push(targetSource.id)
-            } else {
-                next.push(targetSource)
-                copied.push(targetSource.id)
-            }
-            setEnabledSourcePlatforms(
-                targetUser,
-                targetUser,
-                targetSource.id,
-                selected.enabledSources,
-                targetSource.supportedSources,
-            )
-        }
-
-        writeSources(targetUser, next)
-        const orderPath = path.join(targetDir, 'order.json')
-        writeFileAtomic(orderPath, JSON.stringify(next.map(source => source.id), null, 2))
-        await initUserApis(targetUser)
-        results.push({ targetUser, copied, overwritten, skipped, total: next.length })
-    }
-    return { fromUser: owner, mode, results }
 }
 
 export const exportOwnedSourcesForSync = (username: string): AccountSyncSource[] => {
@@ -422,7 +355,7 @@ export const restoreOwnedSourcesFromSync = async (username: string, values: Acco
         restored.push(source)
     }
 
-    for (const [id, content] of scripts) fs.writeFileSync(path.join(sourceDir, id), content, 'utf-8')
+    for (const [id, content] of scripts) writeFileAtomic(path.join(sourceDir, id), content)
     for (const source of previous) {
         if (restored.some(item => item.id === source.id)) continue
         const scriptPath = path.join(sourceDir, source.id)
@@ -432,7 +365,7 @@ export const restoreOwnedSourcesFromSync = async (username: string, values: Acco
     }
 
     writeSources(owner, restored)
-    writeFileAtomic(path.join(sourceDir, 'order.json'), JSON.stringify(restored.map(source => source.id), null, 2))
+    atomicWriteJsonSync(path.join(sourceDir, 'order.json'), restored.map(source => source.id), { mode: 0o600 })
     for (const source of restored) {
         setEnabledSourcePlatforms(owner, owner, source.id, selectedPlatforms.get(source.id) || source.supportedSources, source.supportedSources)
     }
@@ -761,10 +694,11 @@ export async function handleList(_req: IncomingMessage, res: ServerResponse, use
         const orderPath = path.join(getSourceDir(owner), 'order.json')
         let order: string[] = []
         if (fs.existsSync(orderPath)) {
-            try {
-                const parsed = JSON.parse(fs.readFileSync(orderPath, 'utf-8'))
-                if (Array.isArray(parsed)) order = parsed
-            } catch { }
+            const parsed: unknown = JSON.parse(fs.readFileSync(orderPath, 'utf-8'))
+            if (!Array.isArray(parsed) || new Set(parsed).size !== parsed.length || parsed.some(id => typeof id !== 'string' || !ownSourceIds.has(id))) {
+                throw new Error(`Source order is invalid for ${owner}`)
+            }
+            order = parsed
         }
         const orderMap = new Map(order.map((id, index) => [id, index]))
         sources.sort((a, b) => {
@@ -913,16 +847,19 @@ export async function handleReorder(req: IncomingMessage, res: ServerResponse, u
         if (!Array.isArray(sourceIds)) throw new Error('sourceIds must be an array')
         const sources = readSources(owner)
         const sourceMap = new Map(sources.map(source => [source.id, source]))
+        if (new Set(sourceIds).size !== sourceIds.length || sourceIds.some(id => typeof id !== 'string' || !sourceMap.has(id))) {
+            throw new Error('sourceIds contains a duplicate or unknown source')
+        }
         const ordered: StoredSource[] = []
         for (const id of sourceIds) {
             const source = sourceMap.get(id)
-            if (!source) continue
+            if (!source) throw new Error(`Unknown source: ${id}`)
             ordered.push(source)
             sourceMap.delete(id)
         }
         ordered.push(...sourceMap.values())
         writeSources(owner, ordered)
-        writeFileAtomic(path.join(getSourceDir(owner), 'order.json'), JSON.stringify(ordered.map(source => source.id), null, 2))
+        atomicWriteJsonSync(path.join(getSourceDir(owner), 'order.json'), ordered.map(source => source.id), { mode: 0o600 })
         await initUserApis(owner)
         sendJson(res, 200, { success: true })
     } catch (error: any) {
@@ -938,20 +875,24 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse, us
         const targetId = id || sourceId
         const sources = readSources(owner)
         if (!sources.some(source => source.id === targetId)) throw new Error('Source not found')
+        const orderPath = path.join(getSourceDir(owner), 'order.json')
+        let order: string[] | null = null
+        if (fs.existsSync(orderPath)) {
+            const parsed: unknown = JSON.parse(fs.readFileSync(orderPath, 'utf-8'))
+            const sourceIds = new Set(sources.map(source => source.id))
+            if (!Array.isArray(parsed) || new Set(parsed).size !== parsed.length || parsed.some(id => typeof id !== 'string' || !sourceIds.has(id))) {
+                throw new Error(`Source order is invalid for ${owner}`)
+            }
+            order = parsed as string[]
+        }
         const scriptPath = path.join(getSourceDir(owner), targetId)
-        if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath)
         writeSources(owner, sources.filter(source => source.id !== targetId))
         removeSourceShare(owner, targetId)
         removeSourcePlatformPreferences(owner, targetId)
-        const orderPath = path.join(getSourceDir(owner), 'order.json')
-        if (fs.existsSync(orderPath)) {
-            try {
-                const order = JSON.parse(fs.readFileSync(orderPath, 'utf-8'))
-                if (Array.isArray(order)) {
-                    writeFileAtomic(orderPath, JSON.stringify(order.filter(id => id !== targetId), null, 2))
-                }
-            } catch { }
+        if (order) {
+            atomicWriteJsonSync(orderPath, order.filter(id => id !== targetId), { mode: 0o600 })
         }
+        if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath)
         await initUserApis(owner)
         sendJson(res, 200, { success: true })
     } catch (error: any) {

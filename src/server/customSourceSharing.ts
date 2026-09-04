@@ -130,3 +130,15 @@ export const removeSourceShare = (owner: string, sourceId: string): boolean => {
   writeSourceShares(filtered)
   return true
 }
+
+export const removeUserFromSourceShares = (username: string) => {
+  const normalized = normalizeUsername(username)
+  const shares = readSourceShares()
+  const filtered = shares.flatMap(share => {
+    if (share.owner === normalized) return []
+    if (share.targetUsers.includes('*') || !share.targetUsers.includes(normalized)) return [share]
+    const targetUsers = share.targetUsers.filter(target => target !== normalized)
+    return targetUsers.length ? [{ ...share, targetUsers }] : []
+  })
+  if (JSON.stringify(filtered) !== JSON.stringify(shares)) writeSourceShares(filtered)
+}

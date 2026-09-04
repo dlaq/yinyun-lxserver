@@ -7,6 +7,7 @@ const scripts = [
   'scripts/download-binary.js',
   'scripts/build-pwa-icons.mjs',
   'scripts/build-tailwind.mjs',
+  'scripts/generate-pwa-precache.mjs',
   'scripts/update-build-hash.js',
 ]
 

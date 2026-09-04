@@ -38,6 +38,7 @@ import {
   createPlaylistShare,
   getPendingPlaylistShares,
   isPlaylistSharingEnabled,
+  removePlaylistSharesForUser,
   respondToPlaylistShare,
   setPlaylistSharingEnabled,
 } from './playlistSharing'
@@ -59,12 +60,17 @@ import {
   getExternalLibraryInfo,
   getExternalLocation,
   listAllExternalMusicLibraries,
+  removeExternalMusicLibrariesForUser,
   removeExternalMusicLibrary,
 } from './externalMusicLibraries'
 import { AuthService, AuthServiceError, getBearerToken, setActiveAuthService, type AuthenticatedSession } from './authService'
 import { AdminOperationManager, AdminOperationError } from './adminOperations'
 import { readPersistedUsersSync, writePersistedUsersSync } from './userStore'
 import { applyPlaylistRepair, PlaylistRepairError, previewPlaylistRepair, recoverInterruptedPlaylistRepair } from './playlistRepair'
+import { fetchPublicRemoteBuffer, RemoteUrlPolicyError, resolvePublicRemoteTarget } from './remoteUrlPolicy'
+import { removeUserFromSourceShares } from './customSourceSharing'
+import { removeUserSourcePlatformPreferences } from './customSourcePlatformPreferences'
+import { getUserDeletionTargets, removeExactDeletionTarget, type DeletionTarget } from './userDeletion'
 
 const networkPlaylistMonitor = new NetworkPlaylistMonitor({
   getUsers: () => global.lx.config.users,
@@ -883,6 +889,18 @@ const handleApiV1 = createApiV1Handler({
   serverVersion: APP_VERSION,
   getAuthSecret: () => authService.enabled ? authService.getSigningSecret() : getServerId(),
   getUsers: () => global.lx.config.users,
+  loginUserSession: authService.enabled
+    ? (username, password, ip) => authService.loginUser(username, password, ip)
+    : undefined,
+  refreshUserSession: authService.enabled
+    ? refreshToken => authService.rotateRefreshToken(refreshToken)
+    : undefined,
+  logoutUserSession: authService.enabled
+    ? accessToken => authService.logoutToken(accessToken)
+    : undefined,
+  verifyUserAccessToken: authService.enabled
+    ? accessToken => authService.verifyAccessToken(accessToken, 'user')
+    : undefined,
   isAdminRequest,
   isAdminUser: isConfiguredAdminUser,
   musicSdk,
@@ -1649,7 +1667,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               }
 
               let deletedCount = 0
-              const deletedUsers: { name: string, dataPaths: string[] }[] = []
+              const deletedUsers: { name: string, targets: DeletionTarget[] }[] = []
 
               for (const targetName of targets) {
                 const idx = global.lx.config.users.findIndex(u => u.name === targetName)
@@ -1661,7 +1679,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                   if (deleteData && user.dataPath) {
                     deletedUsers.push({
                       name: targetName,
-                      dataPaths: [user.dataPath, getUserSourcePath(targetName)],
+                      targets: getUserDeletionTargets({
+                        username: targetName,
+                        userDirname: getUserDirname(targetName),
+                        userDataPath: user.dataPath,
+                        userSourcePath: getUserSourcePath(targetName),
+                        userRoot: global.lx.userPath,
+                        dataPath: global.lx.dataPath,
+                        processRoot: process.cwd(),
+                      }),
                     })
                   } else {
                     console.log(`[DeleteUser] Skipping data deletion for ${targetName}. deleteData=${deleteData}, hasDataPath=${!!user.dataPath}`)
@@ -1669,6 +1695,14 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
                   // 断开该用户的连接
                   clearUserRuntimeState(targetName)
+                  serverDownloadQueue.clearUser(targetName)
+                  remasterQueue.clear(targetName)
+                  for (const task of fileCache.activeTasks.get(targetName) || []) task.controller.abort()
+                  fileCache.activeTasks.delete(targetName)
+                  removePlaylistSharesForUser(targetName)
+                  removeUserFromSourceShares(targetName)
+                  removeUserSourcePlatformPreferences(targetName)
+                  removeExternalMusicLibrariesForUser(targetName)
                   global.lx.config.users.splice(idx, 1)
                   if (authService.enabled) await authService.deleteUser(targetName)
                   networkPlaylistMonitor.reloadUser(targetName)
@@ -1684,17 +1718,12 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 if (deleteData && deletedUsers.length > 0) {
                   console.log(`[DeleteUser] Processing ${deletedUsers.length} data folders deletion...`)
                   for (const user of deletedUsers) {
-                    for (const dataPath of user.dataPaths) {
+                    for (const target of user.targets) {
                       try {
-                        console.log(`[DeleteUser] Checking path: ${dataPath}`)
-                        if (fs.existsSync(dataPath)) {
-                          fs.rmSync(dataPath, { recursive: true, force: true })
-                          console.log(`Deleted user data folder: ${dataPath}`)
-                        } else {
-                          console.log(`[DeleteUser] Path not found: ${dataPath}`)
-                        }
+                        if (removeExactDeletionTarget(target)) console.log(`Deleted user data path: ${target.target}`)
                       } catch (err) {
                         console.error(`Failed to delete user data folder for ${user.name}:`, err)
+                        throw err
                       }
                     }
                   }
@@ -3996,14 +4025,22 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         try {
           const isTaggingMode = urlObj.searchParams.get('tag') === '1'
           const taskId = urlObj.searchParams.get('taskId')
-          console.log(`[DownloadProxy] Fetching: ${urlStr} (Tagging: ${isTaggingMode}, TaskId: ${taskId})`)
+          let safeLogTarget = 'invalid-url'
+          try {
+            const parsed = new URL(urlStr)
+            safeLogTarget = `${parsed.protocol}//${parsed.host}${parsed.pathname}`
+          } catch { /* validated below */ }
+          console.log(`[DownloadProxy] Fetching: ${safeLogTarget} (Tagging: ${isTaggingMode}, TaskId: ${taskId ? 'yes' : 'no'})`)
 
           // 使用原生 http/https 模块以获得最高的流媒体转发性能
           const http = require('http')
           const https = require('https')
 
           // Manual redirect handling for maximum control and stability
-          const doFetch = (targetUrl: string, attempt: number) => {
+          const MAX_PROXY_BYTES = 4 * 1024 * 1024 * 1024
+          const MAX_TAGGING_BYTES = 1024 * 1024 * 1024
+
+          const doFetch = async (targetUrl: string, attempt: number): Promise<void> => {
             if (attempt > 5) {
               console.error('[DownloadProxy] Too many redirects')
               if (!res.headersSent) {
@@ -4014,9 +4051,11 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             }
 
             try {
-              const parsedUrl = new URL(targetUrl)
+              const approved = await resolvePublicRemoteTarget(targetUrl)
+              const parsedUrl = approved.url
               const options: any = {
                 method: 'GET',
+                lookup: approved.lookup,
                 headers: {
                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                   'Referer': parsedUrl.origin
@@ -4030,15 +4069,27 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
               const lib = parsedUrl.protocol === 'https:' ? https : http
 
-              const proxyReq = lib.request(targetUrl, options, (proxyRes: any) => {
+              const proxyReq = lib.request(parsedUrl, options, (proxyRes: any) => {
                 // 处理重定向
                 if ([301, 302, 303, 307, 308].includes(proxyRes.statusCode)) {
                   const location = proxyRes.headers.location
                   if (location) {
-                    const nextUrl = location.startsWith('http') ? location : new URL(location, targetUrl).href
-                    doFetch(nextUrl, attempt + 1)
+                    const nextUrl = new URL(location, parsedUrl).href
+                    proxyRes.resume()
+                    void doFetch(nextUrl, attempt + 1)
                     return
                   }
+                }
+
+                const declaredLength = Number(proxyRes.headers['content-length'] || 0)
+                const responseLimit = isTaggingMode ? MAX_TAGGING_BYTES : MAX_PROXY_BYTES
+                if (Number.isFinite(declaredLength) && declaredLength > responseLimit) {
+                  proxyRes.destroy()
+                  if (!res.headersSent) {
+                    res.writeHead(413)
+                    res.end('Remote media is too large')
+                  }
+                  return
                 }
 
                 // 处理最终响应
@@ -4084,15 +4135,34 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                   let lastSpeedAt = Date.now()
                   let lastSpeedBytes = 0
                   let currentSpeed = 0
+                  let taggingAborted = false
+
+                  const abortTaggingDownload = (message: string) => {
+                    if (taggingAborted) return
+                    taggingAborted = true
+                    chunks.length = 0
+                    proxyRes.destroy()
+                    if (taskId) fileCache.cacheProgress.delete(taskId)
+                    if (!res.headersSent) {
+                      res.writeHead(413)
+                      res.end(message)
+                    } else {
+                      res.destroy()
+                    }
+                  }
 
                   if (taskId) {
                     fileCache.cacheProgress.set(taskId, { progress: 0, status: 'downloading', total, received: 0, speed: 0, updatedAt: Date.now() })
                   }
 
                   proxyRes.on('data', (c: any) => {
+                    received += c.length
+                    if (received > MAX_TAGGING_BYTES) {
+                      abortTaggingDownload('Remote media is too large for metadata tagging')
+                      return
+                    }
                     chunks.push(c)
                     if (taskId) {
-                      received += c.length
                       const now = Date.now()
                       if (now - lastSpeedAt >= 1000) {
                         currentSpeed = Math.max(0, (received - lastSpeedBytes) / ((now - lastSpeedAt) / 1000))
@@ -4103,7 +4173,26 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                       fileCache.cacheProgress.set(taskId, { progress, status: 'downloading', total, received, speed: currentSpeed, updatedAt: now })
                     }
                   })
+                  proxyRes.on('aborted', () => {
+                    if (!taggingAborted && !res.writableEnded) {
+                      taggingAborted = true
+                      chunks.length = 0
+                      if (taskId) fileCache.cacheProgress.delete(taskId)
+                      if (!res.headersSent) { res.writeHead(502); res.end('Upstream stream failed') }
+                      else res.destroy()
+                    }
+                  })
+                  proxyRes.on('error', (error: Error) => {
+                    if (taggingAborted) return
+                    taggingAborted = true
+                    chunks.length = 0
+                    if (taskId) fileCache.cacheProgress.delete(taskId)
+                    console.warn('[DownloadProxy] Tagging stream ended:', error.message)
+                    if (!res.headersSent) { res.writeHead(502); res.end('Upstream stream failed') }
+                    else res.destroy(error)
+                  })
                   proxyRes.on('end', async () => {
+                    if (taggingAborted) return
                     if (taskId) {
                       fileCache.cacheProgress.set(taskId, { progress: 100, status: 'tagging', total, received, speed: 0, updatedAt: Date.now() })
                     }
@@ -4133,13 +4222,26 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                         try {
                           let imgBuf: Buffer | null = null;
                           if (imageUrl.startsWith('http')) {
-                            const imgResp = await (global as any).fetch(imageUrl)
-                            if (imgResp.ok) imgBuf = Buffer.from(await imgResp.arrayBuffer())
+                            const parsedImage = new URL(imageUrl)
+                            const isInternalCover = /^\/api\/v1\/(?:library\/tracks\/[^/]+\/cover|player\/music\/cache\/cover)$/.test(parsedImage.pathname)
+                            if (isInternalCover) {
+                              const internalUrl = `http://127.0.0.1:${port}${parsedImage.pathname}${parsedImage.search}`
+                              const imgResp = await (global as any).fetch(internalUrl, {
+                                headers: req.headers['x-user-token'] ? { 'x-user-token': String(req.headers['x-user-token']) } : {},
+                              })
+                              if (imgResp.ok) imgBuf = Buffer.from(await imgResp.arrayBuffer())
+                            } else {
+                              imgBuf = (await fetchPublicRemoteBuffer(imageUrl, { maxBytes: 10 * 1024 * 1024 })).data
+                            }
                           } else if (imageUrl.startsWith('/api')) {
-                            // 内部 API 请求，使用请求头中的 host
-                            const hostLabel = req.headers.host || '127.0.0.1:2026'
-                            const internalUrl = `http://${hostLabel}${imageUrl}`
-                            const imgResp = await (global as any).fetch(internalUrl)
+                            const parsedImage = new URL(imageUrl, 'http://yinyun.local')
+                            if (!/^\/api\/v1\/(?:library\/tracks\/[^/]+\/cover|player\/music\/cache\/cover)$/.test(parsedImage.pathname)) {
+                              throw new Error('Unsupported internal artwork path')
+                            }
+                            const internalUrl = `http://127.0.0.1:${port}${parsedImage.pathname}${parsedImage.search}`
+                            const imgResp = await (global as any).fetch(internalUrl, {
+                              headers: req.headers['x-user-token'] ? { 'x-user-token': String(req.headers['x-user-token']) } : {},
+                            })
                             if (imgResp.ok) imgBuf = Buffer.from(await imgResp.arrayBuffer())
                           }
 
@@ -4152,7 +4254,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                             }
                           }
                         } catch (e: any) {
-                          console.warn('[DownloadProxy] Picture fetch/embed failed:', imageUrl, e.message)
+                          console.warn('[DownloadProxy] Picture fetch/embed failed:', e.message)
                         }
                       }
                       // [新增] 嵌入歌词 USLT 标签：SDK 返回 { promise, cancel }，必须 await .promise
@@ -4197,6 +4299,16 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 }
 
                 if (!res.headersSent) {
+                  let streamedBytes = 0
+                  proxyRes.on('data', (chunk: Buffer) => {
+                    streamedBytes += chunk.length
+                    if (streamedBytes > MAX_PROXY_BYTES) proxyRes.destroy(new Error('Remote media is too large'))
+                  })
+                  proxyRes.on('error', (error: Error) => {
+                    console.warn('[DownloadProxy] Upstream stream ended:', error.message)
+                    if (!res.headersSent) { res.writeHead(502); res.end('Upstream stream failed') }
+                    else res.destroy(error)
+                  })
                   res.writeHead(proxyRes.statusCode || 200, headers)
                   proxyRes.pipe(res)
                 }
@@ -4210,6 +4322,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 }
               })
 
+              proxyReq.setTimeout(30_000, () => proxyReq.destroy(new Error('Remote media request timeout')))
+
               // 如果客户端（浏览器）中止了请求（例如：用户拖拽进度条、切换歌曲等），应该立刻销毁上游的下载请求，防止持续占用服务器下行带宽
               req.on('close', () => {
                 if (!proxyReq.destroyed) {
@@ -4220,16 +4334,17 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               proxyReq.end()
 
             } catch (err: any) {
-              console.error('[DownloadProxy] Try Error:', err)
+              console.error('[DownloadProxy] Try Error:', err?.message || err)
               if (!res.headersSent) {
-                res.writeHead(500)
-                res.end('Internal Server Error')
+                const blocked = err instanceof RemoteUrlPolicyError
+                res.writeHead(blocked ? 403 : 502)
+                res.end(blocked ? 'Remote media address is not allowed' : 'Upstream request failed')
               }
             }
           }
 
           // Start the fetch process
-          doFetch(urlStr, 0)
+          void doFetch(urlStr, 0)
 
         } catch (err: any) {
           console.error('[DownloadProxy] Error:', err)

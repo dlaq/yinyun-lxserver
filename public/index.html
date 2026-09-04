@@ -52,7 +52,17 @@
                 const workerUrl = new URL(currentAdminScript || 'sw.js', document.baseURI);
                 if (window.CONFIG?.buildHash) workerUrl.searchParams.set('v', window.CONFIG.buildHash);
                 navigator.serviceWorker.register(workerUrl.href, { scope: adminScope, updateViaCache: 'none' })
-                    .then(registration => registration.update())
+                    .then(registration => {
+                        const activate = worker => worker?.postMessage({ type: 'SKIP_WAITING' });
+                        registration.addEventListener('updatefound', () => {
+                            const installing = registration.installing;
+                            installing?.addEventListener('statechange', () => {
+                                if (installing.state === 'installed' && navigator.serviceWorker.controller) activate(installing);
+                            });
+                        });
+                        if (registration.waiting) activate(registration.waiting);
+                        return registration.update();
+                    })
                     .catch(err => console.error('[Admin PWA] Service Worker registration failed:', err));
             });
         }

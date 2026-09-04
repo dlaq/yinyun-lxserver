@@ -62,7 +62,8 @@ export default defineConfig({
             items: [
               { text: '管理后台', link: '/guide/sync-server' },
               { text: '备份与数据目录', link: '/guide/storage-backup' },
-              { text: '故障排查', link: '/guide/troubleshooting' }
+              { text: '故障排查', link: '/guide/troubleshooting' },
+              { text: '整体架构与治理', link: '/architecture' }
             ]
           },
           {

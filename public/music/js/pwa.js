@@ -1,5 +1,7 @@
 let deferredPrompt;
 let registrationPromise = Promise.resolve(null);
+let pendingUpdateWorker = null;
+let updatePromptShown = false;
 const installBtn = document.getElementById('pwa-install-btn');
 const hadControllerAtLoad = Boolean(navigator.serviceWorker?.controller);
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
@@ -17,6 +19,51 @@ const canUpgradeToHttps = location.protocol === 'http:' && isDefaultHttpPort && 
 const showPwaMessage = (message) => {
     if (typeof window.showInfo === 'function') window.showInfo(message);
     else console.info(`[PWA] ${message}`);
+};
+
+const isPlaybackIdle = () => {
+    const player = document.getElementById('audio-player');
+    return !player || player.paused || player.ended || !player.currentSrc;
+};
+
+const activatePendingUpdate = () => {
+    if (!pendingUpdateWorker) return false;
+    pendingUpdateWorker.postMessage({ type: 'SKIP_WAITING' });
+    pendingUpdateWorker = null;
+    return true;
+};
+
+const offerPendingUpdate = (worker) => {
+    if (!worker) return;
+    pendingUpdateWorker = worker;
+    if (isPlaybackIdle()) {
+        showPwaMessage('新版本已就绪，正在安全更新');
+        activatePendingUpdate();
+        return;
+    }
+    if (updatePromptShown) return;
+    updatePromptShown = true;
+    const accepted = window.confirm('音云新版本已下载。当前正在播放，是否现在更新并重新载入？\n选择“取消”后会在播放器空闲时自动更新。');
+    if (accepted) activatePendingUpdate();
+    else showPwaMessage('已延后更新；播放暂停或结束后会自动启用新版本');
+};
+
+const ensureOfflineIndicator = () => {
+    let indicator = document.getElementById('pwa-offline-indicator');
+    if (indicator) return indicator;
+    indicator = document.createElement('div');
+    indicator.id = 'pwa-offline-indicator';
+    indicator.setAttribute('role', 'status');
+    indicator.className = 'fixed top-2 left-1/2 -translate-x-1/2 z-[10000] rounded-full bg-amber-500 px-3 py-1 text-xs font-semibold text-gray-950 shadow-lg hidden';
+    indicator.textContent = '当前离线：可浏览已缓存界面，登录、同步和管理写入不会执行';
+    document.body.appendChild(indicator);
+    return indicator;
+};
+
+const updateConnectivityStatus = () => {
+    const indicator = ensureOfflineIndicator();
+    indicator.classList.toggle('hidden', navigator.onLine);
+    document.documentElement.classList.toggle('is-offline', !navigator.onLine);
 };
 
 const setInstallButtonVisible = (visible) => {
@@ -77,6 +124,7 @@ window.yinyunPwa = {
     clearRuntimeCaches,
     getStatus: getPwaStatus,
     checkForUpdates: checkPwaUpdates,
+    activateUpdate: activatePendingUpdate,
 };
 
 if (canUpgradeToHttps) {
@@ -105,11 +153,11 @@ if (canUpgradeToHttps) {
                     const installingWorker = registration.installing;
                     installingWorker?.addEventListener('statechange', () => {
                         if (installingWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                            installingWorker.postMessage({ type: 'SKIP_WAITING' });
+                            offerPendingUpdate(installingWorker);
                         }
                     });
                 });
-                if (registration.waiting) registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+                if (registration.waiting) offerPendingUpdate(registration.waiting);
                 await registration.update();
                 resolve(registration);
             } catch (error) {
@@ -123,6 +171,14 @@ if (canUpgradeToHttps) {
         if (document.visibilityState === 'visible') void checkPwaUpdates();
     });
 }
+
+window.addEventListener('online', updateConnectivityStatus);
+window.addEventListener('offline', updateConnectivityStatus);
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', updateConnectivityStatus, { once: true });
+else updateConnectivityStatus();
+const pwaAudio = document.getElementById('audio-player');
+pwaAudio?.addEventListener('pause', () => { if (pendingUpdateWorker) activatePendingUpdate(); });
+pwaAudio?.addEventListener('ended', () => { if (pendingUpdateWorker) activatePendingUpdate(); });
 
 window.addEventListener('beforeinstallprompt', (event) => {
     event.preventDefault();
