@@ -462,11 +462,13 @@ async function reloadUserFavorites() {
         }
 
         // 1. 先恢复已缓存的个人数据（避免切换时白屏）
-        const cachedOwner = normalizeSyncUsername(window.myPersonalListData?.username);
-        if (window.myPersonalListData && (!cachedOwner || cachedOwner === requestUser)) {
-            currentListData = window.myPersonalListData;
-            window.currentListData = window.myPersonalListData;
-            renderMyLists(window.myPersonalListData);
+        const cachedPersonalList = sanitizeCachedPlaylistArtwork(window.myPersonalListData);
+        const cachedOwner = normalizeSyncUsername(cachedPersonalList?.username);
+        if (cachedPersonalList && (!cachedOwner || cachedOwner === requestUser)) {
+            currentListData = cachedPersonalList;
+            window.currentListData = cachedPersonalList;
+            window.myPersonalListData = cachedPersonalList;
+            renderMyLists(cachedPersonalList);
         } else if (!currentListData || normalizeSyncUsername(currentListData.username) !== requestUser) {
             // Do not blank an already-rendered same-account snapshot while the
             // network request is pending.  A slow NAS must not turn a temporary
@@ -490,12 +492,13 @@ async function reloadUserFavorites() {
             const listData = await res.json();
             if (requestId !== favoritesReloadRequestId || normalizeSyncUsername(localStorage.getItem('lx_sync_user')) !== requestUser || !isUserLoggedIn()) return;
             if (canApplyAccountListSnapshot(listData, currentListData, requestUser)) {
-                currentListData = listData;
-                window.currentListData = listData;
-                window.myPersonalListData = listData;
-                await hydratePersonalPlaylistArtwork(listData);
-                renderMyLists(listData);
-                await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
+                const safeListData = sanitizeCachedPlaylistArtwork(listData);
+                currentListData = safeListData;
+                window.currentListData = safeListData;
+                window.myPersonalListData = safeListData;
+                await hydratePersonalPlaylistArtwork(safeListData);
+                renderMyLists(safeListData);
+                await window.ListStore.set(safeListData).catch(e => console.error('[IDBStore] 保存失败:', e));
                 if (typeof loadLibraryData === 'function') {
                     await loadLibraryData();
                 }
@@ -9245,21 +9248,23 @@ async function handleLocalLogin(options = {}) {
                     console.warn('[Sync] 忽略无效或空的旧歌单快照，保留当前账号数据');
                     return false;
                 }
-                currentListData = listData;
+                const safeListData = sanitizeCachedPlaylistArtwork(listData);
+                currentListData = safeListData;
                 if (currentListData) currentListData.username = user;
                 window.myPersonalListData = currentListData;
-                renderMyLists(listData);
+                renderMyLists(currentListData);
                 setupNetworkListAutoCheck();
-                await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
+                await window.ListStore.set(currentListData).catch(e => console.error('[IDBStore] 保存失败:', e));
                 updateSyncStatus(`<i class="fas fa-check-circle text-emerald-500"></i> ${background ? '已同步' : '已同步'} (用户: ${user})`);
                 if (requiredLoginVisible) hideRequiredLoginModal();
                 // Artwork/index work is deliberately detached from the fast
                 // login path so a slow NAS never makes authentication appear stuck.
                 void (async () => {
                 try {
-                    await hydratePersonalPlaylistArtwork(listData);
-                    renderMyLists(listData);
-                    await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 封面缓存失败:', e));
+                    await hydratePersonalPlaylistArtwork(safeListData);
+                    if (!isCurrentAccountSync(user, loginEpoch)) return;
+                    renderMyLists(safeListData);
+                    await window.ListStore.set(safeListData).catch(e => console.error('[IDBStore] 封面缓存失败:', e));
                 } catch (error) {
                     console.warn('[Artwork] 登录后封面补全失败:', error);
                 }
@@ -10522,7 +10527,11 @@ window.resetAllSettings = resetAllSettings;
 
 // Save list changes to the current account.
 async function pushDataChange(customListData) {
-    const listToSave = customListData || currentListData;
+    // Signed local artwork URLs are intentionally short-lived.  Persisting
+    // them into account snapshots makes the next login render expired URLs
+    // before artwork hydration can replace them, producing avoidable 401s and
+    // a visible cover flash.  Only stable playlist/song metadata is saved.
+    const listToSave = sanitizeCachedPlaylistArtwork(customListData || currentListData);
     if (!listToSave) return;
 
     // 1. 优先同步保存到客户端 IndexedDB 本地缓存
@@ -10564,10 +10573,11 @@ async function refreshUserListData() {
             console.warn('[Sync] 刷新时忽略无效或空的旧歌单快照，保留当前账号数据');
             return;
         }
-        await hydratePersonalPlaylistArtwork(listData);
-        setActiveListData(listData);
+        const safeListData = sanitizeCachedPlaylistArtwork(listData);
+        await hydratePersonalPlaylistArtwork(safeListData);
+        setActiveListData(safeListData);
         if (typeof renderMyLists === 'function') {
-            renderMyLists(listData);
+            renderMyLists(safeListData);
         }
 
         // [New] If currently viewing a local list, refresh its contents in main view
@@ -10577,7 +10587,7 @@ async function refreshUserListData() {
         }
 
         // Save to cache
-        await window.ListStore.set(listData).catch(e => console.error('[IDBStore] 保存失败:', e));
+        await window.ListStore.set(safeListData).catch(e => console.error('[IDBStore] 保存失败:', e));
         console.log('[Sync] List Data Refreshed');
     } catch (e) {
         console.error('[Sync] Failed to refresh list data:', e);

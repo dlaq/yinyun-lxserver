@@ -178,6 +178,8 @@ test('PWA caching bypasses private and large responses and updates per build', (
   assert.match(playerApp, /key\.startsWith\('yinyun-player-'\) && key\.endsWith\('-runtime'\)/)
   assert.match(playerApp, /function sanitizeCachedPlaylistArtwork/)
   assert.match(playerApp, /function isSignedLocalArtwork/)
+  assert.match(playerApp, /const safeListData = sanitizeCachedPlaylistArtwork\(listData\)/)
+  assert.match(playerApp, /const listToSave = sanitizeCachedPlaylistArtwork\(customListData \|\| currentListData\)/)
   assert.match(buildHashScript, /public', 'music', 'sw\.js'/)
   assert.match(buildHashScript, /public', 'sw\.js'/)
   assert.match(generatePrecache, /PRECACHE:START/)
