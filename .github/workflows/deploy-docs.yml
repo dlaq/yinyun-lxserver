@@ -46,6 +46,10 @@ jobs:
           path: docs/.vitepress/dist
 
   deploy:
+    # Forks do not necessarily enable GitHub Pages. Keep the documentation
+    # build as a required validation, but do not turn an unavailable optional
+    # publishing target into a permanent red CI result.
+    if: ${{ github.event.repository.has_pages }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
