@@ -65,6 +65,14 @@ test('the first authenticated local-library visit shows a loading state', () => 
   assert.match(localMusic, /if \(result\.success\) \{\s*this\.hasLoadedOnce = true/)
 })
 
+test('lazy local covers refresh an expired user token once', () => {
+  const playerApp = read('public/music/app.js')
+  assert.match(playerApp, /url\.pathname === '\/api\/v1\/player\/music\/cache\/cover'/)
+  assert.match(playerApp, /img\.dataset\.authRetry !== 'true'/)
+  assert.match(playerApp, /ensureUserAuthToken\(\{ force: true \}\)/)
+  assert.match(playerApp, /retryUrl\.searchParams\.set\('token', token\)/)
+})
+
 test('pre-login initialization does not mutate cache config or call protected cache stats', () => {
   const playerApp = read('public/music/app.js')
   assert.doesNotMatch(playerApp, /Initial Sync for Server Cache Config/)

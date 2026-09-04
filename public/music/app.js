@@ -3464,6 +3464,16 @@ let imageObserver;
 
 function lazyLoadImages(root = document) {
     const scope = root || document;
+    const isRefreshableUserCover = (value) => {
+        try {
+            const url = new URL(value, window.location.origin);
+            return url.origin === window.location.origin &&
+                url.pathname === '/api/v1/player/music/cache/cover' &&
+                url.searchParams.has('token');
+        } catch {
+            return false;
+        }
+    };
     const loadImage = (img) => {
         const src = img.getAttribute('data-src');
         if (!src) return;
@@ -3474,8 +3484,26 @@ function lazyLoadImages(root = document) {
         img.onload = () => {
             img.classList.remove('is-placeholder', 'opacity-0');
             img.removeAttribute('data-src');
+            delete img.dataset.authRetry;
         };
-        img.onerror = () => {
+        img.onerror = async () => {
+            // Local covers may enter the viewport after the short-lived user
+            // access token embedded in their URL has expired.  Refresh once
+            // through the in-memory rotating refresh token, preserve the
+            // exact media path, and retry with the new access token.  Other
+            // image failures continue to fall back immediately.
+            if (img.dataset.authRetry !== 'true' && isRefreshableUserCover(src)) {
+                img.dataset.authRetry = 'true';
+                const refreshed = await ensureUserAuthToken({ force: true });
+                const token = localStorage.getItem('lx_user_token') || '';
+                if (refreshed && token) {
+                    const retryUrl = new URL(src, window.location.origin);
+                    retryUrl.searchParams.set('token', token);
+                    retryUrl.searchParams.set('__auth_retry', String(Date.now()));
+                    img.src = `${retryUrl.pathname}${retryUrl.search}`;
+                    return;
+                }
+            }
             img.src = '/_player/assets/logo.svg';
             img.classList.add('is-placeholder');
             img.removeAttribute('data-src');
