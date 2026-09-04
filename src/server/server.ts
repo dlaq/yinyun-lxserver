@@ -282,10 +282,10 @@ const prepareReloadedUsers = (users: any[], config: LX.Config = global.lx.config
   return { users: normalizedUsers, renames }
 }
 
-const getRequestUserToken = (req: IncomingMessage, fallbackToken: string | null = null): string | null => {
+const getRequestUserToken = (req: IncomingMessage): string | null => {
   const header = req.headers['x-user-token']
   const token = Array.isArray(header) ? header[0] : header
-  return (typeof token === 'string' && token) ? token : fallbackToken
+  return (typeof token === 'string' && token) ? token : null
 }
 
 const verifyUserAuthToken = (req: IncomingMessage, token: string | null): string | null => {
@@ -346,7 +346,7 @@ export const verifyUserAuth = (req: IncomingMessage): string | null => {
 }
 
 const getCacheRequestUsername = (req: IncomingMessage, fallbackToken: string | null = null): string | null => {
-  const username = verifyUserAuthToken(req, getRequestUserToken(req, fallbackToken))
+  const username = verifyUserAuth(req) || verifyUserAuthToken(req, fallbackToken)
   return getConfiguredUsername(username)
 }
 
@@ -4006,7 +4006,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       // [新增] Download Proxy API
       if (pathname === '/api/v1/player/music/download' && req.method === 'GET') {
         const urlToken = urlObj.searchParams.get('token')
-        if (!verifyUserAuthToken(req, getRequestUserToken(req, urlToken))) {
+        if (!verifyUserAuth(req) && !verifyUserAuthToken(req, urlToken)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return

@@ -76,7 +76,8 @@ test('lazy local covers refresh an expired user token once', () => {
   assert.match(playerApp, /force && staleToken && userToken && userToken !== staleToken/)
   assert.match(playerApp, /retryUrl\.searchParams\.set\('token', token\)/)
   assert.match(server, /getCacheRequestUsername\(req, urlToken\)/)
-  assert.match(server, /verifyUserAuthToken\(req, getRequestUserToken\(req, urlToken\)\)/)
+  assert.match(server, /verifyUserAuth\(req\) \|\| verifyUserAuthToken\(req, fallbackToken\)/)
+  assert.match(server, /!verifyUserAuth\(req\) && !verifyUserAuthToken\(req, urlToken\)/)
   assert.doesNotMatch(server, /\['x-user-token'\]\s*=\s*urlToken/)
 })
 
