@@ -312,6 +312,10 @@ let toggleLyricsBtnTimeout = null; // 歌词按钮淡化计时器
 // ===== 同步账户认证 =====
 // 用户 Token：将明文密码传输改为 Token 验证
 let userToken = localStorage.getItem('lx_user_token');
+let userRefreshToken = null;
+// Admin bearer sessions are intentionally memory-only. A page reload requires
+// re-authentication and no administrator password/token is written to storage.
+let adminAccessToken = null;
 
 function normalizeSyncUsername(username) {
     return typeof username === 'string' ? username.trim().toLowerCase() : '';
@@ -332,8 +336,6 @@ function getUserAuthHeaders() {
     const storedUsername = localStorage.getItem('lx_sync_user') || '';
     const username = normalizeSyncUsername(storedUsername);
 
-    const adminPass = localStorage.getItem('lx_admin_password');
-
     const headers = {};
     if (userToken) {
         headers['x-user-name'] = username;
@@ -341,20 +343,14 @@ function getUserAuthHeaders() {
     } else if (username) {
         headers['x-user-name'] = username;
     }
-    if (adminPass) {
-        headers['x-frontend-auth'] = adminPass;
-    }
     return headers;
 }
 window.getUserAuthHeaders = getUserAuthHeaders;
 
-// Native user-list snapshots contain the original online song objects, while
-// the stable playlist API can enrich each row with a signed local cover and a
-// Songloft artwork fallback.  Hydrate covers after login without changing the
-// user's playlist data or playback IDs.
-function isSignedLocalArtwork(value) {
-    return /\/api\/v1\/library\/tracks\/[^/]+\/cover(?:\?|$)/i.test(String(value || ''));
+function getAdminAuthHeaders() {
+    return adminAccessToken ? { Authorization: `Bearer ${adminAccessToken}` } : {};
 }
+window.getAdminAuthHeaders = getAdminAuthHeaders;
 
 async function hydratePersonalPlaylistArtwork(data) {
     if (!data) return data;
@@ -410,8 +406,7 @@ window.addUserTokenToUrl = addUserTokenToUrl;
 function isUserLoggedIn() {
     const user = localStorage.getItem('lx_sync_user');
     const token = localStorage.getItem('lx_user_token');
-    const pass = localStorage.getItem('lx_sync_pass');
-    return !!normalizeSyncUsername(user) && !!(token || pass);
+    return !!normalizeSyncUsername(user) && !!token;
 }
 window.isUserLoggedIn = isUserLoggedIn;
 
@@ -479,9 +474,8 @@ let userTokenRefreshPromise = null;
 async function ensureUserAuthToken(options = {}) {
     const force = options.force === true;
     const username = normalizeSyncUsername(localStorage.getItem('lx_sync_user'));
-    const password = localStorage.getItem('lx_sync_pass') || '';
 
-    if (!username || !password) {
+    if (!username) {
         if (force) {
             userToken = null;
             localStorage.removeItem('lx_user_token');
@@ -490,6 +484,14 @@ async function ensureUserAuthToken(options = {}) {
         return false;
     }
     if (userToken && !force) return true;
+    if (!userRefreshToken) {
+        if (force) {
+            userToken = null;
+            localStorage.removeItem('lx_user_token');
+            if (typeof updateUserUI === 'function') updateUserUI();
+        }
+        return false;
+    }
     if (userTokenRefreshPromise) return userTokenRefreshPromise;
 
     userTokenRefreshPromise = (async () => {
@@ -498,17 +500,17 @@ async function ensureUserAuthToken(options = {}) {
             localStorage.removeItem('lx_user_token');
         }
         try {
-            const response = await fetch('/api/v1/player/user/login', {
+            const response = await fetch('/api/v1/player/user/refresh', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
+                body: JSON.stringify({ refreshToken: userRefreshToken })
             });
             if (!response.ok) {
                 if (response.status === 401 || response.status === 403) {
                     userToken = null;
                     localStorage.removeItem('lx_user_token');
                     localStorage.removeItem('lx_sync_user');
-                    localStorage.removeItem('lx_sync_pass');
+                    userRefreshToken = null;
                     stopPlaylistSharePolling();
                     if (typeof updateUserUI === 'function') updateUserUI();
                     if (typeof updateAdminUI === 'function') updateAdminUI();
@@ -521,9 +523,10 @@ async function ensureUserAuthToken(options = {}) {
             }
 
             const result = await response.json();
-            if (!result.success || !result.token) return false;
+            if (!result.success || !(result.accessToken || result.token)) return false;
 
-            userToken = result.token;
+            userToken = result.accessToken || result.token;
+            userRefreshToken = result.refreshToken || null;
             localStorage.setItem('lx_user_token', userToken);
             if (result.username) localStorage.setItem('lx_sync_user', normalizeSyncUsername(result.username));
             if (typeof updateUserUI === 'function') updateUserUI();
@@ -4374,13 +4377,16 @@ async function handleAdminAuth(message) {
     });
     if (pass) {
         try {
-            const response = await fetch('/api/v1/admin/verify', {
+            const response = await fetch('/api/v1/admin/login', {
                 method: 'POST',
-                headers: { 'x-frontend-auth': pass }
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: pass })
             });
 
             if (response.ok) {
-                localStorage.setItem('lx_admin_password', pass);
+                const result = await response.json();
+                adminAccessToken = result.accessToken || result.token || null;
+                if (!adminAccessToken) throw new Error('服务器未返回管理员会话');
                 updateAdminUI(); // 更新 UI 状态
                 return true;
             } else {
@@ -4417,6 +4423,10 @@ window.handleAdminLogin = handleAdminLogin;
 // 管理员退出登录处理
 async function handleAdminLogout() {
     if (!(await showSelect('管理员登出', '确定要退出管理员身份吗？'))) return;
+    if (adminAccessToken) {
+        await fetch('/api/v1/admin/logout', { method: 'POST', headers: getAdminAuthHeaders() }).catch(() => {});
+    }
+    adminAccessToken = null;
     localStorage.removeItem('lx_admin_password');
     updateAdminUI();
     syncSettingsUI();
@@ -4431,7 +4441,7 @@ window.handleAdminLogout = handleAdminLogout;
 
 // 更新管理员相关 UI 元素
 function updateAdminUI() {
-    const isAdmin = !!localStorage.getItem('lx_admin_password');
+    const isAdmin = !!adminAccessToken;
     const isUser = isUserLoggedIn();
 
     // 自定义源部分的标签和按钮
@@ -4484,8 +4494,7 @@ async function triggerServerCache(song, url, quality) {
         Object.assign(headers, getUserAuthHeaders());
 
         // 添加管理员验证 Header (如果已登录)
-        const adminPass = localStorage.getItem('lx_admin_password');
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         const coverUrl = typeof getImgUrl === 'function' ? getImgUrl(song) : (song.img || song.meta?.picUrl || '');
         const songInfoForCache = {
@@ -4533,8 +4542,7 @@ async function updateServerCacheConfig(location, pattern) {
     const headers = { 'Content-Type': 'application/json' };
     // 携带 Token（或兼容旧密码），让服务端正确识别身份
     Object.assign(headers, getUserAuthHeaders());
-    const adminPass = localStorage.getItem('lx_admin_password');
-    if (adminPass) headers['x-frontend-auth'] = adminPass;
+    Object.assign(headers, getAdminAuthHeaders());
 
     try {
         const response = await fetch('/api/v1/player/music/cache/config', {
@@ -6272,7 +6280,7 @@ async function updateSetting(key, value) {
     }
     const restrictedKeys = ['enableServerCache', 'enableServerLyricCache', 'serverCacheLocation', 'serverCacheNamingPattern', 'downloadConcurrency', 'enableOnlyDownloadMode', 'enableRemaster', 'preferredQuality', 'embedLyricToFile', 'preferServerCache'];
     const enableLoginCacheRestriction = window.lx_config?.['user.enableLoginCacheRestriction'];
-    const isAdmin = !!localStorage.getItem('lx_admin_password');
+    const isAdmin = !!adminAccessToken;
 
     const isRestricted = !isAdmin && isUserLoggedIn() && enableLoginCacheRestriction;
 
@@ -6533,7 +6541,7 @@ const SETTINGS_UI_MAP = {
 //缓存设置项
 function syncSettingsUI(key = null, value = null) {
     const enableLoginCacheRestriction = window.lx_config?.['user.enableLoginCacheRestriction'];
-    const isAdmin = !!localStorage.getItem('lx_admin_password');
+    const isAdmin = !!adminAccessToken;
     const restrictedKeys = ['enableServerCache', 'enableServerLyricCache', 'serverCacheLocation', 'serverCacheNamingPattern', 'downloadConcurrency', 'enableOnlyDownloadMode', 'enableRemaster', 'preferredQuality', 'embedLyricToFile', 'preferServerCache'];
 
     const updateItem = (itemKey, itemValue, isSingle) => {
@@ -8831,8 +8839,7 @@ async function pushSettingsToServer(force = false) {
 
     try {
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-        const adminPass = localStorage.getItem('lx_admin_password');
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         const themePreferences = {
             _theme: localStorage.getItem('lx_theme') || '',
@@ -8906,8 +8913,7 @@ async function fetchSettingsFromServer() {
     try {
         console.log('[Settings] 正在从服务器尝试加载设置...');
         const headers = getUserAuthHeaders();
-        const adminPass = localStorage.getItem('lx_admin_password');
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         const res = await fetch('/api/v1/player/user/settings', {
             headers: headers
@@ -9006,6 +9012,7 @@ async function handleSyncLogout(skipConfirm = false) {
                 keepalive: true,
             }).catch(error => console.warn('[Auth] Token 注销失败:', error));
             userToken = null;
+            userRefreshToken = null;
         }
 
         // 2. 关闭当前账户数据客户端
@@ -9102,8 +9109,10 @@ async function handleLocalLogin(options = {}) {
             // password login request.  Keep the old fallback below for an
             // older server that has not been upgraded yet.
             const issuedToken = syncManager.client?.token;
+            const issuedRefreshToken = syncManager.client?.refreshToken;
             if (issuedToken) {
                 userToken = issuedToken;
+                userRefreshToken = issuedRefreshToken || null;
                 localStorage.setItem('lx_user_token', userToken);
             }
 
@@ -9138,6 +9147,7 @@ async function handleLocalLogin(options = {}) {
                         const tokenData = await tokenRes.json();
                         if (tokenData.token) {
                             userToken = tokenData.token;
+                            userRefreshToken = tokenData.refreshToken || null;
                             localStorage.setItem('lx_user_token', userToken);
                             console.log('[Auth] 新用户 Token 已获取并保存');
                         }
@@ -9147,11 +9157,11 @@ async function handleLocalLogin(options = {}) {
                 }
             }
 
-            // Persist the authenticated account before loading account-scoped UI.
-            // Custom sources and the library read these values from localStorage.
+            // Persist only the account name and access token. The submitted
+            // password and rotating refresh token remain memory-only.
             localStorage.setItem('lx_sync_user', user);
-            localStorage.setItem('lx_sync_pass', pass);
-            if (!userToken) await ensureUserAuthToken();
+            localStorage.removeItem('lx_sync_pass');
+            if (syncManager.client) syncManager.client.password = '';
             if (typeof updateUserUI === 'function') updateUserUI();
             void updateServerCacheSize();
             // Custom-source metadata can involve several script/status reads.
@@ -10455,14 +10465,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('view-about')?.classList.add('hidden', 'opacity-0');
     switchTab(defaultTab);
 
-    // 2. Auto-login the configured account.
+    // 2. Restore a still-valid token without persisting or replaying a password.
     const user = localStorage.getItem('lx_sync_user');
-    const pass = localStorage.getItem('lx_sync_pass');
-    if (user && pass) {
+    if (user && userToken) {
         document.getElementById('sync-local-user').value = user;
-        document.getElementById('sync-local-pass').value = pass;
-        console.log('[Cache] 自动登录账户:', user);
-        handleLocalLogin();
+        console.log('[Cache] 恢复令牌账户:', user);
+        void reloadUserFavorites();
     }
 });
 
@@ -10593,9 +10601,8 @@ async function handleFileUpload(input) {
 
         // 先验证脚本
         showInfo('正在验证脚本...');
-        const adminPass = localStorage.getItem('lx_admin_password');
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         let validationRes = await fetch('/api/v1/player/custom-source/validate', {
             method: 'POST',
@@ -10697,8 +10704,7 @@ async function handleUrlImport() {
         showInfo('正在获取并验证远程脚本...');
 
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-        const adminPass = localStorage.getItem('lx_admin_password');
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         // 从服务器代理下载
         const response = await fetch(`/api/v1/player/custom-source/import`, {
@@ -10735,7 +10741,7 @@ async function handleUrlImport() {
             const confirmed = await showSelect('安全风险确认', result.message || '该脚本需要原生 VM 模式运行，可能存在安全风险，是否继续？', { danger: true, confirmText: '允许并导入' });
             if (confirmed) {
                 const retryHeaders = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-                if (adminPass) retryHeaders['x-frontend-auth'] = adminPass;
+                Object.assign(retryHeaders, getAdminAuthHeaders());
                 const retryResp = await fetch(`/api/v1/player/custom-source/import`, {
                     method: 'POST',
                     headers: retryHeaders,
@@ -10777,8 +10783,7 @@ async function uploadCustomSource(filename, content, type, allowUnsafeVM = false
     if (!isUserLoggedIn() || !username) throw new Error('请先登录同步账户');
 
     const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-    const adminPass = localStorage.getItem('lx_admin_password');
-    if (adminPass) headers['x-frontend-auth'] = adminPass;
+    Object.assign(headers, getAdminAuthHeaders());
 
     const response = await fetch('/api/v1/player/custom-source/upload', {
         method: 'POST',
@@ -10830,8 +10835,7 @@ async function fetchCustomSources() {
 
     try {
         const headers = getUserAuthHeaders();
-        const adminPass = localStorage.getItem('lx_admin_password');
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         const res = await fetch(`/api/v1/player/custom-source/list?username=${username}`, {
             headers: headers
@@ -10865,7 +10869,7 @@ async function fetchCustomSourceUsers() {
 async function openCustomSourceShareModal(source) {
     if (typeof source === 'string') source = window.customSourceShareSources?.[source];
     if (!source) return;
-    const isAdmin = !!localStorage.getItem('lx_admin_password');
+    const isAdmin = !!adminAccessToken;
     if (!isAdmin) {
         const authorized = await handleAdminAuth('\u8bf7\u8f93\u5165\u7ba1\u7406\u5458\u5bc6\u7801\u4ee5\u5171\u4eab\u97f3\u6e90');
         if (!authorized) return;
@@ -11117,7 +11121,7 @@ async function renderCustomSources() {
                 `<span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-red-50 text-red-500 border border-red-100 dark:bg-red-500/20 dark:text-red-400 dark:border-red-500/30">VM</span>` : '';
 
             const currentUsername = (localStorage.getItem('lx_sync_user') || '').trim().toLowerCase();
-            const isAdmin = !!localStorage.getItem('lx_admin_password');
+            const isAdmin = !!adminAccessToken;
             const canManageSource = isUser && !source.readOnly;
             const canShareSource = isAdmin && canManageSource && source.enabled && source.owner === currentUsername;
 
@@ -11256,8 +11260,7 @@ async function renderCustomSources() {
                         const username = localStorage.getItem('lx_sync_user') || '';
                         if (!username) throw new Error('请先登录同步账户');
                         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-                        const adminPass = localStorage.getItem('lx_admin_password');
-                        if (adminPass) headers['x-frontend-auth'] = adminPass;
+                        Object.assign(headers, getAdminAuthHeaders());
 
                         const response = await fetch('/api/v1/player/custom-source/reorder', {
                             method: 'POST',
@@ -11294,9 +11297,8 @@ async function reloadSource(sourceId) {
     try {
         const username = localStorage.getItem('lx_sync_user') || '';
         if (!isUserLoggedIn() || !username) throw new Error('请先登录同步账户');
-        const adminPass = localStorage.getItem('lx_admin_password');
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         const response = await fetch('/api/v1/player/custom-source/toggle', {
             method: 'POST',
@@ -11324,8 +11326,7 @@ async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
         const username = localStorage.getItem('lx_sync_user') || '';
         if (!isUserLoggedIn() || !username) throw new Error('请先登录同步账户');
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-        const adminPass = localStorage.getItem('lx_admin_password');
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         const response = await fetch('/api/v1/player/custom-source/toggle', {
             method: 'POST',
@@ -11377,8 +11378,7 @@ async function deleteSource(sourceId) {
         const username = localStorage.getItem('lx_sync_user') || '';
         if (!isUserLoggedIn() || !username) throw new Error('请先登录同步账户');
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
-        const adminPass = localStorage.getItem('lx_admin_password');
-        if (adminPass) headers['x-frontend-auth'] = adminPass;
+        Object.assign(headers, getAdminAuthHeaders());
 
         const response = await fetch('/api/v1/player/custom-source/delete', {
             method: 'POST',
@@ -12881,20 +12881,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // [Fix] Auto-Login logic (Restore Session)
         const u = localStorage.getItem('lx_sync_user');
-        const p = localStorage.getItem('lx_sync_pass');
-        if (normalizeSyncUsername(u) && p) {
-            // [优化] 如果已经有有效的 Token，不再重复登录
-            if (userToken) {
-                console.log('[AutoLogin] 检测到有效 Token，跳过自动登录流程并直接恢复会话。');
-                return;
-            }
-
-            console.log('[AutoLogin] 检测到账户且无有效 Token，正在自动登录...');
+        if (normalizeSyncUsername(u) && userToken) {
             const uInput = document.getElementById('sync-local-user');
-            const pInput = document.getElementById('sync-local-pass');
             if (uInput) uInput.value = u;
-            if (pInput) pInput.value = p;
-            handleLocalLogin();
+            console.log('[AutoLogin] 检测到现有令牌，恢复账户界面。');
         }
     }, 100);
 
@@ -13477,7 +13467,10 @@ function renderTokenList(tokens) {
     }
 
     list.innerHTML = tokens.map(t => {
-        const masked = `${t.token.slice(0, 6)}...${t.token.slice(-4)}`;
+        const masked = String(t.tokenMasked || 'token-hidden');
+        const identifier = String(t.id || masked);
+        const safeName = escapeHtmlText(t.name || '未命名 Token');
+        const encodedName = encodeURIComponent(t.name || '未命名 Token');
         const isExpired = t.expiresAt && t.expiresAt < Date.now();
         const isDisabled = !!t.disabled;
 
@@ -13486,7 +13479,7 @@ function renderTokenList(tokens) {
             <div class="flex flex-col md:flex-row md:items-start justify-between gap-4">
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-bold t-text-main mb-1.5 truncate flex flex-wrap items-center gap-2">
-                        <span>${t.name}</span>
+                        <span>${safeName}</span>
                         <span class="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 text-[10px] font-mono border border-emerald-500/20">${masked}</span>
                         ${isExpired ? '<span class="px-2 py-0.5 rounded-full bg-red-500/10 text-red-500 text-[9px] font-bold border border-red-500/20 whitespace-nowrap">已过期</span>' : ''}
                         ${isDisabled ? '<span class="px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-500 text-[9px] font-bold border border-orange-500/20 whitespace-nowrap">已禁用</span>' : ''}
@@ -13503,25 +13496,21 @@ function renderTokenList(tokens) {
                     <div class="flex items-center gap-2">
                         <span class="text-[11px] t-text-muted opacity-70 hidden sm:inline">${isDisabled ? '停用中' : '生效中'}</span>
                         <label class="relative inline-flex items-center cursor-pointer scale-[0.85]">
-                            <input type="checkbox" ${!isDisabled ? 'checked' : ''} onchange="handleToggleTokenStatus('${masked}', !this.checked)" class="sr-only peer">
+                            <input type="checkbox" ${!isDisabled ? 'checked' : ''} onchange="handleToggleTokenStatus('${identifier}', !this.checked)" class="sr-only peer">
                             <div class="w-11 h-6 bg-gray-200/50 peer-focus:outline-none rounded-full peer dark:bg-gray-700/50 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-emerald-500"></div>
                         </label>
                     </div>
                     
                     <div class="flex items-center gap-1">
-                        <button onclick="openTokenLogsModal('${masked}', '${t.name}')" 
+                        <button onclick="openTokenLogsModal('${masked}', decodeURIComponent('${encodedName}'))"
                             class="p-2 md:p-2.5 rounded-xl t-bg-track hover:t-bg-primary hover:text-white transition-all group/btn" title="查看日志">
                             <i class="fas fa-list-ul text-[13px] md:text-[14px]"></i>
                         </button>
-                        <button onclick="openEditTokenModal('${masked}', '${t.name}', ${t.expiresAt})" 
+                        <button onclick="openEditTokenModal('${identifier}', decodeURIComponent('${encodedName}'), ${t.expiresAt})"
                             class="p-2 md:p-2.5 rounded-xl t-bg-track hover:t-bg-primary hover:text-white transition-all group/btn" title="编辑信息">
                             <i class="fas fa-pencil-alt text-[13px] md:text-[14px]"></i>
                         </button>
-                        <button onclick="copyTokenToClipboard('${t.token}')" 
-                            class="p-2 md:p-2.5 rounded-xl t-bg-track hover:bg-blue-500 hover:text-white transition-all group/btn" title="复制 Token">
-                            <i class="far fa-copy text-[13px] md:text-[14px]"></i>
-                        </button>
-                        <button onclick="handleRemoveToken('${t.token}')" 
+                        <button onclick="handleRemoveToken('${identifier}')"
                             class="p-2 md:p-2.5 rounded-xl t-bg-track hover:bg-red-500 hover:text-white transition-all group/btn" title="删除 Token">
                             <i class="far fa-trash-alt text-[13px] md:text-[14px]"></i>
                         </button>
@@ -13771,13 +13760,13 @@ async function handleAddToken() {
 /**
  * 处理删除 Token
  */
-async function handleRemoveToken(token) {
+async function handleRemoveToken(tokenIdentifier) {
     if (!await showSelect('确定删除', `确定要永久删除此 Token 吗？\n所有使用此凭证的外部工具将立即无法连接。`, { danger: true })) return;
     try {
         const res = await fetch('/api/v1/player/user/token/remove', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...getUserAuthHeaders() },
-            body: JSON.stringify({ token: token })
+            body: JSON.stringify({ token: tokenIdentifier })
         });
         if (res.ok) {
             showSuccess('Token 已移除');

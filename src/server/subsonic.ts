@@ -19,6 +19,7 @@ import { getAudioQualityFormat, getUpstreamAudioContentType, hasUsableQualityEnt
 import { getPlaybackResolver } from '@/server/playbackResolverRegistry'
 import { normalizeSubsonicSourcePriority, sortSubsonicSongResults, SUBSONIC_SOURCE_PRIORITY_VALUE } from '@/server/subsonicSearch'
 import { getAlbumArtist } from '@/server/utils/songInfo'
+import { getActiveAuthService } from '@/server/authService'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
@@ -94,13 +95,18 @@ class SubsonicHandler {
 
         const user = global.lx.config.users.find((user: any) => user.name === username)
         if (!user) return null
+        const authService = getActiveAuthService()
 
         // Token & Salt 方式 (推荐)
         const t = params.get('t')
         const s = params.get('s')
         if (t && s) {
-            const hash = crypto.createHash('md5').update(user.password + s).digest('hex')
-            if (hash === t.toLowerCase()) return user.name
+            if (authService?.enabled) {
+                if (authService.verifySubsonicToken(user.name, t, s)) return user.name
+            } else {
+                const hash = crypto.createHash('md5').update(user.password + s).digest('hex')
+                if (hash === t.toLowerCase()) return user.name
+            }
         }
 
         // 明文密码方式 (包含 enc: 前缀处理)
@@ -110,7 +116,9 @@ class SubsonicHandler {
             if (p.startsWith('enc:')) {
                 password = Buffer.from(p.substring(4), 'hex').toString()
             }
-            if (password === user.password) return user.name
+            if (authService?.enabled
+                ? authService.verifyCompatibilityPassword(user.name, password)
+                : password === user.password) return user.name
         }
 
         return null

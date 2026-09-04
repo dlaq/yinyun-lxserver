@@ -40,7 +40,9 @@
         const legacyUser = localStorage.getItem('lx_sync_user') || '';
         const nativeToken = state.token && state.token !== 'legacy' ? state.token : '';
         if (!nativeToken && !legacyToken && path !== '/api/v1/auth/login') throw new Error('请先登录音云用户');
-        const adminPassword = window.app?.password || localStorage.getItem('lx_auth') || '';
+        const adminHeaders = window.getAdminAuthHeaders ? window.getAdminAuthHeaders() : {};
+        const userToken = nativeToken || legacyToken;
+        const username = state.username || legacyUser;
         const response = await fetch(path, {
             ...options,
             // Match/index/queue responses are mutable and must not be served
@@ -50,9 +52,8 @@
             cache: options.cache || 'no-store',
             headers: {
                 'Content-Type': 'application/json',
-                ...(nativeToken ? { Authorization: `Bearer ${nativeToken}` } : {}),
-                ...(!nativeToken && legacyToken ? { 'X-User-Name': legacyUser, 'X-User-Token': legacyToken } : {}),
-                ...(adminPassword ? { 'X-Frontend-Auth': adminPassword } : {}),
+                ...(userToken ? { 'X-User-Name': username, 'X-User-Token': userToken } : {}),
+                ...adminHeaders,
                 ...(options.headers || {}),
             },
         });
@@ -1174,22 +1175,11 @@
             updateAuth(Boolean(state.username));
             return Boolean(state.username);
         }
-        const savedPass = localStorage.getItem('lx_sync_pass') || '';
-        if (!savedUser || !savedPass) return false;
+        const savedToken = localStorage.getItem('lx_user_token') || '';
+        if (!savedUser || !savedToken) return false;
         try {
-            const response = await fetch('/api/v1/auth/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: savedUser, password: savedPass }),
-            });
-            const payload = await response.json().catch(() => ({}));
-            if (!response.ok) return false;
-            const data = unwrap(payload);
-            if (!data?.accessToken) return false;
-            state.token = data.accessToken;
+            state.token = savedToken;
             state.username = savedUser;
-            sessionStorage.setItem('yinyun.integration.username', savedUser);
-            sessionStorage.setItem('yinyun.integration.access_token', state.token);
             updateAuth(true);
             return true;
         } catch (error) {

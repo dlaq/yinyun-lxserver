@@ -24,6 +24,7 @@ import { normalizeUsername, validateUsername } from './utils/username'
 import { normalizeAdminPath } from './adminPath'
 import { withUserRole } from './userRoles'
 import { resolveConfigPath } from './configPath'
+import { readPersistedUsersSync, writePersistedUsersSync } from './server/userStore'
 
 // Declare Env Params Type
 type ENV_PARAMS_Type = typeof ENV_PARAMS
@@ -349,15 +350,22 @@ initLogger()
 
 // Load users from users.json if exists
 const usersJsonPath = path.join(global.lx.dataPath, 'users.json')
+let includeLegacyPasswordsOnInitialWrite = true
 if (fs.existsSync(usersJsonPath)) {
   try {
-    const users = JSON.parse(fs.readFileSync(usersJsonPath, 'utf-8'))
-    if (Array.isArray(users)) {
+    const persistedUsers = readPersistedUsersSync(usersJsonPath)
+    if (persistedUsers) {
       console.log('Load users from users.json')
-      global.lx.config.users = users.map(u => ({ ...withUserRole(u), dataPath: '' }))
+      // Once credential migration has removed the password fields, an ordinary
+      // restart must not recreate even blank legacy password properties before
+      // AuthService has initialized. Existing plaintext is preserved until the
+      // explicit finalize operation succeeds.
+      includeLegacyPasswordsOnInitialWrite = persistedUsers.file.users.some(user => Object.hasOwn(user, 'password'))
+      global.lx.config.users = persistedUsers.file.users.map(u => ({ ...withUserRole(u), dataPath: '', password: u.password || '' }))
     }
   } catch (err) {
     console.error('Failed to load users.json', err)
+    process.exit(1)
   }
 }
 
@@ -377,15 +385,10 @@ for (const user of global.lx.config.users) {
 }
 
 try {
-  fs.writeFileSync(usersJsonPath, JSON.stringify(global.lx.config.users.map(u => ({
-    name: u.name,
-    password: u.password,
-    isAdmin: u.isAdmin === true,
-    maxSnapshotNum: u.maxSnapshotNum,
-    'list.addMusicLocationType': u['list.addMusicLocationType'],
-  })), null, 2))
+  writePersistedUsersSync(usersJsonPath, global.lx.config.users, { includeLegacyPasswords: includeLegacyPasswordsOnInitialWrite })
 } catch (err) {
   console.error('Failed to save users.json', err)
+  process.exit(1)
 }
 
 /**

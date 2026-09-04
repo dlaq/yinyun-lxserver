@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { normalizeUsername, tryNormalizeUsername } from '@/utils/username'
+import { atomicWriteJsonSync } from './atomicJsonStore'
 
 export interface SourceShare {
   owner: string
@@ -10,17 +11,6 @@ export interface SourceShare {
 }
 
 const getSharesPath = () => path.join(global.lx.userPath, 'source', 'shares.json')
-
-const writeTextAtomic = (filePath: string, content: string) => {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true })
-  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`
-  try {
-    fs.writeFileSync(temporary, content, 'utf-8')
-    fs.renameSync(temporary, filePath)
-  } finally {
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
-  }
-}
 
 const getConfiguredUsers = () => new Set(
   global.lx.config.users.map(user => normalizeUsername(user.name)),
@@ -76,7 +66,7 @@ export const readSourceShares = (): SourceShare[] => {
   if (!fs.existsSync(sharesPath)) return []
   try {
     const value = JSON.parse(fs.readFileSync(sharesPath, 'utf-8'))
-    if (!Array.isArray(value)) return []
+    if (!Array.isArray(value)) throw new Error('Source sharing state must be an array')
 
     const records = new Map<string, SourceShare>()
     for (const item of value) {
@@ -84,14 +74,14 @@ export const readSourceShares = (): SourceShare[] => {
       if (record) records.set(`${record.owner}:${record.sourceId}`, record)
     }
     return Array.from(records.values())
-  } catch {
-    return []
+  } catch (error: any) {
+    throw new Error(`Source sharing state is unavailable: ${error?.message || error}`)
   }
 }
 
 export const writeSourceShares = (shares: SourceShare[]) => {
   const sharesPath = getSharesPath()
-  writeTextAtomic(sharesPath, JSON.stringify(shares, null, 2))
+  atomicWriteJsonSync(sharesPath, shares, { mode: 0o600 })
 }
 
 export const getSourceShare = (owner: string, sourceId: string) => {

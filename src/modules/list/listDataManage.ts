@@ -1,6 +1,7 @@
 import { arrPush, arrPushByPosition, arrUnshift } from '@/utils/common'
 import { LIST_IDS } from '@/constants'
 import { type SnapshotDataManage } from './snapshotDataManage'
+import { assertPlaylistData, PlaylistInvariantError } from '@/server/playlistInvariants'
 
 export class ListDataManage {
   snapshotDataManage: SnapshotDataManage
@@ -11,10 +12,14 @@ export class ListDataManage {
   constructor(snapshotDataManage: SnapshotDataManage) {
     this.snapshotDataManage = snapshotDataManage
 
-    let listData: LX.Sync.List.ListData | null
+    let listData: LX.Sync.List.ListData | null = null
     this.initPromise = this.snapshotDataManage.getSnapshotInfo().then(async (snapshotInfo) => {
       if (snapshotInfo.latest) listData = await this.snapshotDataManage.getSnapshot(snapshotInfo.latest)
       if (!listData) listData = { defaultList: [], loveList: [], userList: [] }
+      // Existing installations may contain the historical duplicated-ID bug.
+      // It remains readable solely so the dedicated preview/repair workflow can
+      // recover it; every new import or overwrite is strict.
+      assertPlaylistData(listData, { allowHistoricalDuplicates: true })
       this.allMusicList.set(LIST_IDS.DEFAULT, listData.defaultList)
       this.allMusicList.set(LIST_IDS.LOVE, listData.loveList)
       this.userLists.push(...listData.userList.map(({ list, ...l }) => {
@@ -24,6 +29,7 @@ export class ListDataManage {
     })
   }
   restore = async (listData: LX.Sync.List.ListData) => {
+    assertPlaylistData(listData)
     this.allMusicList.clear()
     this.userLists = []
 
@@ -139,6 +145,7 @@ export class ListDataManage {
 
 
   listDataOverwrite = async ({ defaultList, loveList, userList, tempList }: MakeOptional<LX.List.ListDataFull, 'tempList'>): Promise<string[]> => {
+    assertPlaylistData({ defaultList, loveList, userList })
     const updatedListIds: string[] = []
     const newUserIds: string[] = []
     const newUserListInfos = userList.map(({ list, ...listInfo }) => {
@@ -178,7 +185,9 @@ export class ListDataManage {
     position: number
     locationUpdateTime: number | null
   }) => {
-    if (this.userLists.some(item => item.id == id)) return
+    if (this.userLists.some(item => item.id == id)) {
+      throw new PlaylistInvariantError('duplicate_playlist_id', `歌单 ID 重复: ${id}`)
+    }
     const newList: LX.List.UserListInfo = {
       name,
       id,
@@ -220,7 +229,8 @@ export class ListDataManage {
     const map = new Map<string, LX.List.UserListInfo>()
     for (const item of newUserLists) map.set(item.id, item)
     for (const id of ids) {
-      const listInfo = map.get(id) as LX.List.UserListInfo
+      const listInfo = map.get(id)
+      if (!listInfo) throw new PlaylistInvariantError('unknown_sort_id', `排序中包含未知歌单 ID: ${id}`)
       listInfo.locationUpdateTime = Date.now()
       updateLists.push(listInfo)
       map.delete(id)
@@ -242,11 +252,20 @@ export class ListDataManage {
   }
 
   listMusicOverwrite = async (listId: string, musicInfos: LX.Music.MusicInfo[]): Promise<string[]> => {
+    if (![LIST_IDS.DEFAULT, LIST_IDS.LOVE, LIST_IDS.TEMP].includes(listId as any) && !this.userLists.some(item => item.id === listId)) {
+      throw new PlaylistInvariantError('unknown_playlist_id', `歌单不存在: ${listId}`)
+    }
+    for (const song of musicInfos) {
+      if (!song || typeof song.id !== 'string' || !song.id.trim()) throw new PlaylistInvariantError('missing_song_id', '歌曲缺少稳定 ID')
+    }
     this.setMusicList(listId, musicInfos)
     return [listId]
   }
 
   listMusicAdd = async (id: string, musicInfos: LX.Music.MusicInfo[], addMusicLocationType: LX.AddMusicLocationType): Promise<string[]> => {
+    if (![LIST_IDS.DEFAULT, LIST_IDS.LOVE, LIST_IDS.TEMP].includes(id as any) && !this.userLists.some(item => item.id === id)) {
+      throw new PlaylistInvariantError('unknown_playlist_id', `歌单不存在: ${id}`)
+    }
     const targetList = await this.getListMusics(id)
 
     const listSet = new Set<string>()

@@ -16,8 +16,13 @@ import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import { canReadLibraryOwner, getSharedCacheList } from './sharedLocalLibrary'
 import {
+  applyAdminPlaylistSync,
+  applyAdminSourceSync,
   AdminUserSyncError,
   getAdminUserSyncInventory,
+  previewAdminPlaylistSync,
+  previewAdminSourceSync,
+  recoverInterruptedAdminUserSync,
   syncAdminPlaylist,
   syncAdminSources,
 } from './adminUserSync'
@@ -56,12 +61,35 @@ import {
   listAllExternalMusicLibraries,
   removeExternalMusicLibrary,
 } from './externalMusicLibraries'
+import { AuthService, AuthServiceError, getBearerToken, setActiveAuthService, type AuthenticatedSession } from './authService'
+import { AdminOperationManager, AdminOperationError } from './adminOperations'
+import { readPersistedUsersSync, writePersistedUsersSync } from './userStore'
+import { applyPlaylistRepair, PlaylistRepairError, previewPlaylistRepair, recoverInterruptedPlaylistRepair } from './playlistRepair'
 
 const networkPlaylistMonitor = new NetworkPlaylistMonitor({
   getUsers: () => global.lx.config.users,
   musicSdk,
   normalizeSongInfo,
 })
+
+const authService = new AuthService(global.lx.dataPath)
+setActiveAuthService(authService)
+const adminOperations = new AdminOperationManager(global.lx.dataPath)
+
+const getAdminSession = (req: IncomingMessage): AuthenticatedSession | null => {
+  const bearer = getBearerToken(req.headers.authorization)
+  const session = bearer ? authService.verifyAccessToken(bearer, 'admin') : null
+  if (session) return session
+  if (
+    authService.allowLegacyAdminHeader &&
+    req.headers['x-frontend-auth'] === global.lx.config['frontend.password']
+  ) {
+    return { sid: 'legacy-admin-header', username: 'admin', kind: 'admin', credentialVersion: 0 }
+  }
+  return null
+}
+
+const isAdminRequest = (req: IncomingMessage) => Boolean(getAdminSession(req))
 
 /** 生成随机 sessionId */
 const generateSessionId = () => crypto.randomBytes(32).toString('hex')
@@ -131,7 +159,7 @@ const getUserTokenConfig = (username: string): UserTokenConfig => {
     try {
       return JSON.parse(fs.readFileSync(tokenPath, 'utf8'))
     } catch (e) {
-      return { enabled: false, tokens: [] }
+      throw new Error(`Critical token configuration is invalid for ${username}: ${e instanceof Error ? e.message : e}`)
     }
   }
   return { enabled: false, tokens: [] }
@@ -251,6 +279,12 @@ const prepareReloadedUsers = (users: any[], config: LX.Config = global.lx.config
 export const verifyUserAuth = (req: IncomingMessage): string | null => {
   const token = req.headers['x-user-token'] as string
   if (token) {
+    const authenticated = authService.verifyAccessToken(token, 'user')
+    if (authenticated) return getConfiguredUsername(authenticated.username)
+
+    const apiTokenUser = authService.verifyApiToken(token)
+    if (apiTokenUser) return getConfiguredUsername(apiTokenUser)
+
     // 1. Session Token 验证
     const session = userSessions.get(token)
     const sessionUsername = session ? getConfiguredUsername(session.username) : null
@@ -304,7 +338,7 @@ const getCacheRequestUsername = (req: IncomingMessage): string | null => {
 const getRequestedUser = (req: IncomingMessage, requested: string | null, allowAdmin = false): string | null => {
   const requestedUsername = getConfiguredUsername(requested)
   if (!requestedUsername) return null
-  if (allowAdmin && req.headers['x-frontend-auth'] === global.lx.config['frontend.password']) return requestedUsername
+  if (allowAdmin && isAdminRequest(req)) return requestedUsername
   const verified = verifyUserAuth(req)
   return verified === requestedUsername ? verified : null
 }
@@ -380,13 +414,7 @@ const musicProgressClients = new Map<string, http.ServerResponse>()
 const saveUsers = () => {
   const usersJsonPath = path.join(global.lx.dataPath, 'users.json')
   try {
-    fs.writeFileSync(usersJsonPath, JSON.stringify(global.lx.config.users.map(u => ({
-      name: u.name,
-      password: u.password,
-      isAdmin: getUserIsAdmin(u),
-      maxSnapshotNum: u.maxSnapshotNum,
-      'list.addMusicLocationType': u['list.addMusicLocationType'],
-    })), null, 2))
+    writePersistedUsersSync(usersJsonPath, global.lx.config.users, { includeLegacyPasswords: !authService.enabled })
     return true
   } catch (err) {
     console.error('Failed to save users.json', err)
@@ -423,9 +451,8 @@ export const reloadServerData = async () => {
   const usersJsonPath = path.join(global.lx.dataPath, 'users.json')
   if (fs.existsSync(usersJsonPath)) {
     try {
-      const usersRaw = fs.readFileSync(usersJsonPath, 'utf-8')
-      const users = JSON.parse(usersRaw)
-      if (!Array.isArray(users)) throw new Error('users.json must contain an array')
+      const users = readPersistedUsersSync(usersJsonPath)?.file.users
+      if (!users) throw new Error('users.json is missing')
       preparedUsers = prepareReloadedUsers(users, nextConfig)
     } catch (err: any) {
       startupLog.error('Failed to reload users.json:', err.message)
@@ -854,9 +881,9 @@ const isConfiguredAdminUser = (username: string) => {
 
 const handleApiV1 = createApiV1Handler({
   serverVersion: APP_VERSION,
-  getAuthSecret: () => `${getServerId()}:${global.lx.config['frontend.password']}`,
+  getAuthSecret: () => authService.enabled ? authService.getSigningSecret() : getServerId(),
   getUsers: () => global.lx.config.users,
-  isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
+  isAdminRequest,
   isAdminUser: isConfiguredAdminUser,
   musicSdk,
   normalizeSongInfo,
@@ -1130,29 +1157,117 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
 
       if (pathname === '/api/v1/admin/login' && req.method === 'POST') {
-        void readBody(req).then(body => {
+        void readBody(req).then(async body => {
           try {
             const { password } = JSON.parse(body)
-            if (password === global.lx.config['frontend.password']) {
+            const session = await authService.loginAdmin(String(password || ''), String(ip || 'unknown'))
+            if (session) {
               loginLog.info(`Admin login success ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ success: true }))
+              res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+              res.end(JSON.stringify({ success: true, ...session }))
             } else {
               loginLog.warn(`Admin login failed ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(401, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: false }))
             }
-          } catch (e) {
-            res.writeHead(400)
-            res.end('Bad Request')
+          } catch (error: any) {
+            const statusCode = error instanceof AuthServiceError ? error.statusCode : 400
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, code: error?.code || 'bad_request', message: error?.message || 'Bad Request' }))
           }
         })
         return
       }
 
+      if (pathname === '/api/v1/admin/logout' && req.method === 'POST') {
+        const token = getBearerToken(req.headers.authorization)
+        if (token) await authService.logoutToken(token)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ success: true }))
+        return
+      }
+
+      if (pathname === '/api/v1/admin/auth/finalize-migration' && req.method === 'POST') {
+        if (!isAdminRequest(req)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        try {
+          authService.verifyMigrationCompleteness(global.lx.config.users.map(user => user.name))
+          for (const user of global.lx.config.users) user.password = ''
+          global.lx.config['frontend.password'] = ''
+          if (!saveUsers()) throw new Error('users.json migration finalization failed')
+          for (const user of global.lx.config.users) saveUserTokenConfig(user.name, { enabled: false, tokens: [] })
+          global.lx.saveConfig()
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ success: true, plaintextCredentialsRemoved: true }))
+        } catch (error: any) {
+          res.writeHead(error instanceof AuthServiceError ? error.statusCode : 500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, code: error?.code || 'migration_finalize_failed', message: error?.message || 'Migration finalization failed' }))
+        }
+        return
+      }
+
+      if (pathname === '/api/v1/admin/data-repair/playlists/preview' && req.method === 'POST') {
+        const admin = getAdminSession(req)
+        if (!admin) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        try {
+          const result = await previewPlaylistRepair(adminOperations, admin.sid, JSON.parse(await readBody(req))?.username)
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ success: true, data: result }))
+        } catch (error: any) {
+          const statusCode = error instanceof PlaylistRepairError || error instanceof AdminOperationError ? error.statusCode : 500
+          res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, code: error?.code || 'playlist_repair_preview_failed', message: error?.message || 'Preview failed' }))
+        }
+        return
+      }
+
+      if (pathname === '/api/v1/admin/data-repair/playlists/apply' && req.method === 'POST') {
+        const admin = getAdminSession(req)
+        if (!admin) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        try {
+          const result = await applyPlaylistRepair(adminOperations, admin.sid, JSON.parse(await readBody(req)))
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ success: true, data: result }))
+        } catch (error: any) {
+          const statusCode = error instanceof PlaylistRepairError || error instanceof AdminOperationError ? error.statusCode : 500
+          res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, code: error?.code || 'playlist_repair_apply_failed', message: error?.message || 'Repair failed' }))
+        }
+        return
+      }
+
+      const adminOperationMatch = pathname.match(/^\/api\/v1\/admin\/operations\/([^/]+)$/)
+      if (adminOperationMatch && req.method === 'GET') {
+        const admin = getAdminSession(req)
+        if (!admin) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        try {
+          const operation = await adminOperations.get(decodeURIComponent(adminOperationMatch[1]), admin.sid)
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ success: true, data: operation }))
+        } catch (error: any) {
+          res.writeHead(error instanceof AdminOperationError ? error.statusCode : 500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, code: error?.code || 'operation_read_failed', message: error?.message || 'Operation read failed' }))
+        }
+        return
+      }
+
       if (pathname === '/api/v1/admin/external-libraries') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -1163,7 +1278,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
         if (req.method === 'POST') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               const payload = JSON.parse(body)
               const library = createExternalMusicLibrary(payload.username, payload.name)
@@ -1180,8 +1295,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       const externalLibraryMatch = pathname.match(/^\/api\/v1\/admin\/external-libraries\/([^/]+)(?:\/(rescan))?$/)
       if (externalLibraryMatch) {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -1216,6 +1330,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         const publicAuthPath = (
           pathname === '/api/v1/player/user/verify' ||
           pathname === '/api/v1/player/user/login' ||
+          pathname === '/api/v1/player/user/refresh' ||
           pathname === '/api/v1/player/user/logout' ||
           pathname === '/api/v1/player/user/auth/verify'
         )
@@ -1236,8 +1351,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // [新增] 获取服务器状态
       if (pathname === '/api/v1/admin/status' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -1304,8 +1418,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
 
       if (pathname.startsWith('/api/v1/admin/user-sync/')) {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        const admin = getAdminSession(req)
+        if (!admin) {
           res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
           return
@@ -1314,6 +1428,14 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           let result: unknown
           if (pathname === '/api/v1/admin/user-sync/inventory' && req.method === 'GET') {
             result = await getAdminUserSyncInventory(urlObj.searchParams.get('user'))
+          } else if (pathname === '/api/v1/admin/user-sync/sources/preview' && req.method === 'POST') {
+            result = await previewAdminSourceSync(adminOperations, admin.sid, JSON.parse(await readBody(req)))
+          } else if (pathname === '/api/v1/admin/user-sync/sources/apply' && req.method === 'POST') {
+            result = await applyAdminSourceSync(adminOperations, admin.sid, JSON.parse(await readBody(req)))
+          } else if (pathname === '/api/v1/admin/user-sync/playlist/preview' && req.method === 'POST') {
+            result = await previewAdminPlaylistSync(adminOperations, admin.sid, JSON.parse(await readBody(req)))
+          } else if (pathname === '/api/v1/admin/user-sync/playlist/apply' && req.method === 'POST') {
+            result = await applyAdminPlaylistSync(adminOperations, admin.sid, JSON.parse(await readBody(req)))
           } else if (pathname === '/api/v1/admin/user-sync/sources' && req.method === 'POST') {
             result = await syncAdminSources(JSON.parse(await readBody(req)))
           } else if (pathname === '/api/v1/admin/user-sync/playlist' && req.method === 'POST') {
@@ -1326,11 +1448,11 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({ success: true, data: result }))
         } catch (error: any) {
-          const statusCode = error instanceof AdminUserSyncError ? error.statusCode : 400
+          const statusCode = error instanceof AdminUserSyncError || error instanceof AdminOperationError ? error.statusCode : 400
           res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({
             success: false,
-            code: error instanceof AdminUserSyncError ? error.code : 'admin_user_sync_failed',
+            code: error instanceof AdminUserSyncError || error instanceof AdminOperationError ? error.code : 'admin_user_sync_failed',
             message: error?.message || '跨用户同步失败',
           }))
         }
@@ -1338,18 +1460,18 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
 
       if (pathname === '/api/v1/admin/users') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
         }
         if (req.method === 'GET') {
-          // 修改：返回包含密码的用户列表
+          const credentialStates = new Map(authService.getCredentialStates().map(item => [item.name, item]))
           const users = global.lx.config.users.map(user => ({
             name: user.name,
-            password: user.password,
             isAdmin: getUserIsAdmin(user),
+            passwordConfigured: credentialStates.get(user.name)?.passwordConfigured ?? Boolean(user.password),
+            weakPassword: credentialStates.get(user.name)?.weakPassword ?? false,
           }))
           res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -1359,7 +1481,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
         if (req.method === 'POST') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               const { name, password } = JSON.parse(body)
               let normalizedName: string
@@ -1381,6 +1503,8 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 return
               }
 
+              if (authService.enabled) await authService.setPassword(normalizedName, 'user', password)
+
               // eslint-disable-next-line @typescript-eslint/no-var-requires
               const { getUserDirname } = require('@/user')
               const dataPath = path.join(global.lx.userPath, getUserDirname(normalizedName))
@@ -1388,7 +1512,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
               global.lx.config.users.push({
                 name: normalizedName,
-                password,
+                password: authService.enabled ? '' : password,
                 isAdmin: false,
                 dataPath,
               })
@@ -1405,7 +1529,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
         if (req.method === 'PUT') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               const { name, newName, password } = JSON.parse(body)
               if (!name || (!password && !newName)) {
@@ -1428,8 +1552,13 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
               const user = global.lx.config.users[userIdx]
 
-              const handleFinalUpdate = () => {
-                if (password) user.password = password
+              const handleFinalUpdate = async (credentialUsername: string) => {
+                if (password) {
+                  if (authService.enabled) {
+                    await authService.setPassword(credentialUsername, 'user', password)
+                    user.password = ''
+                  } else user.password = password
+                }
                 saveUsers()
                 res.writeHead(200)
                 res.end(JSON.stringify({ success: true }))
@@ -1463,7 +1592,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
                 // 3. 稍作延迟等待 Socket 释放和可能的异步操作完成 (Windows 友好)
                 // 增加到 500ms 以确保稳定性
-                setTimeout(() => {
+                setTimeout(async () => {
                   try {
                     // 4. 迁移物理数据
                     const newDataPath = migrateUserData(currentName, normalizedNewName)
@@ -1471,12 +1600,13 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                     // 5. 更新内存中的用户信息 (全局配置)
                     user.name = normalizedNewName
                     user.dataPath = newDataPath
+                    if (authService.enabled) await authService.renameUser(currentName, normalizedNewName)
                     saveUserTokenConfig(normalizedNewName, getUserTokenConfig(normalizedNewName))
                     void initUserApis(currentName).then(() => initUserApis(normalizedNewName))
                     networkPlaylistMonitor.reloadUser(currentName)
                     networkPlaylistMonitor.reloadUser(normalizedNewName)
 
-                    handleFinalUpdate()
+                    await handleFinalUpdate(normalizedNewName)
                   } catch (err: any) {
                     console.error(`[RenameUser] Failed to migrate data: ${err.message}`)
                     res.writeHead(500)
@@ -1487,7 +1617,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                   }
                 }, 500)
               } else {
-                handleFinalUpdate()
+                await handleFinalUpdate(currentName)
               }
             } catch (e) {
               console.error('[RenameUser] Error:', e)
@@ -1498,7 +1628,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
         if (req.method === 'DELETE') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               // 修改：同时支持单个 name 和批量 names，以及 deleteData 参数
               const { name, names, deleteData } = JSON.parse(body)
@@ -1540,6 +1670,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                   // 断开该用户的连接
                   clearUserRuntimeState(targetName)
                   global.lx.config.users.splice(idx, 1)
+                  if (authService.enabled) await authService.deleteUser(targetName)
                   networkPlaylistMonitor.reloadUser(targetName)
                   void initUserApis(targetName)
                   deletedCount++
@@ -1587,8 +1718,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
 
       if (pathname === '/api/v1/admin/data' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        const isAdminAuth = auth === global.lx.config['frontend.password']
+        const isAdminAuth = isAdminRequest(req)
         const userParam = urlObj.searchParams.get('user')
 
         if (!userParam) {
@@ -1619,8 +1749,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // 获取快照列表
       if (pathname === '/api/v1/admin/data/snapshots' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        const isAdminAuth = auth === global.lx.config['frontend.password']
+        const isAdminAuth = isAdminRequest(req)
         const userParam = urlObj.searchParams.get('user')
 
         if (!userParam) {
@@ -1653,8 +1782,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // 下载快照数据
       if (pathname === '/api/v1/admin/data/snapshot' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        const isAdminAuth = auth === global.lx.config['frontend.password']
+        const isAdminAuth = isAdminRequest(req)
         const userParam = urlObj.searchParams.get('user')
 
         if (!userParam) {
@@ -1698,8 +1826,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // 恢复快照
       if (pathname === '/api/v1/admin/data/restore-snapshot' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        const isAdminAuth = auth === global.lx.config['frontend.password']
+        const isAdminAuth = isAdminRequest(req)
         const userParam = urlObj.searchParams.get('user')
 
         if (!userParam) {
@@ -1828,8 +1955,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // [新增] 删除快照 API
       if (pathname === '/api/v1/admin/data/delete-snapshot' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        const isAdminAuth = auth === global.lx.config['frontend.password']
+        const isAdminAuth = isAdminRequest(req)
         const userParam = urlObj.searchParams.get('user')
 
         if (!userParam) {
@@ -1864,8 +1990,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // [新增] 上传快照 API
       if (pathname === '/api/v1/admin/data/upload-snapshot' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        const isAdminAuth = auth === global.lx.config['frontend.password']
+        const isAdminAuth = isAdminRequest(req)
         const userParam = urlObj.searchParams.get('user')
         const time = parseInt(urlObj.searchParams.get('time') || '0')
         const filename = urlObj.searchParams.get('filename')
@@ -1944,7 +2069,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // [新增] User Login Verification
       if (pathname === '/api/v1/player/user/verify' && req.method === 'POST') {
-        void readBody(req).then(body => {
+        void readBody(req).then(async body => {
           try {
             const { username, password } = JSON.parse(body)
             if (!username || !password) {
@@ -1953,24 +2078,28 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               return
             }
             const normalizedUsername = tryNormalizeUsername(username)
-            const user = global.lx.config.users.find(u => u.name === normalizedUsername && u.password === password)
-            if (user) {
-              // The credential probe also issues the short-lived player session
-              // used by the rest of the web player.  Returning it here avoids
-              // a second identical password request immediately after login.
+            const user = normalizedUsername ? global.lx.config.users.find(u => u.name === normalizedUsername) : null
+            let session = null
+            if (user && authService.enabled) {
+              session = await authService.loginUser(user.name, String(password), String(ip || 'unknown'))
+            } else if (user && user.password === password) {
               const token = generateSessionId()
               userSessions.set(token, { username: user.name, createdAt: Date.now() })
+              session = { token, accessToken: token, username: user.name }
+            }
+            if (session && user) {
               loginLog.info(`User login success user=${user.name} ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ success: true, username: user.name, token }))
+              res.end(JSON.stringify({ success: true, ...session, username: user.name }))
             } else {
               loginLog.warn(`User login failed user=${username} ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(401, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: false, message: 'Invalid credentials' }))
             }
-          } catch (e) {
-            res.writeHead(400)
-            res.end('Bad Request')
+          } catch (error: any) {
+            const statusCode = error instanceof AuthServiceError ? error.statusCode : 400
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, code: error?.code || 'bad_request', message: error?.message || 'Bad Request' }))
           }
         })
         return
@@ -1978,7 +2107,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // [新增] 用户登录 - 颁发 Token（替代明文密码传输）
       if (pathname === '/api/v1/player/user/login' && req.method === 'POST') {
-        void readBody(req).then(body => {
+        void readBody(req).then(async body => {
           try {
             const { username, password } = JSON.parse(body)
             if (!username || !password) {
@@ -1987,21 +2116,28 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               return
             }
             const normalizedUsername = tryNormalizeUsername(username)
-            const user = global.lx.config.users.find((u: any) => u.name === normalizedUsername && u.password === password)
-            if (user) {
+            const user = normalizedUsername ? global.lx.config.users.find((u: any) => u.name === normalizedUsername) : null
+            let session = null
+            if (user && authService.enabled) {
+              session = await authService.loginUser(user.name, String(password), String(ip || 'unknown'))
+            } else if (user && user.password === password) {
               const token = generateSessionId()
               userSessions.set(token, { username: user.name, createdAt: Date.now() })
+              session = { token, accessToken: token, username: user.name }
+            }
+            if (session && user) {
               loginLog.info(`User token issued user=${user.name} ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ success: true, token, username: user.name }))
+              res.end(JSON.stringify({ success: true, ...session, username: user.name }))
             } else {
               loginLog.warn(`User login failed user=${username} ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(401, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: false, message: 'Invalid credentials' }))
             }
-          } catch (e) {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: false, message: 'Bad Request' }))
+          } catch (error: any) {
+            const statusCode = error instanceof AuthServiceError ? error.statusCode : 400
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, code: error?.code || 'bad_request', message: error?.message || 'Bad Request' }))
           }
         })
         return
@@ -2010,9 +2146,32 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       // [新增] 用户登出 - 注销 Token
       if (pathname === '/api/v1/player/user/logout' && req.method === 'POST') {
         const token = req.headers['x-user-token'] as string
-        if (token) userSessions.delete(token)
+        if (token) {
+          userSessions.delete(token)
+          void authService.logoutToken(token).catch(error => console.warn('[Auth] logout persistence failed', error?.message || error))
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))
+        return
+      }
+
+      if (pathname === '/api/v1/player/user/refresh' && req.method === 'POST') {
+        void readBody(req).then(async body => {
+          try {
+            const { refreshToken } = JSON.parse(body || '{}')
+            const session = await authService.rotateRefreshToken(String(refreshToken || ''))
+            if (!session) {
+              res.writeHead(401, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+              res.end(JSON.stringify({ success: false, message: 'Invalid refresh token' }))
+              return
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            res.end(JSON.stringify({ success: true, ...session }))
+          } catch (error: any) {
+            res.writeHead(error instanceof AuthServiceError ? error.statusCode : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, code: error?.code || 'bad_request', message: error?.message || 'Bad Request' }))
+          }
+        })
         return
       }
 
@@ -2327,7 +2486,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         }
 
         if (req.method === 'GET') {
-          const config = getUserTokenConfig(username)
+          const config = authService.enabled
+            ? authService.listApiTokens(username)
+            : (() => {
+                const legacy = getUserTokenConfig(username)
+                return {
+                  enabled: legacy.enabled,
+                  tokens: legacy.tokens.map(({ token, ...item }) => ({ ...item, tokenMasked: `${token.slice(0, 6)}...${token.slice(-4)}` })),
+                }
+              })()
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({
             success: true,
@@ -2337,18 +2504,17 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             }
           }))
         } else if (req.method === 'POST') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               const { enabled } = JSON.parse(body)
-              const config = getUserTokenConfig(username)
               const newEnabled = !!enabled
-
-              // 只有状态发生物理改变（从 True 到 False 或反之）时才处理
-              if (config.enabled !== newEnabled) {
+              if (authService.enabled) await authService.setApiTokenAuthEnabled(username, newEnabled)
+              else {
+                const config = getUserTokenConfig(username)
                 config.enabled = newEnabled
-                saveUserTokenConfig(username, config) // 这里内部会自动更新内存缓存逻辑
-                tokenLog.info(`User ${username} ${newEnabled ? 'enabled' : 'disabled'} persistent token auth from ${ip}`)
+                saveUserTokenConfig(username, config)
               }
+              tokenLog.info(`User ${username} ${newEnabled ? 'enabled' : 'disabled'} persistent token auth from ${ip}`)
 
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: true }))
@@ -2370,20 +2536,20 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
 
-        void readBody(req).then(body => {
+        void readBody(req).then(async body => {
           try {
             const { name, expireDays, expiresAt } = JSON.parse(body)
-            const config = getUserTokenConfig(username)
-            const newTokenValue = `lx_tk_${crypto.randomBytes(16).toString('hex')}`
-            const newToken: UserToken = {
-              name: name || '未命名 Token',
-              token: newTokenValue,
-              createdAt: Date.now(),
-              expiresAt: (expiresAt !== undefined && expiresAt !== null) ? expiresAt : (expireDays ? Date.now() + (expireDays * 24 * 60 * 60 * 1000) : null),
-              lastUsed: undefined
+            const resolvedExpiresAt = (expiresAt !== undefined && expiresAt !== null) ? expiresAt : (expireDays ? Date.now() + (expireDays * 24 * 60 * 60 * 1000) : null)
+            let newTokenValue: string
+            if (authService.enabled) {
+              const created = await authService.createApiToken(username, { name, expiresAt: resolvedExpiresAt })
+              newTokenValue = created.token
+            } else {
+              const config = getUserTokenConfig(username)
+              newTokenValue = `lx_tk_${crypto.randomBytes(16).toString('hex')}`
+              config.tokens.push({ name: name || '未命名 Token', token: newTokenValue, createdAt: Date.now(), expiresAt: resolvedExpiresAt })
+              saveUserTokenConfig(username, config)
             }
-            config.tokens.push(newToken)
-            saveUserTokenConfig(username, config)
             tokenLog.info(`User ${username} generated a new token: ${name} from ${ip}`)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true, token: newTokenValue }))
@@ -2404,7 +2570,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
 
-        void readBody(req).then(body => {
+        void readBody(req).then(async body => {
           try {
             const { token, tokenMasked } = JSON.parse(body)
             // 优先使用完整 Token 删除，兼容旧的 tokenMasked
@@ -2415,20 +2581,17 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               return
             }
 
-            const config = getUserTokenConfig(username)
-            const initialCount = config.tokens.length
+            let removed = false
+            if (authService.enabled) removed = await authService.removeApiToken(username, target)
+            else {
+              const config = getUserTokenConfig(username)
+              const initialCount = config.tokens.length
+              config.tokens = config.tokens.filter(t => target.startsWith('lx_tk_') ? t.token !== target : `${t.token.slice(0, 6)}...${t.token.slice(-4)}` !== target)
+              removed = config.tokens.length !== initialCount
+              if (removed) saveUserTokenConfig(username, config)
+            }
 
-            config.tokens = config.tokens.filter(t => {
-              if (target.startsWith('lx_tk_')) {
-                return t.token !== target
-              }
-              // 回退：使用脱敏串匹配
-              const m = `${t.token.slice(0, 6)}...${t.token.slice(-4)}`
-              return m !== target
-            })
-
-            if (config.tokens.length !== initialCount) {
-              saveUserTokenConfig(username, config)
+            if (removed) {
               tokenLog.info(`User ${username} removed a token identifier: ${target.length > 20 ? target.slice(0, 10) + '...' : target} from ${ip}`)
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: true }))
@@ -2454,23 +2617,28 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
 
-        void readBody(req).then(body => {
+        void readBody(req).then(async body => {
           try {
             const { tokenMasked, name, expireDays, expiresAt } = JSON.parse(body)
-            const config = getUserTokenConfig(username)
-            const tokenItem = config.tokens.find(t => {
-              const masked = `${t.token.slice(0, 6)}...${t.token.slice(-4)}`
-              return masked === tokenMasked
-            })
-
-            if (tokenItem) {
-              if (name !== undefined) tokenItem.name = name
-              if (expiresAt !== undefined) {
-                tokenItem.expiresAt = expiresAt
-              } else if (expireDays !== undefined) {
-                tokenItem.expiresAt = expireDays ? Date.now() + (expireDays * 24 * 60 * 60 * 1000) : null
+            let updated = false
+            if (authService.enabled) {
+              updated = Boolean(await authService.updateApiToken(username, tokenMasked, {
+                name,
+                expiresAt: expiresAt !== undefined ? expiresAt : expireDays !== undefined ? (expireDays ? Date.now() + (expireDays * 24 * 60 * 60 * 1000) : null) : undefined,
+              }))
+            } else {
+              const config = getUserTokenConfig(username)
+              const tokenItem = config.tokens.find(t => `${t.token.slice(0, 6)}...${t.token.slice(-4)}` === tokenMasked)
+              if (tokenItem) {
+                if (name !== undefined) tokenItem.name = name
+                if (expiresAt !== undefined) tokenItem.expiresAt = expiresAt
+                else if (expireDays !== undefined) tokenItem.expiresAt = expireDays ? Date.now() + (expireDays * 24 * 60 * 60 * 1000) : null
+                saveUserTokenConfig(username, config)
+                updated = true
               }
-              saveUserTokenConfig(username, config)
+            }
+
+            if (updated) {
               tokenLog.info(`User ${username} updated token config: ${tokenMasked} from ${ip}`)
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: true }))
@@ -2495,18 +2663,22 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
           return
         }
 
-        void readBody(req).then(body => {
+        void readBody(req).then(async body => {
           try {
             const { tokenMasked, disabled } = JSON.parse(body)
-            const config = getUserTokenConfig(username)
-            const tokenItem = config.tokens.find(t => {
-              const masked = `${t.token.slice(0, 6)}...${t.token.slice(-4)}`
-              return masked === tokenMasked
-            })
+            let updated = false
+            if (authService.enabled) updated = Boolean(await authService.updateApiToken(username, tokenMasked, { disabled: !!disabled }))
+            else {
+              const config = getUserTokenConfig(username)
+              const tokenItem = config.tokens.find(t => `${t.token.slice(0, 6)}...${t.token.slice(-4)}` === tokenMasked)
+              if (tokenItem) {
+                tokenItem.disabled = !!disabled
+                saveUserTokenConfig(username, config)
+                updated = true
+              }
+            }
 
-            if (tokenItem) {
-              tokenItem.disabled = !!disabled
-              saveUserTokenConfig(username, config)
+            if (updated) {
               tokenLog.info(`User ${username} ${disabled ? 'disabled' : 'enabled'} token: ${tokenMasked} from ${ip}`)
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: true }))
@@ -2875,8 +3047,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             if (!Array.isArray(tasks) || tasks.length === 0) throw new Error('Missing tasks')
             if (concurrency !== undefined) serverDownloadQueue.setConcurrency(username, concurrency)
             if (namingPattern) {
-              const auth = req.headers['x-frontend-auth']
-              if (auth !== global.lx.config['frontend.password']) throw new Error('Unauthorized to change cache naming pattern')
+              if (!isAdminRequest(req)) throw new Error('Unauthorized to change cache naming pattern')
               const normalizedNamingPattern = fileCache.setNamingPattern(namingPattern)
               if (global.lx.config) global.lx.config['cache.namingPattern'] = normalizedNamingPattern
             }
@@ -2975,8 +3146,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
             // Fire and forget (background download) with Abort support
             if (namingPattern) {
-              const auth = req.headers['x-frontend-auth']
-              if (auth !== global.lx.config['frontend.password']) {
+              if (!isAdminRequest(req)) {
                 res.writeHead(403, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ success: false, error: 'Unauthorized to change cache naming pattern' }))
                 return
@@ -3301,7 +3471,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             // operation.  Treat an omitted folder as music as well: older
             // clients used the short {filenames:[...]} payload and the cache
             // layer resolves that payload to the music tree when appropriate.
-            const isFrontendAdmin = req.headers['x-frontend-auth'] === global.lx.config['frontend.password']
+            const isFrontendAdmin = isAdminRequest(req)
             const deletesMusic = deleteItems.some(item => !item.folder || item.folder === 'music')
             if (deletesMusic && !isFrontendAdmin) {
               res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -4070,8 +4240,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
 
       if (pathname === '/api/v1/admin/data/delete-playlist' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -4110,8 +4279,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // 删除歌曲
       if (pathname === '/api/v1/admin/data/delete-song' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -4165,8 +4333,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // 重命名歌单
       if (pathname === '/api/v1/admin/data/rename-playlist' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -4220,8 +4387,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // 批量删除歌曲
       if (pathname === '/api/v1/admin/data/batch-delete-songs' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -4898,8 +5064,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // [新增] 管理员身份验证接口
       if (pathname === '/api/v1/admin/verify' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth === global.lx.config['frontend.password']) {
+        if (isAdminRequest(req)) {
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: true }))
         } else {
@@ -4954,10 +5119,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // elFinder 文件管理器连接器
       if (pathname === '/api/v1/admin/elfinder/connector') {
-        // [修改] 优先从 Header 获取，如果没有则尝试从 URL 参数获取 (用于支持下载和预览)
-        const auth = req.headers['x-frontend-auth'] || urlObj.searchParams.get('auth')
-
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5114,8 +5276,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // Configuration API
       if (pathname === '/api/v1/admin/config') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5131,12 +5292,14 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
             'user.enableLoginCacheRestriction': global.lx.config['user.enableLoginCacheRestriction'],
             'user.enableCacheSizeLimit': global.lx.config['user.enableCacheSizeLimit'],
             'user.cacheSizeLimit': global.lx.config['user.cacheSizeLimit'],
-            'frontend.password': global.lx.config['frontend.password'],
+            passwordConfigured: {
+              frontend: authService.enabled || Boolean(global.lx.config['frontend.password']),
+              webdav: Boolean(global.lx.config['webdav.password']),
+            },
             'admin.path': global.lx.config['admin.path'] || DEFAULT_ADMIN_PATH,
             'webdav.enable': global.lx.config['webdav.enable'] ?? false,
             'webdav.url': global.lx.config['webdav.url'] || '',
             'webdav.username': global.lx.config['webdav.username'] || '',
-            'webdav.password': global.lx.config['webdav.password'] || '',
             'webdav.syncPath': global.lx.config['webdav.syncPath'] || '/lx-sync',
             'webdav.backupPath': global.lx.config['webdav.backupPath'] || '/lx-sync-backups',
             'sync.interval': global.lx.config['sync.interval'] || 60,
@@ -5163,7 +5326,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         }
 
         if (req.method === 'POST') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               const newConfig = JSON.parse(body)
               if (newConfig.serverName !== undefined) global.lx.config.serverName = newConfig.serverName
@@ -5187,13 +5350,18 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               }
 
               const warning = ''
-              if (newConfig['frontend.password'] !== undefined) global.lx.config['frontend.password'] = newConfig['frontend.password']
+              if (typeof newConfig['frontend.password'] === 'string' && newConfig['frontend.password']) {
+                if (authService.enabled) await authService.setPassword('admin', 'admin', newConfig['frontend.password'])
+                else global.lx.config['frontend.password'] = newConfig['frontend.password']
+              }
 
               // WebDAV 配置
               if (newConfig['webdav.enable'] !== undefined) global.lx.config['webdav.enable'] = newConfig['webdav.enable']
               if (newConfig['webdav.url'] !== undefined) global.lx.config['webdav.url'] = newConfig['webdav.url']
               if (newConfig['webdav.username'] !== undefined) global.lx.config['webdav.username'] = newConfig['webdav.username']
-              if (newConfig['webdav.password'] !== undefined) global.lx.config['webdav.password'] = newConfig['webdav.password']
+              if (typeof newConfig['webdav.password'] === 'string' && newConfig['webdav.password']) {
+                global.lx.config['webdav.password'] = newConfig['webdav.password']
+              }
               if (newConfig['webdav.syncPath'] !== undefined) global.lx.config['webdav.syncPath'] = newConfig['webdav.syncPath']
               if (newConfig['webdav.backupPath'] !== undefined) global.lx.config['webdav.backupPath'] = newConfig['webdav.backupPath']
               if (newConfig['sync.interval'] !== undefined) global.lx.config['sync.interval'] = parseInt(newConfig['sync.interval'])
@@ -5249,7 +5417,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 maxSnapshotNum: global.lx.config.maxSnapshotNum,
                 'list.addMusicLocationType': global.lx.config['list.addMusicLocationType'],
                 disableTelemetry: global.lx.config.disableTelemetry,
-                'frontend.password': global.lx.config['frontend.password'],
+                'frontend.password': authService.enabled ? '' : global.lx.config['frontend.password'],
                 'admin.path': global.lx.config['admin.path'] || DEFAULT_ADMIN_PATH,
                 'webdav.enable': global.lx.config['webdav.enable'],
                 'webdav.url': global.lx.config['webdav.url'],
@@ -5274,7 +5442,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
                 'system.allowUnsafeVM': global.lx.config['system.allowUnsafeVM'],
                 users: global.lx.config.users.map(u => ({
                   name: u.name,
-                  password: u.password,
+                  password: authService.enabled ? '' : u.password,
                   isAdmin: getUserIsAdmin(u),
                   maxSnapshotNum: u.maxSnapshotNum,
                   'list.addMusicLocationType': u['list.addMusicLocationType'],
@@ -5303,8 +5471,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // Test Proxy API
       if (pathname === '/api/v1/admin/config/test-proxy' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5356,8 +5523,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // Logs API
       if (pathname === '/api/v1/admin/logs' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5392,8 +5558,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // Stats API
       if (pathname === '/api/v1/admin/stats' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5415,8 +5580,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // WebDAV Test Connection API
       if (pathname === '/api/v1/admin/webdav/test' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5438,8 +5602,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // WebDAV Sync File API
       if (pathname === '/api/v1/admin/webdav/sync-file' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5475,8 +5638,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // WebDAV Backup API
       if (pathname === '/api/v1/admin/webdav/backup' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5500,8 +5662,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // WebDAV Sync All Files API
       if (pathname === '/api/v1/admin/webdav/sync' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5523,8 +5684,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // WebDAV Restore API
       if (pathname === '/api/v1/admin/webdav/restore' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5553,8 +5713,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // WebDAV Logs API
       if (pathname === '/api/v1/admin/webdav/logs' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5577,8 +5736,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // WebDAV Progress SSE API
       if (pathname === '/api/v1/admin/webdav/progress' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth'] || urlObj.searchParams.get('auth')
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5601,8 +5759,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // [新增] 本地备份下载 API
       if (pathname === '/api/v1/admin/backup/download' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth'] || urlObj.searchParams.get('auth')
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401); res.end('Unauthorized'); return
         }
 
@@ -5636,8 +5793,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // [新增] 本地备份还原 API
       if (pathname === '/api/v1/admin/backup/upload' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401); res.end('Unauthorized'); return
         }
 
@@ -5678,8 +5834,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // [新增] 管理重载 API
       if (pathname === '/api/v1/admin/reload' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401); res.end('Unauthorized'); return
         }
 
@@ -5695,8 +5850,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // Restart Server API
       if (pathname === '/api/v1/admin/restart' && req.method === 'POST') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5727,8 +5881,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       }
       // File Management - List Files
       if (pathname === '/api/v1/admin/files' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5770,8 +5923,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // File Management - Download File
       if (pathname === '/api/v1/admin/files/download' && req.method === 'GET') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5802,8 +5954,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // File Management - Create/Update File
       if (pathname === '/api/v1/admin/files' && (req.method === 'POST' || req.method === 'PUT')) {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5842,8 +5993,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 
       // File Management - Delete File
       if (pathname === '/api/v1/admin/files' && req.method === 'DELETE') {
-        const auth = req.headers['x-frontend-auth']
-        if (auth !== global.lx.config['frontend.password']) {
+        if (!isAdminRequest(req)) {
           res.writeHead(401)
           res.end('Unauthorized')
           return
@@ -5917,6 +6067,32 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
 })
 
 export const startServer = async (port: number, ip: string) => {
+  const authInitialization = await authService.initialize({
+    users: global.lx.config.users.map(user => ({ name: user.name, password: user.password })),
+    adminPassword: global.lx.config['frontend.password'],
+  })
+  if (!authService.enabled) {
+    startupLog.warn('AUTH_MASTER_KEY is missing; R2 credential migration is paused and bearer sessions are unavailable')
+  } else {
+    startupLog.info(`Credential store initialized (${authInitialization.credentialCount || 0} credentials)`)
+    const legacyTokenConfigs = global.lx.config.users.map(user => ({ username: user.name, ...getUserTokenConfig(user.name) }))
+    const migratedTokenCount = await authService.importLegacyApiTokens(legacyTokenConfigs)
+    startupLog.info(`API token digest store initialized (${migratedTokenCount} tokens)`)
+  }
+
+  for (const operation of await adminOperations.listApplying()) {
+    const recovered = operation.kind === 'playlist-repair'
+      ? await recoverInterruptedPlaylistRepair(adminOperations, operation)
+      : await recoverInterruptedAdminUserSync(adminOperations, operation)
+    if (!recovered && !['playlist-repair', 'source-sync', 'playlist-sync'].includes(operation.kind)) {
+      await adminOperations.update(operation.id, 'failed', {
+        error: 'interrupted_operation_requires_verified_recovery',
+        journal: operation.journal,
+      })
+    }
+    startupLog.warn(`Recovered interrupted admin operation ${operation.id}: ${recovered ? 'rolled back' : 'quarantined'}`)
+  }
+
   // Initialize file cache settings from global config
   if (global.lx.config) {
     if (global.lx.config.serverCacheLocation) fileCache.setCacheLocation(global.lx.config.serverCacheLocation)
@@ -6010,9 +6186,9 @@ export const startServer = async (port: number, ip: string) => {
     try {
       await completePlaylistReplacement({
         serverVersion: APP_VERSION,
-        getAuthSecret: () => `${getServerId()}:${global.lx.config['frontend.password']}`,
+        getAuthSecret: () => authService.enabled ? authService.getSigningSecret() : getServerId(),
         getUsers: () => global.lx.config.users,
-        isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
+        isAdminRequest,
         isAdminUser: isConfiguredAdminUser,
         musicSdk,
         normalizeSongInfo,

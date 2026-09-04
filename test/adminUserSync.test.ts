@@ -9,6 +9,7 @@ const userPath = path.join(root, 'users')
 const previousNodeEnv = process.env.NODE_ENV
 let adminSync: typeof import('../src/server/adminUserSync')
 let userModule: typeof import('../src/user')
+let operations: import('../src/server/adminOperations').AdminOperationManager
 
 const song = (id: string, name = id) => ({
   id,
@@ -37,6 +38,8 @@ test.before(async () => {
   } as any
   userModule = await import('../src/user')
   adminSync = await import('../src/server/adminUserSync')
+  const { AdminOperationManager } = await import('../src/server/adminOperations')
+  operations = new AdminOperationManager(root)
 })
 
 test.after(async () => {
@@ -48,7 +51,7 @@ test.after(async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('administrator source sync appends safely and overwrites only matching source IDs', async () => {
+test('administrator source sync requires preview and commits all targets transactionally', async () => {
   const aliceDir = path.join(userPath, 'source', 'alice')
   const bobDir = path.join(userPath, 'source', 'bob')
   fs.mkdirSync(aliceDir, { recursive: true })
@@ -67,21 +70,34 @@ test('administrator source sync appends safely and overwrites only matching sour
     { ...sourceMeta, id: 'other.js', name: 'Other Source' },
   ]), 'utf8')
 
-  const appended = await adminSync.syncAdminSources({
+  await assert.rejects(adminSync.syncAdminSources({}), (error: any) => error?.code === 'preview_required')
+  const appendedPreview = await adminSync.previewAdminSourceSync(operations, 'admin-test', {
     fromUser: 'alice', targetUsers: ['bob'], sourceIds: ['safe.js'], mode: 'append',
   })
-  assert.deepEqual(appended.results[0].skipped, ['safe.js'])
+  assert.equal(appendedPreview.preview.targets[0].conflicts, 1)
+  assert.equal(appendedPreview.preview.targets[0].added, 0)
+  const appended = await adminSync.applyAdminSourceSync(operations, 'admin-test', {
+    operationId: appendedPreview.operation.id,
+    confirmationToken: appendedPreview.confirmationToken,
+  })
+  assert.equal(appended.targets[0].conflicts, 1)
   assert.equal(fs.readFileSync(path.join(bobDir, 'safe.js'), 'utf8'), 'old-content')
 
-  const overwritten = await adminSync.syncAdminSources({
+  const overwrittenPreview = await adminSync.previewAdminSourceSync(operations, 'admin-test', {
     fromUser: 'alice', targetUsers: ['bob'], sourceIds: ['safe.js'], mode: 'overwrite',
   })
-  assert.deepEqual(overwritten.results[0].overwritten, ['safe.js'])
+  assert.equal(overwrittenPreview.preview.targets[0].overwritten, 1)
+  assert.equal(overwrittenPreview.preview.targets[0].deleted, 1)
+  const overwritten = await adminSync.applyAdminSourceSync(operations, 'admin-test', {
+    operationId: overwrittenPreview.operation.id,
+    confirmationToken: overwrittenPreview.confirmationToken,
+  })
+  assert.equal(overwritten.targets[0].overwritten, 1)
   assert.equal(fs.readFileSync(path.join(bobDir, 'safe.js'), 'utf8'), 'new-content')
   const metadata = JSON.parse(fs.readFileSync(path.join(bobDir, 'sources.json'), 'utf8'))
   assert.equal(metadata.find((item: any) => item.id === 'safe.js').version, '2.0.0')
-  assert.equal(metadata.find((item: any) => item.id === 'other.js').name, 'Other Source')
-  assert.equal(fs.readFileSync(path.join(bobDir, 'other.js'), 'utf8'), 'other-content')
+  assert.equal(metadata.some((item: any) => item.id === 'other.js'), false)
+  assert.equal(fs.existsSync(path.join(bobDir, 'other.js')), false)
 })
 
 test('administrator playlist sync appends by song ID and protects a populated target from an empty overwrite', async () => {
@@ -108,8 +124,13 @@ test('administrator playlist sync appends by song ID and protects a populated ta
   await bob.listManage.listDataManage.listMusicOverwrite('target', [song('wy_1', 'Existing')])
   await bob.listManage.createSnapshot()
 
-  const appended = await adminSync.syncAdminPlaylist({
+  await assert.rejects(adminSync.syncAdminPlaylist({}), (error: any) => error?.code === 'preview_required')
+  const appendedPreview = await adminSync.previewAdminPlaylistSync(operations, 'admin-test', {
     fromUser: 'alice', toUser: 'bob', sourcePlaylistId: 'source', targetPlaylistId: 'target', mode: 'append',
+  })
+  const appended = await adminSync.applyAdminPlaylistSync(operations, 'admin-test', {
+    operationId: appendedPreview.operation.id,
+    confirmationToken: appendedPreview.confirmationToken,
   })
   assert.equal(appended.beforeTrackCount, 1)
   assert.equal(appended.afterTrackCount, 3)
@@ -118,7 +139,7 @@ test('administrator playlist sync appends by song ID and protects a populated ta
   assert.equal((target?.list[2] as any)?._localOwner, 'alice')
 
   await assert.rejects(
-    adminSync.syncAdminPlaylist({
+    adminSync.previewAdminPlaylistSync(operations, 'admin-test', {
       fromUser: 'alice', toUser: 'bob', sourcePlaylistId: 'empty', targetPlaylistId: 'target', mode: 'overwrite',
     }),
     (error: any) => error?.code === 'empty_source_playlist',
@@ -136,10 +157,16 @@ test('administrator playlist sync appends by song ID and protects a populated ta
   }
   try {
     await assert.rejects(
-      adminSync.syncAdminPlaylist({
+      (async () => {
+        const preview = await adminSync.previewAdminPlaylistSync(operations, 'admin-test', {
         fromUser: 'alice', toUser: 'bob', sourcePlaylistId: 'source', targetPlaylistId: 'target', mode: 'overwrite',
-      }),
-      /simulated snapshot failure/,
+        })
+        return adminSync.applyAdminPlaylistSync(operations, 'admin-test', {
+          operationId: preview.operation.id,
+          confirmationToken: preview.confirmationToken,
+        })
+      })(),
+      (error: any) => error?.code === 'playlist_sync_failed' && /simulated snapshot failure/.test(error.message),
     )
     assert.deepEqual(
       (await bob.listManage.getListData()).userList.find(item => item.id === 'target')?.list.map(item => item.id),

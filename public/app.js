@@ -48,7 +48,7 @@ function stringToColor(str) {
 
 class App {
     constructor() {
-        this.password = null;
+        this.accessToken = null;
         this.currentView = 'dashboard';
         this.users = [];
         this.configLoaded = false;
@@ -62,14 +62,9 @@ class App {
     }
 
     init() {
-        // 检查是否已登录
-        const savedPassword = localStorage.getItem('lx_auth');
-        if (savedPassword) {
-            this.password = savedPassword;
-            this.showApp();
-            this.loadConfig(); // [新增] 初始化时加载配置，确保 configLoaded 标志位正确且持有环境变量数据
-            this.loadDashboard();
-        }
+        // 管理会话只保存在内存中。刷新管理页后重新登录，避免把管理
+        // 密码或 bearer token 留在 localStorage/sessionStorage。
+        localStorage.removeItem('lx_auth');
 
         // 绑定登录事件
         document.getElementById('login-btn')?.addEventListener('click', () => this.login());
@@ -258,8 +253,8 @@ class App {
             });
 
             if (res.success) {
-                this.password = password;
-                localStorage.setItem('lx_auth', password);
+                this.accessToken = res.accessToken || res.token;
+                document.getElementById('access-password').value = '';
                 this.showApp();
                 this.loadDashboard();
             } else {
@@ -270,7 +265,11 @@ class App {
         }
     }
 
-    logout() {
+    async logout() {
+        try {
+            if (this.accessToken) await this.request('/api/v1/admin/logout', { method: 'POST' });
+        } catch { /* local logout must still complete */ }
+        this.accessToken = null;
         localStorage.removeItem('lx_auth');
         location.reload();
     }
@@ -472,7 +471,7 @@ class App {
     startMonitor() {
         if (this.monitorTimer) return;
         this.monitorTimer = setInterval(async () => {
-            if (this.currentView !== 'dashboard' || !this.password) {
+            if (this.currentView !== 'dashboard' || !this.accessToken) {
                 clearInterval(this.monitorTimer);
                 this.monitorTimer = null;
                 return;
@@ -751,16 +750,16 @@ class App {
         document.getElementById('modal-title').textContent = '管理员跨用户同步';
         document.getElementById('modal-body').innerHTML = `
             <div class="admin-user-sync">
-                <p class="sync-help">音源与歌单会复制到目标账户，复制后仍由各账户独立维护；追加不会改写同 ID 音源或目标歌单已有歌曲，覆盖只影响明确选择的目标。</p>
+                <p class="sync-help">所有操作都先生成只读预览，再用一次性令牌确认执行。音源“覆盖”会让目标用户的自有音源集合与所选源一致；歌单默认复制为新歌单。</p>
                 <section class="sync-panel">
                     <h3>同步音乐源</h3>
                     <div class="sync-form-grid">
                         <label>源用户<select id="admin-source-from" class="form-input">${userOptions}</select></label>
-                        <label>模式<select id="admin-source-mode" class="form-input"><option value="append">追加（保留同 ID 源）</option><option value="overwrite">覆盖同 ID 源</option></select></label>
+                        <label>模式<select id="admin-source-mode" class="form-input"><option value="append">追加（冲突项保持不变）</option><option value="overwrite">覆盖（替换目标音源集合）</option></select></label>
                         <label>选择源<select id="admin-source-items" class="form-input" multiple size="5"></select></label>
                         <label>目标用户（可多选）<select id="admin-source-targets" class="form-input" multiple size="5">${userOptions}</select></label>
                     </div>
-                    <button type="button" class="btn-primary" id="admin-source-sync-submit">同步音乐源</button>
+                    <button type="button" class="btn-primary" id="admin-source-sync-submit">预览并同步音乐源</button>
                 </section>
                 <section class="sync-panel">
                     <h3>同步歌单</h3>
@@ -768,10 +767,16 @@ class App {
                         <label>源用户<select id="admin-playlist-from" class="form-input">${userOptions}</select></label>
                         <label>源歌单<select id="admin-playlist-source" class="form-input"></select></label>
                         <label>目标用户<select id="admin-playlist-to" class="form-input">${userOptions}</select></label>
-                        <label>目标歌单<select id="admin-playlist-target" class="form-input"><option value="">创建新歌单</option></select></label>
-                        <label>模式<select id="admin-playlist-mode" class="form-input"><option value="append">追加</option><option value="overwrite">覆盖</option></select></label>
+                        <label>目标歌单<select id="admin-playlist-target" class="form-input" disabled><option value="">将创建新歌单</option></select></label>
+                        <label>模式<select id="admin-playlist-mode" class="form-input"><option value="copy">复制为新歌单（默认）</option><option value="append">追加到已有歌单</option><option value="overwrite">覆盖已有歌单</option></select></label>
                     </div>
-                    <button type="button" class="btn-primary" id="admin-playlist-sync-submit">同步歌单</button>
+                    <button type="button" class="btn-primary" id="admin-playlist-sync-submit">预览并同步歌单</button>
+                </section>
+                <section class="sync-panel">
+                    <h3>历史重复歌单修复</h3>
+                    <p class="sync-help">只合并内容完全相同或仅封面字段不同的重复 ID；歌曲、名称、时间或顺序不同会拒绝自动修复。</p>
+                    <div class="sync-form-grid"><label>目标用户<select id="admin-repair-user" class="form-input">${userOptions}</select></label></div>
+                    <button type="button" class="btn-primary" id="admin-playlist-repair-submit">预览并修复</button>
                 </section>
                 <div class="form-actions"><button type="button" class="btn-secondary" onclick="app.closeModal()">关闭</button></div>
             </div>`;
@@ -780,6 +785,8 @@ class App {
         const sourceFrom = document.getElementById('admin-source-from');
         const playlistFrom = document.getElementById('admin-playlist-from');
         const playlistTo = document.getElementById('admin-playlist-to');
+        const playlistMode = document.getElementById('admin-playlist-mode');
+        const playlistTarget = document.getElementById('admin-playlist-target');
         if (this.users.length > 1) {
             document.getElementById('admin-source-targets').options[1].selected = true;
             playlistTo.selectedIndex = 1;
@@ -798,15 +805,23 @@ class App {
         };
         const refreshTargetPlaylists = async () => {
             const inventory = await this.getUserSyncInventory(playlistTo.value);
-            document.getElementById('admin-playlist-target').innerHTML = '<option value="">创建新歌单</option>' + inventory.playlists.map(playlist =>
+            playlistTarget.innerHTML = '<option value="">请选择目标歌单</option>' + inventory.playlists.map(playlist =>
                 `<option value="${this.escapeAttr(playlist.id)}">${this.escapeHtml(playlist.name)} (${Number(playlist.trackCount) || 0} 首)</option>`
             ).join('');
+        };
+        const refreshPlaylistMode = () => {
+            const isCopy = playlistMode.value === 'copy';
+            playlistTarget.disabled = isCopy;
+            if (isCopy) playlistTarget.value = '';
         };
         sourceFrom.addEventListener('change', () => void refreshSources().catch(error => showError(error.message)));
         playlistFrom.addEventListener('change', () => void refreshSourcePlaylists().catch(error => showError(error.message)));
         playlistTo.addEventListener('change', () => void refreshTargetPlaylists().catch(error => showError(error.message)));
+        playlistMode.addEventListener('change', refreshPlaylistMode);
         document.getElementById('admin-source-sync-submit').addEventListener('click', () => void this.submitAdminSourceSync());
         document.getElementById('admin-playlist-sync-submit').addEventListener('click', () => void this.submitAdminPlaylistSync());
+        document.getElementById('admin-playlist-repair-submit').addEventListener('click', () => void this.submitPlaylistRepair());
+        refreshPlaylistMode();
         void Promise.all([refreshSources(), refreshSourcePlaylists(), refreshTargetPlaylists()]).catch(error => showError(error.message));
     }
 
@@ -816,14 +831,20 @@ class App {
         const targetUsers = Array.from(document.getElementById('admin-source-targets').selectedOptions).map(option => option.value).filter(user => user !== fromUser);
         const mode = document.getElementById('admin-source-mode').value;
         if (!sourceIds.length || !targetUsers.length) return showInfo('请选择音乐源和至少一个不同的目标用户');
-        if (mode === 'overwrite' && !(await showSelect('覆盖同 ID 音源', '目标用户中同 ID 的音源脚本和平台设置将被替换，其他音源保留。是否继续？', { danger: true }))) return;
         try {
-            const response = await this.request('/api/v1/admin/user-sync/sources', {
+            const prepared = await this.request('/api/v1/admin/user-sync/sources/preview', {
                 method: 'POST',
                 body: JSON.stringify({ fromUser, targetUsers, sourceIds, mode })
             });
-            const changed = (response.data?.results || []).reduce((sum, item) => sum + item.copied.length + item.overwritten.length, 0);
-            showSuccess(`音乐源同步完成，共写入 ${changed} 项`);
+            const preview = prepared.data.preview;
+            const details = preview.targets.map(item => `${item.targetUser}: 新增 ${item.added}，覆盖 ${item.overwritten}，保持 ${item.kept}，冲突 ${item.conflicts}，删除 ${item.deleted}`).join('\n');
+            if (!(await showSelect('确认音乐源同步', `${details}\n\n该预览令牌一次有效，执行失败会自动回滚。`, { danger: preview.destructive }))) return;
+            const response = await this.request('/api/v1/admin/user-sync/sources/apply', {
+                method: 'POST',
+                body: JSON.stringify({ operationId: prepared.data.operation.id, confirmationToken: prepared.data.confirmationToken })
+            });
+            const changed = (response.data.targets || []).reduce((sum, item) => sum + item.added + item.overwritten, 0);
+            showSuccess(`音乐源事务已提交，共写入 ${changed} 项`);
         } catch (error) {
             showError('音乐源同步失败: ' + error.message);
         }
@@ -838,20 +859,51 @@ class App {
         const mode = document.getElementById('admin-playlist-mode').value;
         if (!sourcePlaylistId || !toUser) return showInfo('请选择源歌单和目标用户');
         const trackCount = Number(sourceSelect.selectedOptions[0]?.dataset.trackCount || 0);
-        if (mode === 'overwrite' && targetPlaylistId && trackCount === 0) return showError('空源歌单不能覆盖已有目标歌单');
-        if (mode === 'overwrite' && targetPlaylistId && !(await showSelect('覆盖目标歌单', '目标歌单现有歌曲将被所选源歌单替换。是否继续？', { danger: true }))) return;
+        if (mode !== 'copy' && !targetPlaylistId) return showInfo('追加或覆盖模式必须选择已有目标歌单');
+        if (mode === 'overwrite' && trackCount === 0) return showError('空源歌单不能覆盖已有目标歌单');
         try {
-            const response = await this.request('/api/v1/admin/user-sync/playlist', {
+            const prepared = await this.request('/api/v1/admin/user-sync/playlist/preview', {
                 method: 'POST',
                 body: JSON.stringify({ fromUser, toUser, sourcePlaylistId, targetPlaylistId, mode })
             });
-            showSuccess(`歌单同步完成：${response.data.beforeTrackCount} → ${response.data.afterTrackCount} 首`);
+            const preview = prepared.data.preview;
+            const details = `${preview.created ? '创建新歌单' : '更新目标歌单'}：${preview.targetPlaylistName || preview.targetPlaylistId}\n歌曲 ${preview.beforeTrackCount} → ${preview.afterTrackCount} 首；新增 ${preview.added}，跳过 ${preview.skipped}，移除 ${preview.removed}`;
+            if (!(await showSelect('确认歌单同步', `${details}\n\n该预览令牌一次有效，写后校验失败会自动恢复。`, { danger: mode === 'overwrite' }))) return;
+            const response = await this.request('/api/v1/admin/user-sync/playlist/apply', {
+                method: 'POST',
+                body: JSON.stringify({ operationId: prepared.data.operation.id, confirmationToken: prepared.data.confirmationToken })
+            });
+            showSuccess(`歌单事务已提交：${response.data.beforeTrackCount} → ${response.data.afterTrackCount} 首`);
             const inventory = await this.getUserSyncInventory(toUser);
             document.getElementById('admin-playlist-target').innerHTML = '<option value="">创建新歌单</option>' + inventory.playlists.map(playlist =>
                 `<option value="${this.escapeAttr(playlist.id)}">${this.escapeHtml(playlist.name)} (${Number(playlist.trackCount) || 0} 首)</option>`
             ).join('');
         } catch (error) {
             showError('歌单同步失败: ' + error.message);
+        }
+    }
+
+    async submitPlaylistRepair() {
+        const username = document.getElementById('admin-repair-user')?.value;
+        if (!username) return showInfo('请选择目标用户');
+        try {
+            const prepared = await this.request('/api/v1/admin/data-repair/playlists/preview', {
+                method: 'POST', body: JSON.stringify({ username })
+            });
+            const preview = prepared.preview || prepared.data?.preview;
+            const operation = prepared.operation || prepared.data?.operation;
+            const confirmationToken = prepared.confirmationToken || prepared.data?.confirmationToken;
+            const identical = (preview.groups || []).filter(item => item.merge === 'identical').length;
+            const coverOnly = (preview.groups || []).filter(item => item.merge === 'cover-metadata').length;
+            const details = `记录 ${preview.inputPlaylistCount} → ${preview.outputPlaylistCount}；重复组 ${preview.duplicateGroupCount}（完全一致 ${identical}，仅封面差异 ${coverOnly}）；不会改变歌曲顺序。`;
+            if (!preview.changesRequired) return showInfo('该用户没有需要修复的重复歌单记录');
+            if (!(await showSelect('确认历史歌单修复', `${details}\n\n执行前会生成不可变完整备份，并在写后逐项校验。`, { danger: true }))) return;
+            const applied = await this.request('/api/v1/admin/data-repair/playlists/apply', {
+                method: 'POST', body: JSON.stringify({ operationId: operation.id, confirmationToken })
+            });
+            showSuccess(`修复事务已提交：删除 ${applied.data.removedDuplicateRecords} 条重复记录`);
+        } catch (error) {
+            showError('歌单修复失败: ' + error.message);
         }
     }
 
@@ -1887,7 +1939,8 @@ class App {
             if (form.elements['singer.sourcePriority']) {
                 form.elements['singer.sourcePriority'].value = config['singer.sourcePriority'] || 'tx,wy';
             }
-            form.elements['frontend.password'].value = config['frontend.password'] || '';
+            form.elements['frontend.password'].value = '';
+            form.elements['frontend.password'].placeholder = config.passwordConfigured?.frontend ? '已配置；留空保持不变' : '至少 12 位';
             if (form.elements['admin.path']) {
                 form.elements['admin.path'].value = config['admin.path'] || '/admin';
             }
@@ -1903,7 +1956,8 @@ class App {
                 form.elements['webdav.username'].value = config['webdav.username'] || '';
             }
             if (form.elements['webdav.password']) {
-                form.elements['webdav.password'].value = config['webdav.password'] || '';
+                form.elements['webdav.password'].value = '';
+                form.elements['webdav.password'].placeholder = config.passwordConfigured?.webdav ? '已配置；留空保持不变' : '未配置';
             }
             if (form.elements['webdav.syncPath']) {
                 form.elements['webdav.syncPath'].value = config['webdav.syncPath'] || '/lx-sync';
@@ -1960,7 +2014,7 @@ class App {
     async loadExternalLibraries() {
         const list = document.getElementById('external-libraries-list');
         const userSelect = document.getElementById('external-library-user');
-        if (!list || !userSelect || !this.password) return;
+        if (!list || !userSelect || !this.accessToken) return;
         try {
             const users = await this.request('/api/v1/admin/users');
             const currentUser = userSelect.value;
@@ -2060,11 +2114,11 @@ class App {
             });
             applyAdminBranding(config);
 
-            // 如果密码改了，更新本地存储
-            if (config['frontend.password'] && config['frontend.password'] !== this.password) {
-                this.password = config['frontend.password'];
-                localStorage.setItem('lx_auth', config['frontend.password']);
-            }
+            const adminPasswordChanged = Boolean(config['frontend.password']);
+            const frontendPasswordInput = document.querySelector('[name="frontend.password"]');
+            const webdavPasswordInput = document.querySelector('[name="webdav.password"]');
+            if (frontendPasswordInput) frontendPasswordInput.value = '';
+            if (webdavPasswordInput) webdavPasswordInput.value = '';
 
             // 更新侧边栏播放器链接
             const navPlayerLink = document.getElementById('nav-player-link');
@@ -2077,6 +2131,10 @@ class App {
                     const adminPath = config['admin.path'];
                     showSuccess(`配置保存成功！\n管理后台新地址：${location.origin}${adminPath}/`);
                 }
+            }
+            if (adminPasswordChanged) {
+                this.accessToken = null;
+                setTimeout(() => location.reload(), 1200);
             }
         } catch (err) {
             if (!silent) showError('配置保存失败: ' + err.message);
@@ -2112,14 +2170,10 @@ class App {
     }
 
     async request(url, options = {}) {
-        const defaultOptions = {
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Frontend-Auth': this.password
-            }
-        };
-
-        const response = await fetch(API_BASE + url, { ...defaultOptions, ...options });
+        const headers = new Headers(options.headers || {});
+        if (!(options.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+        if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+        const response = await fetch(API_BASE + url, { ...options, headers });
 
         if (response.status === 401) {
             this.logout();
@@ -2356,17 +2410,15 @@ class App {
         `;
     }
 
-    initSSE() {
+    async initSSE() {
         if (this.sseSource) return;
+        if (!this.accessToken) return;
 
-        const auth = this.password || localStorage.getItem('lx_auth');
-        if (!auth) return;
-
-        this.sseSource = new EventSource(`/api/v1/admin/webdav/progress?auth=${encodeURIComponent(auth)}`);
-
-        this.sseSource.onmessage = (event) => {
+        const controller = new AbortController();
+        this.sseSource = { close: () => controller.abort() };
+        const handleMessage = (payload) => {
             try {
-                const data = JSON.parse(event.data);
+                const data = JSON.parse(payload);
                 // console.log('SSE Progress:', data);
 
                 if (data.type === 'backup') {
@@ -2412,11 +2464,32 @@ class App {
                 console.error('SSE Parse Error:', e);
             }
         };
-
-        this.sseSource.onerror = (err) => {
-            // console.error('SSE Error:', err);
-            // 连接失败不报错，静默重试
-        };
+        try {
+            const response = await fetch('/api/v1/admin/webdav/progress', {
+                headers: { Authorization: `Bearer ${this.accessToken}` },
+                signal: controller.signal,
+            });
+            if (!response.ok || !response.body) throw new Error(`SSE HTTP ${response.status}`);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                let separator;
+                while ((separator = buffer.indexOf('\n\n')) >= 0) {
+                    const event = buffer.slice(0, separator);
+                    buffer = buffer.slice(separator + 2);
+                    const data = event.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+                    if (data) handleMessage(data);
+                }
+            }
+        } catch (error) {
+            if (error?.name !== 'AbortError') console.warn('SSE connection ended:', error?.message || error);
+        } finally {
+            this.sseSource = null;
+        }
     }
 
     async loadSyncLogs() {
@@ -2780,7 +2853,7 @@ class App {
             const response = await fetch(`/api/v1/admin/data/upload-snapshot?user=${encodeURIComponent(username)}&time=${time}&filename=${encodeURIComponent(filename)}`, {
                 method: 'POST',
                 headers: {
-                    'X-Frontend-Auth': this.password
+                    'Authorization': `Bearer ${this.accessToken}`
                 },
                 body: content
             });
@@ -2810,7 +2883,7 @@ class App {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Frontend-Auth': this.password
+                    'Authorization': `Bearer ${this.accessToken}`
                 },
                 body: JSON.stringify({ id })
             });
@@ -2869,14 +2942,18 @@ class App {
         if (!(await showSelect('本地备份', '确定要创建并下载本地全量 ZIP 备份吗？\n\n这可能需要一些时间，取决于数据量。'))) return;
 
         try {
-            // 直接通过 URL 下载，后端会处理 ZIP 创建并流式传输
-            const url = `/api/v1/admin/backup/download?auth=${encodeURIComponent(this.password)}`;
+            const response = await fetch('/api/v1/admin/backup/download', {
+                headers: { Authorization: `Bearer ${this.accessToken}` },
+            });
+            if (!response.ok) throw new Error(await response.text() || 'Backup download failed');
+            const url = URL.createObjectURL(await response.blob());
             const a = document.createElement('a');
             a.href = url;
             // 获取当前日期作为文件名建议
             const dateStr = new Date().toISOString().split('T')[0];
             a.download = `lx-sync-backup-local-${dateStr}.zip`;
             a.click();
+            URL.revokeObjectURL(url);
         } catch (err) {
             showError('下载本地备份失败: ' + err.message);
         }
@@ -2912,7 +2989,7 @@ class App {
             const response = await fetch('/api/v1/admin/backup/upload', {
                 method: 'POST',
                 headers: {
-                    'X-Frontend-Auth': this.password
+                    'Authorization': `Bearer ${this.accessToken}`
                 },
                 body: formData
             });

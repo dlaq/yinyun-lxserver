@@ -4,6 +4,7 @@ import * as dns from 'node:dns'
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as net from 'node:net'
+import crypto from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'http'
 import { extractMetadata, loadUserApi, initUserApis, getApiStatus } from './userApi'
 import { normalizeUsername } from '@/utils/username'
@@ -14,12 +15,15 @@ import {
     readSourceShares,
     removeSourceShare,
     setSourceShare,
+    writeSourceShares,
 } from './customSourceSharing'
 import {
     getEnabledSourcePlatforms,
     removeSourcePlatformPreferences,
     setEnabledSourcePlatforms,
 } from './customSourcePlatformPreferences'
+import { atomicWriteJsonSync } from './atomicJsonStore'
+import { getActiveAuthService, getBearerToken } from './authService'
 
 export interface StoredSource {
     id: string
@@ -99,9 +103,10 @@ const readSources = (username: string): StoredSource[] => {
     if (!fs.existsSync(metaPath)) return []
     try {
         const value = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
-        return Array.isArray(value) ? value : []
-    } catch {
-        return []
+        if (!Array.isArray(value)) throw new Error(`Invalid source metadata for ${username}`)
+        return value
+    } catch (error: any) {
+        throw new Error(`Source metadata is unavailable for ${username}: ${error?.message || error}`)
     }
 }
 
@@ -109,8 +114,18 @@ const writeFileAtomic = (filePath: string, content: string) => {
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
     const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
     try {
-        fs.writeFileSync(tempPath, content, 'utf-8')
+        const fd = fs.openSync(tempPath, 'wx', 0o600)
+        try {
+            fs.writeFileSync(fd, content, 'utf-8')
+            fs.fsyncSync(fd)
+        } finally {
+            fs.closeSync(fd)
+        }
         fs.renameSync(tempPath, filePath)
+        if (process.platform !== 'win32') {
+            const directoryFd = fs.openSync(path.dirname(filePath), fs.constants.O_RDONLY)
+            try { fs.fsyncSync(directoryFd) } finally { fs.closeSync(directoryFd) }
+        }
     } finally {
         if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
     }
@@ -119,7 +134,7 @@ const writeFileAtomic = (filePath: string, content: string) => {
 const writeSources = (username: string, sources: StoredSource[]) => {
     const sourcesDir = getSourceDir(username)
     fs.mkdirSync(sourcesDir, { recursive: true })
-    writeFileAtomic(path.join(sourcesDir, 'sources.json'), JSON.stringify(sources, null, 2))
+    atomicWriteJsonSync(path.join(sourcesDir, 'sources.json'), sources, { mode: 0o600 })
 }
 
 export const listOwnedSourcesForAdmin = (username: string) => {
@@ -132,6 +147,99 @@ export const listOwnedSourcesForAdmin = (username: string) => {
         supportedSources: [...source.supportedSources],
         enabledSources: getEnabledSourcePlatforms(owner, owner, source.id, source.supportedSources),
     }))
+}
+
+export interface AdminOwnedSourceState {
+    username: string
+    sources: Array<{
+        metadata: StoredSource
+        content: string
+        enabledSources: string[]
+        sharedUsers: string[]
+    }>
+    order: string[]
+}
+
+export const getAdminOwnedSourceState = (username: string): AdminOwnedSourceState => {
+    const owner = assertUsername(username)
+    const sourceDir = getSourceDir(owner)
+    const sources = readSources(owner).map(metadata => {
+        const scriptPath = path.join(sourceDir, metadata.id)
+        if (!fs.existsSync(scriptPath)) throw new Error(`Source script not found: ${metadata.id}`)
+        return {
+            metadata: { ...metadata, supportedSources: [...metadata.supportedSources] },
+            content: fs.readFileSync(scriptPath, 'utf8'),
+            enabledSources: getEnabledSourcePlatforms(owner, owner, metadata.id, metadata.supportedSources),
+            sharedUsers: getSharedUsers(owner, metadata.id),
+        }
+    })
+    const sourceIds = new Set(sources.map(item => item.metadata.id))
+    const orderPath = path.join(sourceDir, 'order.json')
+    let order = sources.map(item => item.metadata.id)
+    if (fs.existsSync(orderPath)) {
+        const parsed: unknown = JSON.parse(fs.readFileSync(orderPath, 'utf8'))
+        if (!Array.isArray(parsed) || parsed.some(id => typeof id !== 'string' || !sourceIds.has(id))) {
+            throw new Error(`Source order is invalid for ${owner}`)
+        }
+        order = [...new Set(parsed), ...order.filter(id => !(parsed as string[]).includes(id))] as string[]
+    }
+    return { username: owner, sources, order }
+}
+
+const canonicalState = (state: AdminOwnedSourceState) => ({
+    username: state.username,
+    order: state.order,
+    sources: state.sources.map(item => ({
+        metadata: Object.fromEntries(Object.entries(item.metadata).sort(([a], [b]) => a.localeCompare(b))),
+        content: item.content,
+        enabledSources: item.enabledSources,
+        sharedUsers: item.sharedUsers,
+    })),
+})
+
+export const hashAdminOwnedSourceState = (state: AdminOwnedSourceState) => crypto
+    .createHash('sha256')
+    .update(JSON.stringify(canonicalState(state)))
+    .digest('hex')
+
+export const restoreAdminOwnedSourceState = async (state: AdminOwnedSourceState) => {
+    const owner = assertUsername(state.username)
+    const sourceDir = getSourceDir(owner)
+    fs.mkdirSync(sourceDir, { recursive: true, mode: 0o700 })
+    const previous = readSources(owner)
+    const nextIds = new Set(state.sources.map(item => item.metadata.id))
+    for (const item of state.sources) {
+        if (!item.metadata.id || path.basename(item.metadata.id) !== item.metadata.id) throw new Error('Invalid source ID in state')
+        if (!Array.isArray(item.metadata.supportedSources) || !item.metadata.supportedSources.length) throw new Error(`Invalid source metadata: ${item.metadata.id}`)
+        if (!item.content || Buffer.byteLength(item.content, 'utf8') > MAX_SOURCE_SCRIPT_BYTES) throw new Error(`Invalid source script: ${item.metadata.id}`)
+        writeFileAtomic(path.join(sourceDir, item.metadata.id), item.content)
+    }
+    for (const source of previous) {
+        if (nextIds.has(source.id)) continue
+        const scriptPath = path.join(sourceDir, source.id)
+        if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath)
+        removeSourcePlatformPreferences(owner, source.id)
+    }
+    writeSources(owner, state.sources.map(item => ({ ...item.metadata, supportedSources: [...item.metadata.supportedSources] })))
+    if (state.order.length !== nextIds.size || state.order.some(id => !nextIds.has(id))) throw new Error('Invalid source order in state')
+    atomicWriteJsonSync(path.join(sourceDir, 'order.json'), state.order, { mode: 0o600 })
+
+    for (const item of state.sources) {
+        setEnabledSourcePlatforms(owner, owner, item.metadata.id, item.enabledSources, item.metadata.supportedSources)
+    }
+    const retainedShares = readSourceShares().filter(share => share.owner !== owner)
+    const restoredShares = state.sources.flatMap(item => item.sharedUsers.length
+        ? [{ owner, sourceId: item.metadata.id, targetUsers: item.sharedUsers, sharedAt: new Date().toISOString() }]
+        : [])
+    writeSourceShares([...retainedShares, ...restoredShares])
+    await initUserApis(owner)
+    const restored = getAdminOwnedSourceState(owner)
+    // sharedAt is intentionally not part of the state/hash; ownership, target
+    // users, order, metadata, scripts and platform choices are exact.
+    if (hashAdminOwnedSourceState(restored) !== hashAdminOwnedSourceState(state)) {
+        throw new Error(`Source state verification failed for ${owner}`)
+    }
+    return restored
 }
 
 export const syncOwnedSourcesForAdmin = async (
@@ -383,7 +491,7 @@ const authorizeUnsafeSource = (
         })
         return false
     }
-    if (req.headers['x-frontend-auth'] !== global.lx.config['frontend.password']) {
+    if (!isAdministratorRequest(req)) {
         sendJson(res, 403, { success: false, error: 'Unsafe VM scripts require administrator authorization.' })
         return false
     }
@@ -400,9 +508,20 @@ const authorizeUnsafeSource = (
 }
 
 const authorizeAdmin = (req: IncomingMessage, res: ServerResponse) => {
-    if (req.headers['x-frontend-auth'] === global.lx.config['frontend.password']) return true
+    if (isAdministratorRequest(req)) return true
     sendJson(res, 403, { success: false, error: 'Administrator authorization required.' })
     return false
+}
+
+const isAdministratorRequest = (req: IncomingMessage) => {
+    const auth = getActiveAuthService()
+    const token = getBearerToken(req.headers.authorization)
+    if (token && auth?.verifyAccessToken(token, 'admin')) return true
+    return Boolean(
+        auth?.allowLegacyAdminHeader &&
+        global.lx.config['frontend.password'] &&
+        req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
+    )
 }
 
 const saveSource = async (

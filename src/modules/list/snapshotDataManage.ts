@@ -5,6 +5,8 @@ import { syncLog } from '@/utils/log4js'
 import { checkAndCreateDirSync } from '@/utils'
 import { getUserConfig, type UserDataManage } from '@/user/data'
 import { File } from '@/constants'
+import { atomicWriteJsonSync } from '@/server/atomicJsonStore'
+import { assertPlaylistData } from '@/server/playlistInvariants'
 
 interface SnapshotInfo {
   latest: string | null
@@ -44,23 +46,25 @@ export class SnapshotDataManage {
     this.saveSnapshotInfoThrottle()
   }
 
-  getSnapshot = async (name: string) => {
+  getSnapshot = async (name: string): Promise<LX.Sync.List.ListData> => {
     const filePath = path.join(this.snapshotDir, `snapshot_${name}`)
-    let listData: LX.Sync.List.ListData
     try {
-      listData = JSON.parse((await fs.promises.readFile(filePath)).toString('utf-8'))
-    } catch (err) {
-      syncLog.warn(err)
-      return null
+      const listData: unknown = JSON.parse((await fs.promises.readFile(filePath)).toString('utf-8'))
+      assertPlaylistData(listData, { allowHistoricalDuplicates: true })
+      return listData
+    } catch (err: any) {
+      syncLog.error(`Critical snapshot unavailable ${filePath}: ${err?.message || err}`)
+      throw err
     }
-    return listData
   }
 
   saveSnapshot = async (name: string, data: string) => {
     syncLog.info('saveSnapshot', this.userDataManage.userName, name)
     const filePath = path.join(this.snapshotDir, `snapshot_${name}`)
     try {
-      fs.writeFileSync(filePath, data)
+      const parsed: unknown = JSON.parse(data)
+      assertPlaylistData(parsed)
+      atomicWriteJsonSync(filePath, parsed, { mode: 0o600 })
     } catch (err) {
       syncLog.error(err)
       throw err
@@ -71,7 +75,9 @@ export class SnapshotDataManage {
     syncLog.info('saveSnapshotWithTime', this.userDataManage.userName, name, time)
     const filePath = path.join(this.snapshotDir, `snapshot_${name}`)
     try {
-      fs.writeFileSync(filePath, data)
+      const parsed: unknown = JSON.parse(data)
+      assertPlaylistData(parsed)
+      atomicWriteJsonSync(filePath, parsed, { mode: 0o600 })
       if (time) {
         const date = new Date(time)
         fs.utimesSync(filePath, date, date)
@@ -134,15 +140,21 @@ export class SnapshotDataManage {
     checkAndCreateDirSync(this.snapshotDir)
 
     this.snapshotInfoFilePath = path.join(this.listDir, File.listSnapshotInfoJSON)
-    this.snapshotInfo = fs.existsSync(this.snapshotInfoFilePath)
-      ? JSON.parse(fs.readFileSync(this.snapshotInfoFilePath).toString())
-      : { latest: null, time: 0, list: [] }
+    if (fs.existsSync(this.snapshotInfoFilePath)) {
+      const parsed = JSON.parse(fs.readFileSync(this.snapshotInfoFilePath).toString())
+      if (!parsed || !Array.isArray(parsed.list) || !(parsed.latest === null || typeof parsed.latest === 'string') || !Number.isFinite(parsed.time)) {
+        throw new Error(`Invalid snapshot index: ${this.snapshotInfoFilePath}`)
+      }
+      this.snapshotInfo = parsed
+    } else this.snapshotInfo = { latest: null, time: 0, list: [] }
 
     this.saveSnapshotInfoThrottle = throttle(() => {
-      fs.writeFile(this.snapshotInfoFilePath, JSON.stringify(this.snapshotInfo), 'utf8', (err) => {
-        if (err) console.error(err)
+      try {
+        atomicWriteJsonSync(this.snapshotInfoFilePath, this.snapshotInfo, { mode: 0o600 })
         void this.clearOldSnapshot()
-      })
+      } catch (error) {
+        console.error(error)
+      }
     })
 
   }

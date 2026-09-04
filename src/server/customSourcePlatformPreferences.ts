@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { normalizeUsername, tryNormalizeUsername } from '@/utils/username'
+import { atomicWriteJsonSync } from './atomicJsonStore'
 
 export interface SourcePlatformPreference {
   owner: string
@@ -10,17 +11,6 @@ export interface SourcePlatformPreference {
 }
 
 const PREFERENCES_FILENAME = 'platform-preferences.json'
-
-const writeTextAtomic = (filePath: string, content: string) => {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true })
-  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`
-  try {
-    fs.writeFileSync(temporary, content, 'utf-8')
-    fs.renameSync(temporary, filePath)
-  } finally {
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary)
-  }
-}
 
 const normalizePlatforms = (value: unknown): string[] => {
   if (!Array.isArray(value)) return []
@@ -60,7 +50,7 @@ export const readSourcePlatformPreferences = (username: string): SourcePlatformP
 
   try {
     const value = JSON.parse(fs.readFileSync(preferencesPath, 'utf-8'))
-    if (!Array.isArray(value)) return []
+    if (!Array.isArray(value)) throw new Error('Source platform preferences must be an array')
 
     const records = new Map<string, SourcePlatformPreference>()
     for (const item of value) {
@@ -68,14 +58,14 @@ export const readSourcePlatformPreferences = (username: string): SourcePlatformP
       if (record) records.set(`${record.owner}:${record.sourceId}`, record)
     }
     return Array.from(records.values())
-  } catch {
-    return []
+  } catch (error: any) {
+    throw new Error(`Source platform preferences are unavailable for ${username}: ${error?.message || error}`)
   }
 }
 
 const writeSourcePlatformPreferences = (username: string, preferences: SourcePlatformPreference[]) => {
   const preferencesPath = getPreferencesPath(username)
-  writeTextAtomic(preferencesPath, JSON.stringify(preferences, null, 2))
+  atomicWriteJsonSync(preferencesPath, preferences, { mode: 0o600 })
 }
 
 export const getEnabledSourcePlatforms = (

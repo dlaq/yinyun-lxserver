@@ -145,7 +145,11 @@ class DownloadManager {
     }
 
     getServerQueueHeaders() {
-        return { 'Content-Type': 'application/json', ...(window.getUserAuthHeaders ? window.getUserAuthHeaders() : {}) };
+        return {
+            'Content-Type': 'application/json',
+            ...(window.getUserAuthHeaders ? window.getUserAuthHeaders() : {}),
+            ...(window.getAdminAuthHeaders ? window.getAdminAuthHeaders() : {}),
+        };
     }
 
     async requestServerQueue(path, body, allowAuthRetry = true) {
@@ -180,7 +184,7 @@ class DownloadManager {
                     embedLyricFormat: window.settings?.embedLyricFormat || 'enhanced'
                 }))
             };
-            if (headers['x-frontend-auth'] && window.settings?.serverCacheNamingPattern) {
+            if (headers.Authorization && window.settings?.serverCacheNamingPattern) {
                 payload.namingPattern = window.settings.serverCacheNamingPattern;
             }
             await this.requestServerQueue('/api/v1/player/music/cache/queue', payload);
@@ -858,7 +862,11 @@ class DownloadManager {
             if (!rawUrl.startsWith('http')) throw new Error('无法获取有效的外部下载地址');
 
             // 2. Post to backend
-            const headers = { 'Content-Type': 'application/json', ...(window.getUserAuthHeaders ? window.getUserAuthHeaders() : {}) };
+            const headers = {
+                'Content-Type': 'application/json',
+                ...(window.getUserAuthHeaders ? window.getUserAuthHeaders() : {}),
+                ...(window.getAdminAuthHeaders ? window.getAdminAuthHeaders() : {}),
+            };
             const payload = {
                 songInfo: this.getSongInfoForServer(resolvedSong),
                 url: rawUrl,
@@ -872,7 +880,7 @@ class DownloadManager {
                 sidecarLyricFormat: window.settings?.sidecarLyricFormat || 'line',
                 embedLyricFormat: window.settings?.embedLyricFormat || 'enhanced'
             };
-            if (window.settings?.serverCacheNamingPattern && headers['x-frontend-auth']) {
+            if (window.settings?.serverCacheNamingPattern && headers.Authorization) {
                 payload.namingPattern = window.settings.serverCacheNamingPattern;
             }
 

@@ -231,8 +231,8 @@ window.soundEffects = (function () {
 
     async function pushToServer(payload) {
         const user = localStorage.getItem('lx_sync_user');
-        const pass = localStorage.getItem('lx_sync_pass');
-        if (!user || !pass) return;
+        const token = localStorage.getItem('lx_user_token');
+        if (!user || !token) return;
 
         try {
             await fetch('/api/v1/player/user/sound-effects', {
@@ -251,8 +251,8 @@ window.soundEffects = (function () {
     async function fetchFromServer() {
         if (!window.settings || !window.settings.saveAccountSettingsToFile) return;
         const user = localStorage.getItem('lx_sync_user');
-        const pass = localStorage.getItem('lx_sync_pass');
-        if (!user || !pass) return;
+        const token = localStorage.getItem('lx_user_token');
+        if (!user || !token) return;
 
         try {
             const res = await fetch('/api/v1/player/user/sound-effects', {

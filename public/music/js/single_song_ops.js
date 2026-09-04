@@ -180,9 +180,9 @@ async function deleteSingleSong(songId) {
     if (window.SyncManager.mode === 'local') {
         // Local mode: Use user credentials
         const username = localStorage.getItem('lx_sync_user');
-        const password = localStorage.getItem('lx_sync_pass');
+        const token = localStorage.getItem('lx_user_token');
 
-        if (!username || !password) {
+        if (!username || !token) {
             showError('请先登录本地账号');
             return;
         }
