@@ -144,8 +144,11 @@ export class ListDataManage {
   // }
 
 
-  listDataOverwrite = async ({ defaultList, loveList, userList, tempList }: MakeOptional<LX.List.ListDataFull, 'tempList'>): Promise<string[]> => {
-    assertPlaylistData({ defaultList, loveList, userList })
+  listDataOverwrite = async (
+    { defaultList, loveList, userList, tempList }: MakeOptional<LX.List.ListDataFull, 'tempList'>,
+    options: { allowHistoricalDuplicates?: boolean } = {},
+  ): Promise<string[]> => {
+    assertPlaylistData({ defaultList, loveList, userList }, options)
     const updatedListIds: string[] = []
     const newUserIds: string[] = []
     const newUserListInfos = userList.map(({ list, ...listInfo }) => {

@@ -119,7 +119,7 @@ export const applyPlaylistRepair = async (
     return result
   } catch (error: any) {
     try {
-      await space.listManage.listDataManage.listDataOverwrite(current)
+      await space.listManage.listDataManage.listDataOverwrite(current, { allowHistoricalDuplicates: true })
       await space.listManage.createSnapshot()
       const restoredHash = hashPlaylistData(await space.listManage.getListData())
       if (restoredHash !== currentHash) throw new Error('Playlist repair rollback verification failed')
@@ -148,7 +148,7 @@ export const recoverInterruptedPlaylistRepair = async (
     const backup: unknown = JSON.parse(fs.readFileSync(journal.backupPath, 'utf8'))
     assertPlaylistData(backup, { allowHistoricalDuplicates: true })
     const space = getUserSpace(configuredUsername(journal.username))
-    await space.listManage.listDataManage.listDataOverwrite(backup)
+    await space.listManage.listDataManage.listDataOverwrite(backup, { allowHistoricalDuplicates: true })
     await space.listManage.createSnapshot()
     if (hashPlaylistData(await space.listManage.getListData()) !== journal.beforeHash) {
       throw new Error('Interrupted playlist repair rollback verification failed')
