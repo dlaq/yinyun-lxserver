@@ -58,6 +58,13 @@ test('shared local-library songs retain a durable playlist identity', () => {
   assert.match(playerApp, /song\?\._localOwner/)
 })
 
+test('the first authenticated local-library visit shows a loading state', () => {
+  const localMusic = read('public/music/js/local_music.js')
+  assert.match(localMusic, /hasLoadedOnce: false/)
+  assert.match(localMusic, /fetchData\(window\.LocalMusicManager\.hasLoadedOnce\)/)
+  assert.match(localMusic, /if \(result\.success\) \{\s*this\.hasLoadedOnce = true/)
+})
+
 test('pre-login initialization does not mutate cache config or call protected cache stats', () => {
   const playerApp = read('public/music/app.js')
   assert.doesNotMatch(playerApp, /Initial Sync for Server Cache Config/)

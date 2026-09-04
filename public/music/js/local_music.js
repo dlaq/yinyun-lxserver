@@ -46,6 +46,7 @@ window.LocalMusicManager = {
     remasterTaskRunning: false,
     authExpired: false,
     authExpiredNotified: false,
+    hasLoadedOnce: false,
     coverRenderTimer: null,
 
     escapeHtml(value) {
@@ -842,7 +843,12 @@ window.LocalMusicManager = {
             if (tabId === 'localmusic') {
                 window.LocalMusicManager.syncLocationSelector();
                 window.LocalMusicManager.resetFilters();
-                window.LocalMusicManager.fetchData(true); // silent fetch
+                // The pre-login placeholder says that authentication is
+                // required.  Keep the first authenticated fetch visible so a
+                // large shared library does not misleadingly show that stale
+                // message while the network request is still running.  Later
+                // visits refresh silently because valid rows already exist.
+                window.LocalMusicManager.fetchData(window.LocalMusicManager.hasLoadedOnce);
             } else {
                 // Auto exit batch mode when leaving
                 if (window.LocalMusicManager.batchMode) {
@@ -1024,6 +1030,7 @@ window.LocalMusicManager = {
     },
 
     showNoPermissionState() {
+        this.hasLoadedOnce = false;
         this.originalData = [];
         this.displayData = [];
         this.updatePagination();
@@ -1080,6 +1087,7 @@ window.LocalMusicManager = {
 
             const result = await res.json();
             if (result.success) {
+                this.hasLoadedOnce = true;
                 this.authExpired = false;
                 this.authExpiredNotified = false;
                 this.originalData = result.data || [];
@@ -1103,6 +1111,7 @@ window.LocalMusicManager = {
     },
 
     showAuthExpiredState() {
+        this.hasLoadedOnce = false;
         this.authExpired = true;
         this.originalData = [];
         this.displayData = [];
