@@ -1,7 +1,7 @@
 import { arrPush, arrPushByPosition, arrUnshift } from '@/utils/common'
 import { LIST_IDS } from '@/constants'
 import { type SnapshotDataManage } from './snapshotDataManage'
-import { assertPlaylistData, PlaylistInvariantError } from '@/server/playlistInvariants'
+import { assertPlaylistData, PlaylistInvariantError, stableSongKey } from '@/server/playlistInvariants'
 
 export class ListDataManage {
   snapshotDataManage: SnapshotDataManage
@@ -256,7 +256,8 @@ export class ListDataManage {
       throw new PlaylistInvariantError('unknown_playlist_id', `歌单不存在: ${listId}`)
     }
     for (const song of musicInfos) {
-      if (!song || typeof song.id !== 'string' || !song.id.trim()) throw new PlaylistInvariantError('missing_song_id', '歌曲缺少稳定 ID')
+      if (!song) throw new PlaylistInvariantError('missing_song_id', '歌曲缺少稳定 ID')
+      stableSongKey(song as any)
     }
     this.setMusicList(listId, musicInfos)
     return [listId]

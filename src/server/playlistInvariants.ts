@@ -30,6 +30,17 @@ export interface PlaylistRepairReport {
 
 const isRecord = (value: unknown): value is Record<string, any> => Boolean(value && typeof value === 'object' && !Array.isArray(value))
 
+const normalizedScalarId = (value: unknown) => {
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+const hasStableSongIdentity = (song: Record<string, any>) => Boolean(
+  normalizedScalarId(song.id) ||
+  (typeof song._localFilename === 'string' && song._localFilename.trim()),
+)
+
 const canonicalize = (value: any): any => {
   if (Array.isArray(value)) return value.map(canonicalize)
   if (!isRecord(value)) return value
@@ -48,7 +59,11 @@ const assertSongList = (value: unknown, context: string) => {
   if (!Array.isArray(value)) throw new PlaylistInvariantError('invalid_song_list', `${context} 必须是歌曲数组`)
   for (const [index, song] of value.entries()) {
     if (!isRecord(song)) throw new PlaylistInvariantError('invalid_song', `${context} 第 ${index + 1} 首歌曲结构无效`)
-    if (typeof song.id !== 'string' || !song.id.trim()) {
+    // Older LX/NetEase snapshots legitimately store numeric song IDs. They
+    // are stable JSON scalars and must not be confused with a missing ID.
+    // A durable local-library filename is likewise the canonical identity for
+    // shared local tracks that predate the synthetic top-level ID field.
+    if (!hasStableSongIdentity(song)) {
       throw new PlaylistInvariantError('missing_song_id', `${context} 第 ${index + 1} 首歌曲缺少稳定 ID`)
     }
   }
@@ -90,8 +105,8 @@ const withoutCoverMetadata = (playlist: Record<string, any>) => {
 }
 
 const mergeCoverMetadata = (target: Record<string, any>, duplicate: Record<string, any>) => {
-  const targetCover = typeof target.coverSongId === 'string' ? target.coverSongId.trim() : ''
-  const duplicateCover = typeof duplicate.coverSongId === 'string' ? duplicate.coverSongId.trim() : ''
+  const targetCover = normalizedScalarId(target.coverSongId)
+  const duplicateCover = normalizedScalarId(duplicate.coverSongId)
   if (targetCover && duplicateCover && targetCover !== duplicateCover) {
     throw new PlaylistInvariantError(
       'conflicting_cover_song',
@@ -178,7 +193,7 @@ export const stableSongKey = (song: Record<string, any>): string => {
   const filename = typeof song._localFilename === 'string' ? song._localFilename.trim() : ''
   if (filename) return `local:${owner}:${filename}`
   const source = typeof song.source === 'string' ? song.source.trim() : ''
-  const id = typeof song.id === 'string' ? song.id.trim() : ''
+  const id = normalizedScalarId(song.id)
   if (!id) throw new PlaylistInvariantError('missing_song_id', '歌曲缺少稳定 ID')
   return `${source || 'unknown'}:${id}`
 }

@@ -43,3 +43,16 @@ test('stable append preserves target order and deduplicates shared local paths',
   const source = [song('duplicate-id', { source: 'local', _localOwner: 'alice', _localFilename: 'a.flac' }), song('remote-2')]
   assert.deepEqual(appendSongsStable(target, source).map(item => item.id), ['remote-1', 'local-a', 'remote-2'])
 })
+
+test('historical numeric song IDs and durable local identities remain valid', () => {
+  const data = {
+    defaultList: [{ ...song('unused'), id: 29023858, songmid: 29023858 }],
+    loveList: [{ ...song('unused-local'), id: undefined, _localOwner: 'alice', _localFilename: 'track.flac' }],
+    userList: [],
+  }
+  assert.doesNotThrow(() => assertPlaylistData(data))
+  assert.deepEqual(
+    appendSongsStable([{ ...song('first'), id: 29023858 }], [{ ...song('duplicate'), id: 29023858 }]).length,
+    1,
+  )
+})
