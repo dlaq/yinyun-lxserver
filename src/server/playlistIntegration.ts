@@ -347,6 +347,61 @@ export const matchTracks = (sources: IntegrationTrack[], library: IntegrationTra
   return sources.map(source => matchTrack(source, candidateLibraryFor(source, library, index), options))
 }
 
+const isLocalLibraryCandidate = (track?: IntegrationTrack | null) => {
+  if (!track) return false
+  const raw = track.raw && typeof track.raw === 'object' ? track.raw as Record<string, unknown> : {}
+  return Boolean(track.isLocal || track.folder || track.storageLocation || raw.folder || raw.filename || raw._localFilename)
+}
+
+/** Return the canonical path identity used to bind an explicit UI choice to a
+ * candidate from the server's current local-library result.  The client path
+ * is never used for file access; it can only select an already returned item. */
+export const localCandidatePathKey = (track?: IntegrationTrack | null) => {
+  if (!track) return ''
+  const raw = track.raw && typeof track.raw === 'object' ? track.raw as Record<string, unknown> : {}
+  return normalizeRelativePath(track.relativePath || raw.relativePath || raw._localFilename || raw.filename)
+}
+
+/** A low-confidence match may still be deliberately accepted after the user
+ * auditions it.  Only candidates produced by Yinyun's current local index are
+ * eligible, and an optional requested path must match that server-side list. */
+export const selectExplicitLocalCandidate = (match: TrackMatch, requestedPath = '') => {
+  const candidates = [
+    ...match.candidates,
+    ...(match.candidate ? [{ track: match.candidate, score: match.score, method: match.method }] : []),
+  ]
+    .filter(item => isLocalLibraryCandidate(item.track) && localCandidatePathKey(item.track))
+    .sort((left, right) => right.score - left.score)
+  const unique = candidates.filter((item, index, list) => (
+    index === list.findIndex(candidate => localCandidatePathKey(candidate.track) === localCandidatePathKey(item.track))
+  ))
+  const expectedPath = normalizeRelativePath(requestedPath)
+  return (expectedPath
+    ? unique.find(item => localCandidatePathKey(item.track) === expectedPath)
+    : unique[0])?.track
+}
+
+/** Once Yinyun has confidently selected a physical file, compare the second
+ * provider with that file's actual embedded metadata and relative path.  Using
+ * the original online-playlist title here caused the same shared file to be
+ * reported as Yinyun=found and Songloft=missing when the online title carried
+ * a translation suffix or a slightly different version marker. */
+export const anchorProviderSourceToMatchedFile = (source: IntegrationTrack, primaryMatch: TrackMatch) => {
+  const candidate = primaryMatch.status === 'matched' ? primaryMatch.candidate : undefined
+  const relativePath = localCandidatePathKey(candidate)
+  if (!candidate || !relativePath) return source
+  return {
+    ...source,
+    title: candidate.title || source.title,
+    artist: candidate.artist || source.artist,
+    album: candidate.album || source.album,
+    duration: candidate.duration || source.duration,
+    relativePath: candidate.relativePath || relativePath,
+    isrc: candidate.isrc || source.isrc,
+    fingerprint: candidate.fingerprint || source.fingerprint,
+  }
+}
+
 /** Preserve an already chosen remote entity when a fresh metadata match is
  * ambiguous. This never invents a new choice: exactly one of the candidates
  * must already be present in the target playlist. */

@@ -6,7 +6,10 @@ import test from 'node:test'
 import {
   PlaylistImportStore,
   PlaylistSyncStore,
+  SHARED_LIBRARY_MATCH_OPTIONS,
+  anchorProviderSourceToMatchedFile,
   canonicalTrackId,
+  localCandidatePathKey,
   matchTrack,
   mergePlaylistIds,
   metadataAgreement,
@@ -14,6 +17,7 @@ import {
   playlistSyncConflicts,
   playlistReplacementSafetyIssue,
   preferExistingPlaylistCandidate,
+  selectExplicitLocalCandidate,
   toIntegrationTrack,
 } from '../src/server/playlistIntegration'
 
@@ -69,6 +73,61 @@ test('shared relative paths require metadata sanity and do not blindly raise a s
   assert.equal(rejected.status, 'missing')
   assert.equal(rejected.method, 'relative_path_conflict')
   assert.ok(rejected.score < 0.76)
+})
+
+test('provider comparison follows the confidently matched physical file metadata', () => {
+  const source = toIntegrationTrack({
+    title: 'The Ludlows (From "Legends Of The Fall" Soundtrack) (勒德洛一家)',
+    artist: 'James Horner',
+    album: 'Legends Of The Fall Original Motion Picture Soundtrack',
+    duration: 340,
+  })
+  const local = toIntegrationTrack({
+    title: 'The Ludlows (From "Legends Of The Fall" Soundtrack)',
+    artist: 'James Horner',
+    album: 'Legends Of The Fall Original Motion Picture Soundtrack',
+    duration: 340,
+    relativePath: 'The Ludlows - James Horner.flac',
+    isLocal: true,
+  })
+  const primary = matchTrack(source, [local], SHARED_LIBRARY_MATCH_OPTIONS)
+  assert.equal(primary.status, 'matched')
+
+  const unanchored = matchTrack({ ...source, relativePath: local.relativePath }, [local], SHARED_LIBRARY_MATCH_OPTIONS)
+  assert.equal(unanchored.status, 'missing')
+  assert.equal(unanchored.method, 'relative_path_conflict')
+
+  const anchored = anchorProviderSourceToMatchedFile(source, primary)
+  const secondary = matchTrack(anchored, [local], SHARED_LIBRARY_MATCH_OPTIONS)
+  assert.equal(secondary.status, 'matched')
+  assert.equal(secondary.method, 'relative_path_metadata')
+})
+
+test('an explicit local choice is bound to a current server-side candidate path', () => {
+  const source = toIntegrationTrack({ title: 'Long translated online title', artist: 'Artist', duration: 437 })
+  const shownLocal = toIntegrationTrack({
+    title: 'Short local title',
+    artist: 'Artist',
+    duration: 437,
+    relativePath: 'Album/Short local title.flac',
+    isLocal: true,
+  })
+  const otherLocal = toIntegrationTrack({
+    title: 'Another version',
+    artist: 'Artist',
+    duration: 420,
+    relativePath: 'Album/Another version.flac',
+    isLocal: true,
+  })
+  const match = matchTrack(source, [shownLocal, otherLocal], { threshold: 0.99 })
+  assert.equal(match.status, 'missing')
+  assert.equal(selectExplicitLocalCandidate(match)?.relativePath, shownLocal.relativePath)
+  assert.equal(selectExplicitLocalCandidate(match, shownLocal.relativePath)?.relativePath, shownLocal.relativePath)
+  assert.equal(selectExplicitLocalCandidate(match, 'Album/not-returned.flac'), undefined)
+  assert.equal(localCandidatePathKey(shownLocal), 'album/short local title.flac')
+
+  const onlineOnly = matchTrack(source, [toIntegrationTrack({ title: 'Short local title', artist: 'Artist', source: 'tx' })], { threshold: 0.99 })
+  assert.equal(selectExplicitLocalCandidate(onlineOnly), undefined)
 })
 
 test('playlist matching can resolve exact duplicate library entities for playlist writes', () => {

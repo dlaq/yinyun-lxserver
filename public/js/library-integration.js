@@ -786,7 +786,7 @@
         try {
             const data = await api('/api/v1/integration/playlist/resolve-item', {
                 method: 'POST',
-                body: JSON.stringify({ importId: state.importId, index, provider: 'local' }),
+                body: JSON.stringify({ importId: state.importId, index, provider: 'local', candidatePath: track.relativePath || track.filename || '' }),
             });
             state.importData = { ...state.importData, items: data.items, counts: data.counts };
             closeCandidatePicker();
@@ -997,10 +997,12 @@
     async function resolveItem(index, provider) {
         if (!state.importId) return notifyError(new Error('请先导入或打开歌单记录'));
         const label = provider === 'songloft' ? 'Songloft' : provider === 'local' ? '本地曲库' : '音云';
+        const item = (state.importData?.items || []).find(row => Number(row.index) === Number(index));
+        const candidatePath = provider === 'local' ? (item?.localCandidate?.relativePath || item?.localCandidate?.filename || '') : '';
         try {
             const data = await api('/api/v1/integration/playlist/resolve-item', {
                 method: 'POST',
-                body: JSON.stringify({ importId: state.importId, index, provider }),
+                body: JSON.stringify({ importId: state.importId, index, provider, candidatePath }),
             });
             state.importData = { ...state.importData, items: data.items, counts: data.counts };
             renderImport(state.importData);

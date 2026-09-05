@@ -34,6 +34,7 @@ import {
 import { normalizeLyricsResponse } from './utils/apiLyrics'
 import {
   canonicalTrackId,
+  anchorProviderSourceToMatchedFile,
   metadataAgreement,
   matchTracks,
   mergePlaylistIds,
@@ -47,6 +48,7 @@ import {
   type PlaylistImportRecord,
   type PlaylistSyncRecord,
   SHARED_LIBRARY_MATCH_OPTIONS,
+  selectExplicitLocalCandidate,
 } from './playlistIntegration'
 import { SongloftClient, SongloftRequestError, SubsonicClient } from './songloftClient'
 
@@ -1326,11 +1328,7 @@ const choosePlaylistImportMatch = (
 const anchorSongloftSources = (
   tracks: IntegrationTrack[],
   yinyunMatches: ReturnType<typeof matchTracks>,
-) => tracks.map((track, index) => {
-  const anchor = yinyunMatches[index]
-  const relativePath = anchor?.status === 'matched' ? anchor.candidate?.relativePath : undefined
-  return relativePath ? { ...track, relativePath: String(relativePath).replace(/^music\//i, '') } : track
-})
+) => tracks.map((track, index) => anchorProviderSourceToMatchedFile(track, yinyunMatches[index]))
 
 /**
  * Find a physical shared-library file even when one provider has not finished
@@ -1456,14 +1454,7 @@ const publicImportItem = (match: PlaylistImportMatch, index: number, deps: ApiV1
   // is rescanning).  Keep that physical-file evidence explicit so the UI can
   // show the local match without inflating either provider's authoritative
   // indexed count.
-  const providerMatches = [match.yinyun, match.songloft, match.local, match]
-  const localCandidate = providerMatches
-    .flatMap(item => [
-      ...(item?.candidates || []).map(candidate => ({ track: candidate.track, score: candidate.score })),
-      item?.candidate ? { track: item.candidate, score: item.score } : null,
-    ])
-    .filter((item): item is { track: IntegrationTrack; score: number } => Boolean(item?.track && isLocalIntegrationTrack(item.track)))
-    .sort((left, right) => Number(right.score || 0) - Number(left.score || 0))[0]?.track
+  const localCandidate = selectExplicitLocalCandidate(match.yinyun || match)
   return {
   index,
   ...publicTrackMatch(match),
@@ -2392,18 +2383,28 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (!record || record.username !== username) throw new ApiError(404, 'playlist_import_not_found', '导入歌单记录不存在')
       if (!record.tracks[index]) throw new ApiError(404, 'playlist_track_not_found', '导入记录中不存在该歌曲序号')
       const rawMatches = await getPlaylistMatches(deps, username, record.tracks)
-      const selected = provider === 'local' ? rawMatches[index]?.local : rawMatches[index]?.[provider]
-      if (!selected?.candidate || !['matched', 'ambiguous'].includes(selected.status)) {
-        throw new ApiError(409, 'playlist_candidate_unavailable', '所选来源当前没有可确认的本地候选，请先刷新两个曲库索引')
+      const requestedCandidatePath = String(body.candidatePath || '').trim()
+      const providerMatch = rawMatches[index]?.[provider === 'local' ? 'yinyun' : provider]
+      const selectedCandidate = provider === 'local'
+        ? selectExplicitLocalCandidate(providerMatch || rawMatches[index], requestedCandidatePath)
+        : providerMatch?.candidate
+      if (!selectedCandidate || (provider !== 'local' && !['matched', 'ambiguous'].includes(providerMatch?.status || ''))) {
+        throw new ApiError(
+          409,
+          'playlist_candidate_unavailable',
+          provider === 'local'
+            ? '所选本地候选已不在音云当前索引中，请重新打开版本选择'
+            : '所选来源当前没有可确认的候选，请先刷新两个曲库索引',
+        )
       }
       const resolutions = { ...(record.resolutions || {}), [String(index)]: provider }
       const resolvedCandidates = {
         ...(record.resolvedCandidates || {}),
-        [String(index)]: toIntegrationTrack(selected.candidate),
+        [String(index)]: toIntegrationTrack(selectedCandidate),
       }
       const updatedRecord: PlaylistImportRecord = { ...record, resolutions, resolvedCandidates, updatedAt: new Date().toISOString() }
       await store.upsert(updatedRecord)
-      const playlistUpdated = await replaceConfirmedPlaylistTrack(deps, username, updatedRecord, index, selected.candidate)
+      const playlistUpdated = await replaceConfirmedPlaylistTrack(deps, username, updatedRecord, index, selectedCandidate)
       const matches = await getPlaylistImportMatches(deps, username, updatedRecord)
       success(res, {
         importId,
