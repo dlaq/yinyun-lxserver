@@ -2012,7 +2012,18 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       return true
     }
 
-    const username = requireUser(req, deps, url)
+    // The dedicated admin console also uses the Songloft integration routes.
+    // Those routes do not need a user-owned yinyun state, so an authenticated
+    // admin session may enter them without first presenting a user token. Keep
+    // the bypass narrowly scoped; every other API route still requires the
+    // authenticated user's identity and data isolation.
+    const adminIntegrationRoute = deps.isAdminRequest?.(req) === true && (
+      (pathname === `${API_PREFIX}/integration/songloft/status` && req.method === 'GET')
+      || (pathname === `${API_PREFIX}/integration/songloft/playlists` && req.method === 'GET')
+      || (pathname === `${API_PREFIX}/integration/songloft/scan` && (req.method === 'GET' || req.method === 'POST'))
+      || (req.method === 'DELETE' && /^\/api\/v1\/integration\/songloft\/playlists\/[^/]+$/.test(pathname))
+    )
+    const username = adminIntegrationRoute ? 'admin' : requireUser(req, deps, url)
 
     if (pathname === `${API_PREFIX}/health/settings` && req.method === 'GET') {
       const state = readHealthState(username)

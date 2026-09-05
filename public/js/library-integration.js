@@ -39,8 +39,9 @@
         const legacyToken = localStorage.getItem('lx_user_token') || '';
         const legacyUser = localStorage.getItem('lx_sync_user') || '';
         const nativeToken = state.token && state.token !== 'legacy' ? state.token : '';
-        if (!nativeToken && !legacyToken && path !== '/api/v1/auth/login') throw new Error('请先登录音云用户');
         const adminHeaders = window.getAdminAuthHeaders ? window.getAdminAuthHeaders() : {};
+        const hasAdminToken = typeof adminHeaders.Authorization === 'string' && adminHeaders.Authorization.trim().length > 0;
+        if (!nativeToken && !legacyToken && !hasAdminToken && path !== '/api/v1/auth/login') throw new Error('请先登录音云用户');
         const userToken = nativeToken || legacyToken;
         const username = state.username || legacyUser;
         const response = await fetch(path, {

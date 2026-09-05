@@ -116,6 +116,13 @@ test('playlist owners can preview, replace, clear, and recover in memory without
       'Content-Type': 'application/json',
     }
     const adminHeaders = { ...userHeaders, 'X-Frontend-Auth': 'admin-secret' }
+    const dedicatedAdminHeaders = { 'X-Frontend-Auth': 'admin-secret' }
+
+    const dedicatedAdminDelete = await fetch(`${origin}/api/v1/integration/songloft/playlists/0`, {
+      method: 'DELETE',
+      headers: dedicatedAdminHeaders,
+    })
+    assert.equal(dedicatedAdminDelete.status, 400)
 
     const deniedDelete = await fetch(`${origin}/api/v1/integration/songloft/playlists/9`, {
       method: 'DELETE',
