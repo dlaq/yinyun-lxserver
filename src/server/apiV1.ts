@@ -34,13 +34,13 @@ import {
 import { normalizeLyricsResponse } from './utils/apiLyrics'
 import {
   canonicalTrackId,
-  metadataAgreement,
   matchTracks,
   matchTracksThroughLocalProvider,
   mergePlaylistIds,
   playlistReplacementSafetyIssue,
   playlistSyncConflicts,
   preferExistingPlaylistCandidate,
+  selectMatchedSharedLocalCandidate,
   PlaylistImportStore,
   PlaylistSyncStore,
   toIntegrationTrack,
@@ -1333,17 +1333,6 @@ const choosePlaylistImportMatch = (
  * indexing it yet. The candidate must still pass the same metadata sanity rule
  * used by relative-path matching; a filename alone is never enough.
  */
-const bestSharedLocalCandidate = (
-  source: IntegrationTrack,
-  matches: Array<ReturnType<typeof matchTracks>[number] | undefined>,
-) => matches.flatMap(match => [
-  ...(match?.candidates || []).map(item => ({ track: item.track, score: Number(item.score || 0) })),
-  ...(match?.candidate ? [{ track: match.candidate, score: Number(match.score || 0) }] : []),
-])
-  .filter((item): item is { track: IntegrationTrack; score: number } => Boolean(item.track && isLocalIntegrationTrack(item.track)))
-  .filter(item => metadataAgreement(source, item.track).strong)
-  .sort((left, right) => right.score - left.score)[0] || null
-
 const promoteSharedLocalMatch = (
   match: ReturnType<typeof matchTracks>[number],
   candidate: IntegrationTrack,
@@ -1381,7 +1370,7 @@ const getPlaylistMatches = async (
   return tracks.map((_, index) => {
     let yinyun = yinyunMatches[index]
     let songloft = songloftMatches[index]
-    const shared = bestSharedLocalCandidate(tracks[index], [yinyun, songloft])
+    const shared = selectMatchedSharedLocalCandidate(tracks[index], [yinyun, songloft])
     // A shared file is a valid match for both views once metadata agrees,
     // even if either provider's scan database is one refresh behind. This
     // prevents a known local file from entering the download queue again.

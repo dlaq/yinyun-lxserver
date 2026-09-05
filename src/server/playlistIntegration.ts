@@ -424,6 +424,20 @@ export const matchTracksThroughLocalProvider = (
   return { localMatches, providerSources, providerMatches }
 }
 
+/** Select a shared physical file only when at least one provider has already
+ * matched it confidently. Fuzzy candidates remain available for explicit
+ * user selection, but are not promoted merely because title and duration look
+ * similar; doing so can silently substitute a cover or accompaniment. */
+export const selectMatchedSharedLocalCandidate = (
+  source: IntegrationTrack,
+  matches: Array<TrackMatch | undefined>,
+) => matches
+  .filter((match): match is TrackMatch => match?.status === 'matched' && Boolean(match.candidate))
+  .map(match => ({ track: match.candidate!, score: Number(match.score || 0) }))
+  .filter(item => isLocalLibraryCandidate(item.track))
+  .filter(item => metadataAgreement(source, item.track).strong)
+  .sort((left, right) => right.score - left.score)[0] || null
+
 /** Preserve an already chosen remote entity when a fresh metadata match is
  * ambiguous. This never invents a new choice: exactly one of the candidates
  * must already be present in the target playlist. */

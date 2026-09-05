@@ -19,6 +19,7 @@ import {
   playlistReplacementSafetyIssue,
   preferExistingPlaylistCandidate,
   selectExplicitLocalCandidate,
+  selectMatchedSharedLocalCandidate,
   toIntegrationTrack,
 } from '../src/server/playlistIntegration'
 
@@ -108,6 +109,25 @@ test('provider comparison follows the confidently matched physical file metadata
   assert.equal(pipeline.providerSources[0].title, local.title)
   assert.equal(pipeline.providerMatches[0].status, 'matched')
   assert.equal(pipeline.providerMatches[0].method, 'relative_path_metadata')
+})
+
+test('weak local candidates are not promoted into cover or accompaniment substitutions', () => {
+  const original = toIntegrationTrack({ title: '从此以后', artist: '吴亦凡', duration: 256 })
+  const cover = toIntegrationTrack({
+    id: 4464,
+    title: '从此以后（Cover：吴亦凡）',
+    artist: '周珧',
+    album: '可乐只要可口',
+    duration: 257,
+    relativePath: '从此以后（Cover：吴亦凡） - 周珧.mp3',
+    isLocal: true,
+  })
+  const weak = matchTrack(original, [cover], SHARED_LIBRARY_MATCH_OPTIONS)
+  assert.equal(weak.status, 'missing')
+  assert.equal(selectMatchedSharedLocalCandidate(original, [weak]), null)
+
+  const confirmed = { ...weak, status: 'matched' as const, candidate: cover, score: 1 }
+  assert.equal(selectMatchedSharedLocalCandidate(original, [confirmed])?.track.relativePath, cover.relativePath)
 })
 
 test('an explicit local choice is bound to a current server-side candidate path', () => {
