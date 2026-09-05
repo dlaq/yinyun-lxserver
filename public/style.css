@@ -989,6 +989,13 @@
     font-size: 12px;
 }
 
+.count-card .integration-count-detail {
+    margin-top: 5px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.2;
+}
+
 .integration-result-toolbar,
 .integration-toolbar-actions,
 .integration-sync-footer {
@@ -4248,6 +4255,11 @@ input:-webkit-autofill:active {
     color: var(--text-secondary);
     background: rgba(148, 163, 184, 0.1);
     border-color: rgba(148, 163, 184, 0.2);
+}
+
+.user-role-toggle {
+    cursor: pointer;
+    font: inherit;
 }
 
 /* 修复操作列按钮样式 */

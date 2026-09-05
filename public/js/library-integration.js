@@ -225,10 +225,52 @@
         remoteSelect.innerHTML = '<option value="">按同名自动创建/匹配</option>' + (remote.playlists || []).map(item =>
             `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${Number(item.song_count || item.songCount || 0)} 首</option>`).join('');
         if (state.importData?.yinyunPlaylistId) localSelect.value = state.importData.yinyunPlaylistId;
-        localSelect.onchange = updatePlaylistDeleteButtons;
-        remoteSelect.onchange = updatePlaylistDeleteButtons;
+        localSelect.onchange = () => {
+            updatePlaylistDeleteButtons();
+            updateImportCounts();
+        };
+        remoteSelect.onchange = () => {
+            updatePlaylistDeleteButtons();
+            updateImportCounts();
+        };
         updatePlaylistDeleteButtons();
+        updateImportCounts();
         renderImportHistory(state.importRecords)
+    }
+
+    function playlistNameKey(value) {
+        return String(value || '').trim().toLocaleLowerCase();
+    }
+
+    function remotePlaylistCount(playlist) {
+        if (!playlist) return null;
+        const raw = playlist.song_count ?? playlist.songCount ?? playlist.trackCount;
+        const count = Number(raw);
+        return Number.isFinite(count) && count >= 0 ? count : null;
+    }
+
+    function importRemotePlaylist() {
+        const selectedId = el('integration-songloft-playlist')?.value || '';
+        if (selectedId) {
+            const selected = state.remotePlaylists.find(item => String(item.id) === String(selectedId));
+            if (selected) return selected;
+        }
+        const name = playlistNameKey(state.importData?.name);
+        if (!name) return null;
+        const sameName = state.remotePlaylists.filter(item => playlistNameKey(item.name) === name);
+        return sameName.length === 1 ? sameName[0] : null;
+    }
+
+    function updateImportCounts() {
+        const counts = state.importData?.counts || {};
+        const indexed = Number(counts.songloftMatched ?? 0);
+        const remote = importRemotePlaylist();
+        const actual = remotePlaylistCount(remote);
+        const display = actual === null ? indexed : actual;
+        const value = el('integration-count-songloft');
+        if (value) value.textContent = String(Number.isFinite(display) ? display : 0);
+        const detail = el('integration-count-songloft-detail');
+        if (detail) detail.textContent = actual === null ? '索引匹配数' : `索引匹配 ${indexed}`;
     }
 
     function queueLabel(status) {
@@ -425,7 +467,7 @@
         el('integration-count-missing').textContent = counts.missing || 0;
         el('integration-count-ambiguous').textContent = counts.ambiguous || 0;
         el('integration-count-yinyun').textContent = counts.yinyunMatched ?? counts.localMatched ?? 0;
-        el('integration-count-songloft').textContent = counts.songloftMatched ?? 0;
+        updateImportCounts();
         renderRows();
         el('integration-result-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }

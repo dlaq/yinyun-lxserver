@@ -947,7 +947,20 @@ const requireSongloftSubsonicClient = (deps: ApiV1Dependencies) => {
 }
 
 const requireIntegrationAdmin = (req: IncomingMessage, deps: ApiV1Dependencies) => {
-  if (!deps.isAdminRequest?.(req)) throw new ApiError(403, 'integration_admin_required', '该操作需要音云管理后台权限')
+  // The dedicated admin session remains the highest-privilege path. A
+  // configured user role is also allowed for integration administration, but
+  // only after the normal user token has been authenticated. Do not trust a
+  // caller supplied username header here: requireUser verifies the bearer or
+  // legacy user token against the configured account first.
+  if (deps.isAdminRequest?.(req)) return
+  let username: string | null = null
+  try {
+    username = requireUser(req, deps)
+  } catch {
+    username = null
+  }
+  if (username && deps.isAdminUser?.(username)) return
+  throw new ApiError(403, 'integration_admin_required', '该操作需要音云管理员权限')
 }
 
 const refreshYinyunLibraryIndex = async (username: string) => {

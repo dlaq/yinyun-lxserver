@@ -67,6 +67,7 @@ test('playlist owners can preview, replace, clear, and recover in memory without
       remoteIds = [...ids]
     },
     renamePlaylist: async (_playlistId: number, name: string) => { remoteName = name; return { id: 9, name } },
+    deletePlaylist: async (_playlistId: number) => {},
   }
   const libraries: Record<'artists' | 'albums', any[]> = { artists: [], albums: [] }
   const handler = createApiV1Handler({
@@ -74,7 +75,7 @@ test('playlist owners can preview, replace, clear, and recover in memory without
     getAuthSecret: () => 'test-secret',
     getUsers: () => global.lx.config.users,
     isAdminRequest: req => req.headers['x-frontend-auth'] === global.lx.config['frontend.password'],
-    isAdminUser: username => username === 'admin',
+    isAdminUser: username => Boolean(global.lx.config.users.find(user => user.name === username)?.isAdmin),
     musicSdk: {},
     normalizeSongInfo: value => value,
     resolveSong: async () => null,
@@ -115,6 +116,20 @@ test('playlist owners can preview, replace, clear, and recover in memory without
       'Content-Type': 'application/json',
     }
     const adminHeaders = { ...userHeaders, 'X-Frontend-Auth': 'admin-secret' }
+
+    const deniedDelete = await fetch(`${origin}/api/v1/integration/songloft/playlists/9`, {
+      method: 'DELETE',
+      headers: userHeaders,
+    })
+    assert.equal(deniedDelete.status, 403)
+
+    global.lx.config.users.find(user => user.name === 'alice')!.isAdmin = true
+    const roleDelete = await fetch(`${origin}/api/v1/integration/songloft/playlists/9`, {
+      method: 'DELETE',
+      headers: userHeaders,
+    })
+    assert.equal(roleDelete.status, 200)
+
     const sync = async (body: Record<string, unknown>, admin = true) => {
       const response = await fetch(`${origin}/api/v1/integration/playlists/sync`, {
         method: 'POST',

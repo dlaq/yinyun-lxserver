@@ -1563,8 +1563,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
         if (req.method === 'PUT') {
           void readBody(req).then(async body => {
             try {
-              const { name, newName, password } = JSON.parse(body)
-              if (!name || (!password && !newName)) {
+              const parsed = JSON.parse(body)
+              const { name, newName, password } = parsed
+              const hasRoleUpdate = Object.prototype.hasOwnProperty.call(parsed, 'isAdmin')
+              if (hasRoleUpdate && typeof parsed.isAdmin !== 'boolean') {
+                res.writeHead(400)
+                res.end('Invalid isAdmin value')
+                return
+              }
+              if (!name || (!password && !newName && !hasRoleUpdate)) {
                 res.writeHead(400)
                 res.end('Missing required fields')
                 return
@@ -1585,6 +1592,7 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
               const user = global.lx.config.users[userIdx]
 
               const handleFinalUpdate = async (credentialUsername: string) => {
+                if (hasRoleUpdate) user.isAdmin = parsed.isAdmin
                 if (password) {
                   if (authService.enabled) {
                     await authService.setPassword(credentialUsername, 'user', password)

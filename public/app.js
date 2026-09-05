@@ -1030,9 +1030,9 @@ class App {
                         <span>${this.escapeHtml(user.name.charAt(0).toUpperCase())}</span>
                     </div>
                     <span class="user-name-text">${this.escapeHtml(user.name)}</span>
-                    <span class="user-role-badge ${user.isAdmin ? 'admin' : 'standard'}">
+                    <button type="button" class="user-role-badge ${user.isAdmin ? 'admin' : 'standard'} user-role-toggle" onclick="app.toggleUserAdmin(${index})" title="${user.isAdmin ? '撤销管理员权限' : '授予管理员权限'}">
                         ${user.isAdmin ? '管理员' : '普通用户'}
-                    </span>
+                    </button>
                     <button class="btn-icon" onclick="app.showRenameUserModal(${index})" title="重命名用户" style="margin-left: 8px;">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -1154,6 +1154,26 @@ class App {
         this.editingUser = user.name; // 保存当前正在编辑的用户名
         document.getElementById('edit-password-input').value = '';
         document.getElementById('edit-password-modal').classList.remove('hidden');
+    }
+
+    async toggleUserAdmin(index) {
+        const user = this.users[index];
+        if (!user) return;
+        const next = !Boolean(user.isAdmin);
+        const action = next ? '授予' : '撤销';
+        const confirmed = typeof showSelect !== 'function'
+            || await showSelect(`${action}管理员权限`, `将${action}用户“${user.name}”的管理员权限。该权限可执行曲库联动的管理操作，是否继续？`, { danger: !next });
+        if (!confirmed) return;
+        try {
+            await this.request('/api/v1/admin/users', {
+                method: 'PUT',
+                body: JSON.stringify({ name: user.name, isAdmin: next })
+            });
+            await this.loadUsers();
+            showSuccess(`${action}管理员权限成功`);
+        } catch (err) {
+            showError(`${action}管理员权限失败: ` + err.message);
+        }
     }
 
     // 保存新密码
@@ -3101,3 +3121,8 @@ document.addEventListener('click', (e) => {
 
 // 初始化应用
 const app = new App();
+// The admin shell and the curve-integration module are separate scripts. The
+// latter must receive the same bearer admin session when it calls an
+// integration management endpoint (for example deleting a Songloft playlist).
+// Expose headers only; never expose the token itself to page markup.
+window.getAdminAuthHeaders = () => app.accessToken ? { Authorization: `Bearer ${app.accessToken}` } : {};
