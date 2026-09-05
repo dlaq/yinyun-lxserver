@@ -82,10 +82,15 @@ const authService = new AuthService(global.lx.dataPath)
 setActiveAuthService(authService)
 const adminOperations = new AdminOperationManager(global.lx.dataPath)
 
+const isConfiguredAdminUser = (username: string) => {
+  const user = global.lx.config.users.find(item => item.name === username)
+  return user ? getUserIsAdmin(user) : false
+}
+
 const getAdminSession = (req: IncomingMessage): AuthenticatedSession | null => {
   const bearer = getBearerToken(req.headers.authorization)
-  const session = bearer ? authService.verifyAccessToken(bearer, 'admin') : null
-  if (session) return session
+  const session = bearer ? authService.verifyAccessToken(bearer) : null
+  if (session && (session.kind === 'admin' || (session.kind === 'user' && isConfiguredAdminUser(session.username)))) return session
   if (
     authService.allowLegacyAdminHeader &&
     req.headers['x-frontend-auth'] === global.lx.config['frontend.password']
@@ -889,11 +894,6 @@ const getPlaylistImportStore = (username: string) => {
   return store
 }
 
-const isConfiguredAdminUser = (username: string) => {
-  const user = global.lx.config.users.find(item => item.name === username)
-  return user ? getUserIsAdmin(user) : false
-}
-
 const handleApiV1 = createApiV1Handler({
   serverVersion: APP_VERSION,
   getAuthSecret: () => authService.enabled ? authService.getSigningSecret() : getServerId(),
@@ -1186,10 +1186,15 @@ const handleStartServer = async (port = 9527, ip = '127.0.0.1') => await new Pro
       if (pathname === '/api/v1/admin/login' && req.method === 'POST') {
         void readBody(req).then(async body => {
           try {
-            const { password } = JSON.parse(body)
-            const session = await authService.loginAdmin(String(password || ''), String(ip || 'unknown'))
-            if (session) {
-              loginLog.info(`Admin login success ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
+            const parsed = JSON.parse(body)
+            const password = String(parsed.password || '')
+            const requestedUsername = tryNormalizeUsername(parsed.username)
+            const session = requestedUsername
+              ? await authService.loginUser(requestedUsername, password, String(ip || 'unknown'))
+              : await authService.loginAdmin(password, String(ip || 'unknown'))
+            const allowed = Boolean(session) && (!requestedUsername || isConfiguredAdminUser(session!.username))
+            if (allowed) {
+              loginLog.info(`Admin login success kind=${requestedUsername ? 'user-role' : 'dedicated'} user=${requestedUsername || 'admin'} ip=${ip} ua=${JSON.stringify(requestUserAgent)}`)
               res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
               res.end(JSON.stringify({ success: true, ...session }))
             } else {

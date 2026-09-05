@@ -71,6 +71,9 @@ class App {
         document.getElementById('access-password')?.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.login();
         });
+        document.getElementById('access-username')?.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this.login();
+        });
 
         // 绑定退出登录
         document.getElementById('logout-btn')?.addEventListener('click', () => this.logout());
@@ -238,6 +241,7 @@ class App {
     }
 
     async login() {
+        const username = document.getElementById('access-username')?.value.trim() || '';
         const password = document.getElementById('access-password').value;
         const errorEl = document.getElementById('login-error');
 
@@ -249,11 +253,12 @@ class App {
         try {
             const res = await this.request('/api/v1/admin/login', {
                 method: 'POST',
-                body: JSON.stringify({ password })
+                body: JSON.stringify({ password, ...(username ? { username } : {}) })
             });
 
             if (res.success) {
                 this.accessToken = res.accessToken || res.token;
+                document.getElementById('access-username').value = '';
                 document.getElementById('access-password').value = '';
                 this.showApp();
                 this.loadDashboard();
@@ -1162,7 +1167,7 @@ class App {
         const next = !Boolean(user.isAdmin);
         const action = next ? '授予' : '撤销';
         const confirmed = typeof showSelect !== 'function'
-            || await showSelect(`${action}管理员权限`, `将${action}用户“${user.name}”的管理员权限。该权限可执行曲库联动的管理操作，是否继续？`, { danger: !next });
+            || await showSelect(`${action}管理员权限`, `将${action}用户“${user.name}”的管理员权限。该权限可登录管理控制台并执行曲库联动等管理操作，是否继续？`, { danger: !next });
         if (!confirmed) return;
         try {
             await this.request('/api/v1/admin/users', {
