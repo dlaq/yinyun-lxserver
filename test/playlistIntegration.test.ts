@@ -16,7 +16,6 @@ import {
   metadataAgreement,
   normalizeTitle,
   playlistSyncConflicts,
-  playlistReplacementSafetyIssue,
   preferExistingPlaylistCandidate,
   selectExplicitLocalCandidate,
   selectMatchedSharedLocalCandidate,
@@ -199,13 +198,6 @@ test('playlist merge preserves additions and reports two-sided conflicts', () =>
 test('authoritative playlist replacement clears historical conflict warnings', () => {
   assert.deepEqual(playlistSyncConflicts('push', 'replace', ['removed_on_one_side'], ['removed_on_one_side']), [])
   assert.deepEqual(playlistSyncConflicts('merge', 'merge', ['removed_on_one_side'], []), ['removed_on_one_side'])
-})
-
-test('playlist replacement never infers a destructive clear from an empty source', () => {
-  assert.equal(playlistReplacementSafetyIssue(0, [1, 2], []), 'empty_source_playlist')
-  assert.equal(playlistReplacementSafetyIssue(3, [1, 2], []), 'empty_resolved_playlist')
-  assert.equal(playlistReplacementSafetyIssue(3, [1, 2], [2]), null)
-  assert.equal(playlistReplacementSafetyIssue(0, [], []), null)
 })
 
 test('playlist sync ledger survives a reload and writes atomically', async () => {

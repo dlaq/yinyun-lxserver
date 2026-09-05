@@ -13,6 +13,7 @@ import type { LyricOutputFormat } from '../utils/lrcTool'
 import { formatPlayTime } from '../common/utils/common'
 import { normalizeUsername } from '../utils/username'
 import { getAlbumArtist } from './utils/songInfo'
+import { validateDownloadedAudio } from './audioQuality'
 import {
     EXTERNAL_LOCATION_PREFIX,
     getExternalLibraryByLocation,
@@ -681,6 +682,7 @@ const inspectAudioFile = (filePath: string, requestedQuality?: string) => {
             bitrate,
             sampleRate: Number(tagger.sampleRate) || undefined,
             bitDepth: Number(tagger.bitDepth) || undefined,
+            durationMs: Number(tagger.duration) || undefined,
         }
     } catch (e) {
         const detectedQuality = detectQualityFromBitrate(undefined, ext)
@@ -691,6 +693,7 @@ const inspectAudioFile = (filePath: string, requestedQuality?: string) => {
             bitrate: undefined,
             sampleRate: undefined,
             bitDepth: undefined,
+            durationMs: undefined,
         }
     } finally {
         try { if (tagger) tagger.dispose() } catch (e) { }
@@ -2532,6 +2535,21 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                 }
 
                 const inspection = inspectAudioFile(tempPath, quality)
+                const validation = validateDownloadedAudio({
+                    container: inspection.audioContainer,
+                    size: received,
+                    expectedDuration: songInfo.interval || songInfo.duration || songInfo.meta?.interval || songInfo.meta?.duration,
+                    inspectedDurationMs: inspection.durationMs,
+                })
+                if (!validation.valid) {
+                    fs.unlink(tempPath, () => { })
+                    fail(new Error(
+                        `Downloaded audio validation failed (${validation.reason}): ` +
+                        `${received} bytes, expected ${Math.round(validation.expectedDurationSeconds)}s, ` +
+                        `decoded ${Math.round(validation.inspectedDurationSeconds)}s`,
+                    ))
+                    return
+                }
                 ext = inspection.extension || ext
                 const actualQuality = inspection.quality || quality || 'unknown'
                 const finalBaseName = getFileName(songInfo, actualQuality, isOnlyDownload, username)

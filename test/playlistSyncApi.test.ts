@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-test('Songloft replacement requires a fresh preview, rolls back exactly, and keeps merge append-only', async () => {
+test('playlist owners can preview, replace, clear, and recover in memory without persistent backups', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'yinyun-playlist-sync-api-'))
   const dataPath = path.join(root, 'data')
   fs.mkdirSync(path.join(dataPath, 'users'), { recursive: true })
@@ -128,10 +128,6 @@ test('Songloft replacement requires a fresh preview, rolls back exactly, and kee
     assert.equal(missingTarget.response.status, 400)
     assert.equal(missingTarget.payload.error.code, 'playlist_replace_target_required')
 
-    const emptyBypass = await sync({ direction: 'push', mode: 'replace', songloftPlaylistId: 9, allowEmptyReplace: true })
-    assert.equal(emptyBypass.response.status, 400)
-    assert.equal(emptyBypass.payload.error.code, 'playlist_empty_replace_forbidden')
-
     const notPreviewed = await sync({ direction: 'push', mode: 'replace', songloftPlaylistId: 9 })
     assert.equal(notPreviewed.response.status, 409)
     assert.equal(notPreviewed.payload.error.code, 'playlist_replace_confirmation_required')
@@ -180,7 +176,7 @@ test('Songloft replacement requires a fresh preview, rolls back exactly, and kee
     assert.equal(completed.response.status, 200)
     assert.deepEqual(remoteIds, [101])
     assert.equal(remoteName, 'Safety Source')
-    assert.match(completed.payload.data.push.backupId, /^replace_/)
+    assert.equal(completed.payload.data.push.backupId, null)
 
     remoteIds.push(102)
     const merged = await sync({ direction: 'push', mode: 'merge' }, false)
@@ -202,16 +198,46 @@ test('Songloft replacement requires a fresh preview, rolls back exactly, and kee
     assert.equal(userReplacement.response.status, 200)
     assert.deepEqual(remoteIds, [101])
 
+    await manage.listDataManage.listMusicOverwrite('safety-source', [{
+      id: 'tx_track-1', songmid: 'track-1', name: 'Track One', singer: 'Artist', albumName: 'Album', interval: '03:00', source: 'tx',
+    }, {
+      id: 'tx_missing', songmid: 'missing', name: 'Unavailable', singer: 'Artist', albumName: 'Album', interval: '03:01', source: 'tx',
+    }] as any)
+    const partialPreview = await sync({ direction: 'push', mode: 'replace', songloftPlaylistId: 9, dryRun: true }, false)
+    assert.equal(partialPreview.response.status, 200)
+    assert.equal(partialPreview.payload.data.push.preview.sourceTracks, 2)
+    assert.equal(partialPreview.payload.data.push.preview.desiredRemoteTracks, 1)
+    assert.equal(partialPreview.payload.data.push.preview.unmatchedTracks, 1)
+    assert.equal(partialPreview.payload.data.push.unmatched.length, 1)
+    const partialReplacement = await sync({
+      direction: 'push',
+      mode: 'replace',
+      songloftPlaylistId: 9,
+      replaceConfirmation: partialPreview.payload.data.push.confirmationToken,
+    }, false)
+    assert.equal(partialReplacement.response.status, 200)
+    assert.deepEqual(remoteIds, [101])
+
     remoteIds.push(102)
     const userPull = await sync({ direction: 'pull', mode: 'merge', songloftPlaylistId: 9 }, false)
     assert.equal(userPull.response.status, 200)
     assert.equal(userPull.payload.data.pull.added, 0)
 
-    const auditDirectory = path.join(dataPath, 'playlist-replace-backups', 'alice')
-    const audits = fs.readdirSync(auditDirectory).map(filename => JSON.parse(fs.readFileSync(path.join(auditDirectory, filename), 'utf8')))
-    assert.deepEqual(audits.map(item => item.status).sort(), ['completed', 'completed', 'rolled_back'])
-    assert.deepEqual(audits.find(item => item.status === 'rolled_back').originalRemoteIds, [102])
-    assert.equal(audits.find(item => item.status === 'rolled_back').originalRemoteName, 'Original Remote Name')
+    await manage.listDataManage.listMusicOverwrite('safety-source', [] as any)
+    const clearPreview = await sync({ direction: 'push', mode: 'replace', songloftPlaylistId: 9, dryRun: true }, false)
+    assert.equal(clearPreview.response.status, 200)
+    assert.equal(clearPreview.payload.data.push.preview.sourceTracks, 0)
+    assert.equal(clearPreview.payload.data.push.preview.desiredRemoteTracks, 0)
+    assert.equal(clearPreview.payload.data.push.preview.removeCount, 2)
+    const cleared = await sync({
+      direction: 'push',
+      mode: 'replace',
+      songloftPlaylistId: 9,
+      replaceConfirmation: clearPreview.payload.data.push.confirmationToken,
+    }, false)
+    assert.equal(cleared.response.status, 200)
+    assert.deepEqual(remoteIds, [])
+    assert.equal(fs.existsSync(path.join(dataPath, 'playlist-replace-backups')), false)
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()))
     releaseUserSpace('alice', true)

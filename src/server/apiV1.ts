@@ -37,7 +37,6 @@ import {
   matchTracks,
   matchTracksThroughLocalProvider,
   mergePlaylistIds,
-  playlistReplacementSafetyIssue,
   playlistSyncConflicts,
   preferExistingPlaylistCandidate,
   selectMatchedSharedLocalCandidate,
@@ -202,41 +201,6 @@ const DEFAULT_HEALTH_SETTINGS: HealthSettings = {
 }
 const healthStateCache = new Map<string, HealthState>()
 let healthScheduler: NodeJS.Timeout | null = null
-
-type PlaylistReplaceAudit = {
-  id: string
-  status: 'pending' | 'completed' | 'rolled_back' | 'rollback_failed'
-  username: string
-  yinyunPlaylistId: string
-  songloftPlaylistId: number
-  sourceTrackCount: number
-  originalRemoteIds: number[]
-  desiredRemoteIds: number[]
-  addedIds: number[]
-  removedIds: number[]
-  originalRemoteName: string
-  desiredRemoteName: string
-  originalRemoteHash: string
-  desiredRemoteHash: string
-  createdAt: string
-  updatedAt: string
-  error?: string
-  rollbackError?: string
-  finalRemoteIds?: number[]
-}
-
-const playlistReplaceAuditFile = (username: string, auditId: string) => {
-  const dataPath = String((global as any).lx?.dataPath || path.join(process.cwd(), 'data'))
-  return path.join(dataPath, 'playlist-replace-backups', encodeURIComponent(username), `${auditId}.json`)
-}
-
-const persistPlaylistReplaceAudit = async (audit: PlaylistReplaceAudit) => {
-  const filename = playlistReplaceAuditFile(audit.username, audit.id)
-  await fs.promises.mkdir(path.dirname(filename), { recursive: true })
-  const temporary = `${filename}.${process.pid}.${Date.now()}.tmp`
-  await fs.promises.writeFile(temporary, `${JSON.stringify(audit, null, 2)}\n`, 'utf8')
-  await fs.promises.rename(temporary, filename)
-}
 
 const orderedRemoteIdsHash = (ids: number[]) => crypto.createHash('sha256').update(JSON.stringify(ids)).digest('hex')
 const sameOrderedRemoteIds = (left: number[], right: number[]) => left.length === right.length && left.every((id, index) => id === right[index])
@@ -1371,13 +1335,9 @@ const getPlaylistMatches = async (
     let yinyun = yinyunMatches[index]
     let songloft = songloftMatches[index]
     const shared = selectMatchedSharedLocalCandidate(tracks[index], [yinyun, songloft])
-    // A shared file is a valid match for both views once metadata agrees,
-    // even if either provider's scan database is one refresh behind. This
-    // prevents a known local file from entering the download queue again.
-    if (shared) {
-      yinyun = promoteSharedLocalMatch(yinyun, shared.track, shared.score)
-      songloft = promoteSharedLocalMatch(songloft, shared.track, shared.score)
-    }
+    // A shared physical file makes the effective local row available, but it
+    // does not prove that each provider has indexed that file. Keep the two
+    // provider matches authoritative so their counters expose scan drift.
     const effective = shared
       ? { ...promoteSharedLocalMatch(choosePlaylistImportMatch(yinyun, songloft), shared.track, shared.score), matchedBy: 'local' as const }
       : choosePlaylistImportMatch(yinyun, songloft)
@@ -1445,7 +1405,7 @@ const getPlaylistImportMatches = async (
       const persisted = record.resolvedCandidates?.[String(index)]
       if (!persisted?.title) return match
       const yinyun = provider === 'yinyun' || provider === 'local' ? markProviderMatched(match.yinyun || match, persisted) : match.yinyun
-      const songloft = provider === 'songloft' || provider === 'local' ? markProviderMatched(match.songloft || match, persisted) : match.songloft
+      const songloft = provider === 'songloft' ? markProviderMatched(match.songloft || match, persisted) : match.songloft
       return {
         ...match,
         status: 'matched' as const,
@@ -1462,7 +1422,7 @@ const getPlaylistImportMatches = async (
     // user choice turns that candidate into the effective matched result;
     // without this conversion the confirmation button would have no effect.
     const yinyun = provider === 'yinyun' || provider === 'local' ? markProviderMatched(match.yinyun || match, selected.candidate) : match.yinyun
-    const songloft = provider === 'songloft' || provider === 'local' ? markProviderMatched(match.songloft || match, selected.candidate) : match.songloft
+    const songloft = provider === 'songloft' ? markProviderMatched(match.songloft || match, selected.candidate) : match.songloft
     return { ...selected, status: 'matched' as const, yinyun, songloft, matchedBy: provider }
   })
 }
@@ -2521,7 +2481,6 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (mode === 'replace') {
         if (direction !== 'push') throw new ApiError(400, 'playlist_replace_direction_invalid', '覆盖同步只允许明确的音云 → Songloft 方向')
         if (!hasExplicitRemoteTarget) throw new ApiError(400, 'playlist_replace_target_required', '覆盖同步必须明确选择 Songloft 目标歌单')
-        if (body.allowEmptyReplace === true) throw new ApiError(400, 'playlist_empty_replace_forbidden', '不允许通过同步接口清空 Songloft 歌单')
       } else if (body.dryRun === true || body.replaceConfirmation) {
         throw new ApiError(400, 'playlist_replace_options_invalid', '预演和覆盖确认参数只适用于 replace 模式')
       }
@@ -2618,30 +2577,9 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
           .filter(item => item.status === 'matched' && item.candidate)
           .map(item => asRemoteSongId(item.candidate!))
           .filter((id): id is number => id !== null)))
-        if (mode === 'replace' && unmatched.length) {
-          throw new ApiError(
-            409,
-            'playlist_replace_unmatched',
-            `有 ${unmatched.length} 首歌曲未能可靠匹配，已取消覆盖同步以保护 Songloft 原歌单`,
-            { unmatched: unmatched.map(publicTrackMatch) },
-          )
-        }
         const desiredSet = new Set(desiredIds)
         const removedIds = mode === 'replace' ? currentIds.filter(id => !desiredSet.has(id)) : []
         const addedIds = desiredIds.filter(id => !currentIds.includes(id))
-        const safetyIssue = mode === 'replace'
-          ? playlistReplacementSafetyIssue(initialLocalTracks.length, currentIds, desiredIds)
-          : null
-        if (safetyIssue) {
-          const message = safetyIssue === 'empty_source_playlist'
-            ? '音云源歌单为空，已取消覆盖同步以保护 Songloft 原歌单'
-            : '音云源歌单没有解析出任何可写入歌曲，已取消覆盖同步以保护 Songloft 原歌单'
-          throw new ApiError(409, 'playlist_replace_empty_source', message, {
-            sourceTracks: initialLocalTracks.length,
-            currentRemoteTracks: currentIds.length,
-            desiredRemoteTracks: desiredIds.length,
-          })
-        }
         let confirmationToken = ''
         if (mode === 'replace') {
           const declaredValue = songloftPlaylist.songCount ?? songloftPlaylist.song_count
@@ -2675,6 +2613,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
             sourceTracks: initialLocalTracks.length,
             currentRemoteTracks: currentIds.length,
             desiredRemoteTracks: desiredIds.length,
+            unmatchedTracks: unmatched.length,
             addCount: addedIds.length,
             removeCount: removedIds.length,
             reorder: !sameOrderedRemoteIds(currentIds, desiredIds),
@@ -2688,7 +2627,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
               confirmationToken,
               preview,
               matches: matches.map(publicTrackMatch),
-              unmatched: [],
+              unmatched: unmatched.map(publicTrackMatch),
               addedIds,
               removedIds,
               reordered: preview.reorder,
@@ -2698,35 +2637,8 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
             throw new ApiError(409, 'playlist_replace_confirmation_required', '覆盖计划已变化或尚未预演，请重新预演并确认本次覆盖', preview)
           }
         }
-        let audit: PlaylistReplaceAudit | null = null
         const originalRemoteName = String(songloftPlaylist.name || '')
         let remoteNameChanged = false
-        if (mode === 'replace') {
-          const now = new Date().toISOString()
-          audit = {
-            id: `replace_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`,
-            status: 'pending',
-            username,
-            yinyunPlaylistId,
-            songloftPlaylistId: remotePlaylistId,
-            sourceTrackCount: initialLocalTracks.length,
-            originalRemoteIds: [...currentIds],
-            desiredRemoteIds: [...desiredIds],
-            addedIds: [...addedIds],
-            removedIds: [...removedIds],
-            originalRemoteName,
-            desiredRemoteName: String(yinyunPlaylist.name || ''),
-            originalRemoteHash: orderedRemoteIdsHash(currentIds),
-            desiredRemoteHash: orderedRemoteIdsHash(desiredIds),
-            createdAt: now,
-            updatedAt: now,
-          }
-          try {
-            await persistPlaylistReplaceAudit(audit)
-          } catch (error: any) {
-            throw new ApiError(500, 'playlist_replace_backup_failed', '无法持久化 Songloft 写前备份，已取消覆盖同步', { message: error?.message || String(error) })
-          }
-        }
         remoteNameChanged = await renameRemotePlaylistIfNeeded()
         const restoreOriginalRemoteIds = async () => {
           const latest = await client.getPlaylistSongs(remotePlaylistId)
@@ -2763,7 +2675,6 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
             throw new ApiError(502, 'playlist_replace_verification_failed', 'Songloft 覆盖结果与预演集合不一致，正在恢复写前快照', {
               expectedCount: desiredIds.length,
               receivedCount: verifiedIds.length,
-              backupId: audit?.id,
             })
           }
           if (mode === 'merge') {
@@ -2771,38 +2682,14 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
             const missingAdded = addedIds.filter(id => !verifiedSet.has(id))
             if (missingAdded.length) throw new ApiError(502, 'playlist_merge_verification_failed', 'Songloft 追加后校验失败，但未执行任何删除', { missingAdded })
           }
-          if (audit) {
-            audit.status = 'completed'
-            audit.updatedAt = new Date().toISOString()
-            audit.finalRemoteIds = [...verifiedIds]
-            await persistPlaylistReplaceAudit(audit)
-          }
         } catch (error: any) {
-          if (mode === 'replace' && audit) {
-            audit.error = error?.message || String(error)
-            let restoredIds: number[]
+          if (mode === 'replace') {
             try {
-              restoredIds = await restoreOriginalRemoteIds()
+              await restoreOriginalRemoteIds()
             } catch (restoreError: any) {
-              audit.status = 'rollback_failed'
-              audit.rollbackError = restoreError?.message || String(restoreError)
-              audit.updatedAt = new Date().toISOString()
-              try { await persistPlaylistReplaceAudit(audit) } catch { /* retain the original restore failure */ }
               console.error('[PlaylistSync] 覆盖失败且恢复原歌单未完成:', restoreError?.message || restoreError)
-              throw new ApiError(502, 'playlist_replace_rollback_failed', 'Songloft 覆盖失败且自动恢复未完成，请使用写前备份人工恢复', {
-                backupId: audit.id,
-                expectedRemoteIds: audit.originalRemoteIds,
-              })
-            }
-            audit.status = 'rolled_back'
-            audit.finalRemoteIds = restoredIds
-            audit.updatedAt = new Date().toISOString()
-            try {
-              await persistPlaylistReplaceAudit(audit)
-            } catch (auditError: any) {
-              console.error('[PlaylistSync] 原歌单已恢复，但回滚审计状态写入失败:', auditError?.message || auditError)
-              throw new ApiError(500, 'playlist_replace_audit_update_failed', 'Songloft 原歌单已恢复，但审计状态写入失败，请检查持久化目录', {
-                backupId: audit.id,
+              throw new ApiError(502, 'playlist_replace_rollback_failed', 'Songloft 覆盖失败且当前请求内自动恢复未完成，请人工检查目标歌单', {
+                expectedRemoteIds: currentIds,
               })
             }
           }
@@ -2814,7 +2701,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
           removedIds,
           reordered: mode === 'replace' && desiredIds.length > 0,
           unmatched: unmatched.map(publicTrackMatch),
-          backupId: audit?.id || null,
+          backupId: null,
         }
       }
 

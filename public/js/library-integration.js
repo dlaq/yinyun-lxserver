@@ -933,12 +933,10 @@
         const visible = state.filter === 'all' ? items : items.filter(item => item.status === state.filter);
         const body = el('integration-result-body');
         const statusLabel = (status, match) => match?.method === 'shared_local_file' ? '已找到（共享本地）' : status === 'matched' ? '已找到' : status === 'missing' ? '未找到' : '需确认';
-        const statusCell = (match, label, index, provider, localFallback) => {
-            const fallback = !match?.candidate && localFallback ? localFallback : null;
-            const effectiveStatus = match?.status || (fallback ? 'matched' : 'missing');
-            const title = match?.candidate || fallback;
-            const displayMatch = fallback ? { ...match, method: 'shared_local_file' } : match;
-            return `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(effectiveStatus)}">${label}: ${statusLabel(effectiveStatus, displayMatch)}</span>${title ? `<small>${escapeHtml(title.title || '')} · ${escapeHtml(title.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
+        const statusCell = (match, label, index, provider) => {
+            const effectiveStatus = match?.status || 'missing';
+            const title = match?.candidate;
+            return `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(effectiveStatus)}">${label}: ${statusLabel(effectiveStatus, match)}</span>${title ? `<small>${escapeHtml(title.title || '')} · ${escapeHtml(title.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
         };
         body.innerHTML = visible.length ? visible.map(item => {
             const source = item.source || {};
@@ -950,7 +948,7 @@
             const confirmButtons = item.status === 'ambiguous' ? `<div class="integration-confirm-actions">${item.localCandidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'local')" title="使用共享曲库中的本地文件">采用本地</button>` : ''}${item.yinyun?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'yinyun')" title="使用音云候选">采用音云</button>` : ''}${item.songloft?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'songloft')" title="使用 Songloft 候选">采用 Songloft</button>` : ''}</div>` : '';
             const manualButton = item.status !== 'matched' || item.replaceable ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.openCandidatePicker(${Number(item.index)})"><i class="fas fa-headphones"></i> ${selected ? '更换版本' : item.replaceable ? '替换版本' : '选择版本'}</button>` : '';
             const selectionText = selected ? `<small class="integration-match-source">${selected.replaceLocal ? '已选替换：' : '已选：'}${escapeHtml(selected.title)} · ${escapeHtml(selected.artist)}</small>` : '';
-            return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun', item.localCandidate)}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft', item.localCandidate)}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${item.localCandidate && item.status !== 'matched' ? '<small class="integration-match-source">共享曲库已有本地文件，可试听；索引状态可能正在刷新</small>' : ''}${selectionText}${manualButton}${confirmButtons}</td></tr>`;
+            return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun')}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft')}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${item.localCandidate && item.status !== 'matched' ? '<small class="integration-match-source">共享曲库已有本地文件，可试听；索引状态可能正在刷新</small>' : ''}${selectionText}${manualButton}${confirmButtons}</td></tr>`;
         }).join('') : '<tr><td colspan="6" class="integration-empty">当前筛选没有歌曲</td></tr>';
         document.querySelectorAll('[data-integration-filter]').forEach(button => button.classList.toggle('active', button.dataset.integrationFilter === state.filter));
         el('integration-selected-count').textContent = `已选 ${state.selected.size} 首`;
@@ -1085,7 +1083,7 @@
                 if (!plan || !confirmationToken) throw new Error('服务器未返回可确认的覆盖预演，请勿继续');
                 const confirmed = typeof showSelect !== 'function' || await showSelect(
                     '确认覆盖 Songloft 歌单',
-                    `源歌单：${plan.sourceTracks} 首\n远端当前：${plan.currentRemoteTracks} 首\n覆盖后：${plan.desiredRemoteTracks} 首\n新增：${plan.addCount} 首\n删除：${plan.removeCount} 首\n\n本次操作会先保存远端歌曲 ID 快照，写后严格校验，失败时自动回滚。确认执行吗？`,
+                    `源歌单：${plan.sourceTracks} 首\n实际可写入：${plan.desiredRemoteTracks} 首\n无法匹配并跳过：${plan.unmatchedTracks || 0} 首\n远端当前：${plan.currentRemoteTracks} 首\n新增：${plan.addCount} 首\n删除：${plan.removeCount} 首\n\n这是你的歌单；确认后将按上述计划直接覆盖 Songloft。服务不会创建备份文件，写入失败时只在当前请求内尽力恢复。确认执行吗？`,
                     { danger: plan.removeCount > 0 },
                 );
                 if (!confirmed) return;

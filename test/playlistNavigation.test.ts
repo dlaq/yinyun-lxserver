@@ -120,3 +120,11 @@ test('player and automatic Songloft synchronization are append-only', () => {
   assert.doesNotMatch(sync, /mode: 'replace'/)
   assert.match(app, /安全追加到 Songloft/)
 })
+
+test('library integration keeps provider status separate from a shared local file', () => {
+  const integration = read('public/js/library-integration.js')
+
+  assert.match(integration, /const title = match\?\.candidate/)
+  assert.doesNotMatch(integration, /const fallback = !match\?\.candidate && localFallback/)
+  assert.doesNotMatch(integration, /statusCell\(item\.songloft,\s*'Songloft',\s*item\.index,\s*'songloft',/)
+})
