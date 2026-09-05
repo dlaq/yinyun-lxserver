@@ -1394,9 +1394,39 @@ const getPlaylistImportMatches = async (
   record: PlaylistImportRecord,
 ) => {
   const matches = await getPlaylistMatches(deps, username, record.tracks)
+  // The imported playlist may already contain local files selected during its
+  // original import, while `record.tracks` deliberately keeps the online
+  // source rows for future re-downloads. Reflect those materialized choices in
+  // the status view instead of re-evaluating only the stale source metadata.
+  // Index alignment is used only when both lists still have exactly the same
+  // length; edited/deduplicated playlists fall back to the explicit record.
+  const materializedMatches = new Map<number, PlaylistImportMatch>()
+  try {
+    const playlist = await getPlaylist(username, record.yinyunPlaylistId)
+    if (playlist.list.length === record.tracks.length) {
+      const currentTracks = playlist.list.map((item: any) => toIntegrationTrack(deps.normalizeSongInfo(item)))
+      const currentMatches = await getPlaylistMatches(deps, username, currentTracks)
+      currentTracks.forEach((currentTrack, index) => {
+        const current = currentMatches[index]
+        if (!isLocalIntegrationTrack(currentTrack) || current?.status !== 'matched' || !current.candidate) return
+        const source = matches[index].source
+        const rebase = (value: ReturnType<typeof matchTracks>[number] | undefined) => value ? { ...value, source } : value
+        materializedMatches.set(index, {
+          ...current,
+          source,
+          matchedBy: 'local',
+          yinyun: rebase(current.yinyun || current),
+          songloft: rebase(current.songloft || current),
+          local: rebase(current.local),
+        })
+      })
+    }
+  } catch (error: any) {
+    console.warn('[PlaylistImport] Current playlist choices unavailable:', error?.message || error)
+  }
   return matches.map((match, index) => {
     const provider = record.resolutions?.[String(index)]
-    if (!provider) return match
+    if (!provider) return materializedMatches.get(index) || match
     const selected = provider === 'local' ? match.local : match[provider]
     const markProviderMatched = (providerMatch: ReturnType<typeof matchTracks>[number], candidate: IntegrationTrack) => ({
       ...providerMatch,
