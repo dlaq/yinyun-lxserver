@@ -33,6 +33,12 @@ export type TrackMatch = {
   candidates: Array<{ track: IntegrationTrack; score: number; method: string }>
 }
 
+export type TrackMatchOptions = {
+  threshold?: number
+  ambiguityMargin?: number
+  resolveExactDuplicates?: boolean
+}
+
 /**
  * [YINYUN-INTEGRATION] One scoring policy is shared by the Yinyun index,
  * Songloft native API, Songloft Subsonic fallback, and playlist imports.
@@ -342,7 +348,7 @@ const candidateLibraryFor = (source: IntegrationTrack, library: IntegrationTrack
   return [...candidates]
 }
 
-export const matchTracks = (sources: IntegrationTrack[], library: IntegrationTrack[], options: { threshold?: number; ambiguityMargin?: number; resolveExactDuplicates?: boolean } = {}) => {
+export const matchTracks = (sources: IntegrationTrack[], library: IntegrationTrack[], options: TrackMatchOptions = {}) => {
   const index = buildTrackIndex(library)
   return sources.map(source => matchTrack(source, candidateLibraryFor(source, library, index), options))
 }
@@ -400,6 +406,22 @@ export const anchorProviderSourceToMatchedFile = (source: IntegrationTrack, prim
     isrc: candidate.isrc || source.isrc,
     fingerprint: candidate.fingerprint || source.fingerprint,
   }
+}
+
+/** Match a source playlist against Yinyun first, then use the confidently
+ * selected local file as the identity presented to a second provider. Keeping
+ * this pipeline in one helper prevents import previews and actual Songloft
+ * writes from disagreeing about the same shared file. */
+export const matchTracksThroughLocalProvider = (
+  sources: IntegrationTrack[],
+  localLibrary: IntegrationTrack[],
+  providerLibrary: IntegrationTrack[],
+  options: TrackMatchOptions = {},
+) => {
+  const localMatches = matchTracks(sources, localLibrary, options)
+  const providerSources = sources.map((source, index) => anchorProviderSourceToMatchedFile(source, localMatches[index]))
+  const providerMatches = matchTracks(providerSources, providerLibrary, options)
+  return { localMatches, providerSources, providerMatches }
 }
 
 /** Preserve an already chosen remote entity when a fresh metadata match is

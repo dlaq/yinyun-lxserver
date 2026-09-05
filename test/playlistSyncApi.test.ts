@@ -15,7 +15,10 @@ test('Songloft replacement requires a fresh preview, rolls back exactly, and kee
     logPath: path.join(root, 'logs'),
     staticPath: path.join(root, 'public'),
     config: {
-      users: [{ name: 'admin', password: 'password', isAdmin: true }],
+      users: [
+        { name: 'admin', password: 'admin-password', isAdmin: true },
+        { name: 'alice', password: 'password', isAdmin: false },
+      ],
       maxSnapshotNum: 10,
       'list.addMusicLocationType': 'bottom',
       'player.path': '/music',
@@ -26,7 +29,7 @@ test('Songloft replacement requires a fresh preview, rolls back exactly, and kee
 
   const { createApiV1Handler } = await import('../src/server/apiV1')
   const { getUserSpace, releaseUserSpace } = await import('../src/user')
-  const manage = getUserSpace('admin').listManage
+  const manage = getUserSpace('alice').listManage
   await manage.listDataManage.userListCreate({ id: 'safety-source', name: 'Safety Source', position: -1, locationUpdateTime: Date.now() })
   await manage.listDataManage.listMusicOverwrite('safety-source', [{
     id: 'tx_track-1',
@@ -103,7 +106,7 @@ test('Songloft replacement requires a fresh preview, rolls back exactly, and kee
     const loginResponse = await fetch(`${origin}/api/v1/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'admin', password: 'password' }),
+      body: JSON.stringify({ username: 'alice', password: 'password' }),
     })
     assert.equal(loginResponse.status, 200)
     const login = await loginResponse.json() as any
@@ -185,14 +188,33 @@ test('Songloft replacement requires a fresh preview, rolls back exactly, and kee
     assert.deepEqual(remoteIds, [101, 102])
     assert.deepEqual(merged.payload.data.push.removedIds, [])
 
-    const auditDirectory = path.join(dataPath, 'playlist-replace-backups', 'admin')
+    const userPreview = await sync({ direction: 'push', mode: 'replace', songloftPlaylistId: 9, dryRun: true }, false)
+    assert.equal(userPreview.response.status, 200)
+    assert.equal(userPreview.payload.data.push.preview.removeCount, 1)
+    assert.equal(typeof userPreview.payload.data.push.confirmationToken, 'string')
+
+    const userReplacement = await sync({
+      direction: 'push',
+      mode: 'replace',
+      songloftPlaylistId: 9,
+      replaceConfirmation: userPreview.payload.data.push.confirmationToken,
+    }, false)
+    assert.equal(userReplacement.response.status, 200)
+    assert.deepEqual(remoteIds, [101])
+
+    remoteIds.push(102)
+    const userPull = await sync({ direction: 'pull', mode: 'merge', songloftPlaylistId: 9 }, false)
+    assert.equal(userPull.response.status, 200)
+    assert.equal(userPull.payload.data.pull.added, 0)
+
+    const auditDirectory = path.join(dataPath, 'playlist-replace-backups', 'alice')
     const audits = fs.readdirSync(auditDirectory).map(filename => JSON.parse(fs.readFileSync(path.join(auditDirectory, filename), 'utf8')))
-    assert.deepEqual(audits.map(item => item.status).sort(), ['completed', 'rolled_back'])
+    assert.deepEqual(audits.map(item => item.status).sort(), ['completed', 'completed', 'rolled_back'])
     assert.deepEqual(audits.find(item => item.status === 'rolled_back').originalRemoteIds, [102])
     assert.equal(audits.find(item => item.status === 'rolled_back').originalRemoteName, 'Original Remote Name')
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()))
-    releaseUserSpace('admin', true)
+    releaseUserSpace('alice', true)
     await new Promise(resolve => setTimeout(resolve, 1_100))
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }

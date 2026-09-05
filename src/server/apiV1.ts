@@ -34,9 +34,9 @@ import {
 import { normalizeLyricsResponse } from './utils/apiLyrics'
 import {
   canonicalTrackId,
-  anchorProviderSourceToMatchedFile,
   metadataAgreement,
   matchTracks,
+  matchTracksThroughLocalProvider,
   mergePlaylistIds,
   playlistReplacementSafetyIssue,
   playlistSyncConflicts,
@@ -1328,11 +1328,6 @@ const choosePlaylistImportMatch = (
   return { ...yinyunMatch, matchedBy: undefined }
 }
 
-const anchorSongloftSources = (
-  tracks: IntegrationTrack[],
-  yinyunMatches: ReturnType<typeof matchTracks>,
-) => tracks.map((track, index) => anchorProviderSourceToMatchedFile(track, yinyunMatches[index]))
-
 /**
  * Find a physical shared-library file even when one provider has not finished
  * indexing it yet. The candidate must still pass the same metadata sanity rule
@@ -1370,7 +1365,6 @@ const getPlaylistMatches = async (
 ): Promise<PlaylistImportMatch[]> => {
   const localTracks = await getUserLocalIntegrationTracks(username)
   const songloftTracks = await getSongloftTracksForMatching(deps, tracks)
-  const yinyunMatches = matchTracks(tracks, localTracks, SHARED_LIBRARY_MATCH_OPTIONS)
   // The two providers can expose different embedded tags for the same shared
   // file (for example Songloft may identify a soundtrack file as a different
   // artist). Once Yinyun has a confident local candidate, carry its relative
@@ -1378,8 +1372,12 @@ const getPlaylistMatches = async (
   // agreement for a path hit; the path is a physical-file key, not a blanket
   // score override. This keeps the shared file aligned while rejecting a
   // stale index entry whose title/artist/album are unrelated.
-  const songloftSources = anchorSongloftSources(tracks, yinyunMatches)
-  const songloftMatches = matchTracks(songloftSources, songloftTracks, SHARED_LIBRARY_MATCH_OPTIONS)
+  const { localMatches: yinyunMatches, providerMatches: songloftMatches } = matchTracksThroughLocalProvider(
+    tracks,
+    localTracks,
+    songloftTracks,
+    SHARED_LIBRARY_MATCH_OPTIONS,
+  )
   return tracks.map((_, index) => {
     let yinyun = yinyunMatches[index]
     let songloft = songloftMatches[index]
@@ -2463,9 +2461,13 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       const hasSongloftSource = Boolean(deps.getSongloftClient?.()?.configured || deps.getSongloftSubsonicClient?.())
       if (!hasSongloftSource) throw new ApiError(503, 'songloft_not_configured', 'Songloft 原生或 Subsonic API 尚未配置')
       const localTracks = await getUserLocalIntegrationTracks(username)
-      const localMatches = matchTracks(sourceTracks, localTracks, SHARED_LIBRARY_MATCH_OPTIONS)
       const songloftTracks = await getSongloftTracksForMatching(deps, sourceTracks)
-      const songloftMatches = matchTracks(anchorSongloftSources(sourceTracks, localMatches), songloftTracks, SHARED_LIBRARY_MATCH_OPTIONS)
+      const { localMatches, providerMatches: songloftMatches } = matchTracksThroughLocalProvider(
+        sourceTracks,
+        localTracks,
+        songloftTracks,
+        SHARED_LIBRARY_MATCH_OPTIONS,
+      )
       const items = sourceTracks.map((track, index) => ({
         source: publicIntegrationTrack(track),
         yinyun: publicTrackMatch(localMatches[index]),
@@ -2488,7 +2490,6 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
     }
 
     if (pathname === `${API_PREFIX}/integration/playlists/sync` && req.method === 'POST') {
-      const isAdmin = Boolean(deps.isAdminRequest?.(req))
       const body = await readJson(req)
       const yinyunPlaylistId = String(body.yinyunPlaylistId || '').trim()
       if (!yinyunPlaylistId) throw new ApiError(400, 'yinyun_playlist_required', '缺少音云歌单 ID')
@@ -2498,9 +2499,6 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
       if (!['merge', 'replace'].includes(mode)) throw new ApiError(400, 'invalid_sync_mode', '同步模式必须是 merge 或 replace')
       if (mode === 'replace' && direction === 'pull') throw new ApiError(400, 'invalid_sync_mode', 'pull 方向不支持 replace 模式')
       const hasExplicitRemoteTarget = Boolean(body.songloftPlaylistId !== undefined && body.songloftPlaylistId !== null && String(body.songloftPlaylistId).trim())
-      if (!isAdmin && (direction !== 'push' || mode !== 'merge' || hasExplicitRemoteTarget)) {
-        throw new ApiError(403, 'playlist_sync_mode_forbidden', '播放器用户只能使用“音云 → Songloft”的安全追加同步')
-      }
       if (mode === 'replace') {
         if (direction !== 'push') throw new ApiError(400, 'playlist_replace_direction_invalid', '覆盖同步只允许明确的音云 → Songloft 方向')
         if (!hasExplicitRemoteTarget) throw new ApiError(400, 'playlist_replace_target_required', '覆盖同步必须明确选择 Songloft 目标歌单')
@@ -2580,6 +2578,13 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
 
       const push = async () => {
         const library = await client.listAllSongs()
+        const yinyunLibrary = await getUserLocalIntegrationTracks(username)
+        const { providerMatches } = matchTracksThroughLocalProvider(
+          initialLocalTracks,
+          yinyunLibrary,
+          library,
+          SHARED_LIBRARY_MATCH_OPTIONS,
+        )
         // Songloft may index the same shared file through an older organized path
         // and the new flat download path. For playlist writes either exact
         // title/artist entity is valid, so duplicate identities are deterministic
@@ -2587,7 +2592,7 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         const currentRawIds = remotePlaylistTracks.map(track => asRemoteSongId(track)).filter((id): id is number => id !== null)
         const currentIds = Array.from(new Set(currentRawIds))
         const currentIdSet = new Set(currentIds.map(String))
-        const matches = matchTracks(initialLocalTracks, library, SHARED_LIBRARY_MATCH_OPTIONS)
+        const matches = providerMatches
           .map(match => preferExistingPlaylistCandidate(match, currentIdSet))
         const unmatched = matches.filter(item => item.status !== 'matched')
         const desiredIds = Array.from(new Set(matches

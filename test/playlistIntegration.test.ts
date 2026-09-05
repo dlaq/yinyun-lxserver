@@ -11,6 +11,7 @@ import {
   canonicalTrackId,
   localCandidatePathKey,
   matchTrack,
+  matchTracksThroughLocalProvider,
   mergePlaylistIds,
   metadataAgreement,
   normalizeTitle,
@@ -101,6 +102,12 @@ test('provider comparison follows the confidently matched physical file metadata
   const secondary = matchTrack(anchored, [local], SHARED_LIBRARY_MATCH_OPTIONS)
   assert.equal(secondary.status, 'matched')
   assert.equal(secondary.method, 'relative_path_metadata')
+
+  const pipeline = matchTracksThroughLocalProvider([source], [local], [local], SHARED_LIBRARY_MATCH_OPTIONS)
+  assert.equal(pipeline.localMatches[0].status, 'matched')
+  assert.equal(pipeline.providerSources[0].title, local.title)
+  assert.equal(pipeline.providerMatches[0].status, 'matched')
+  assert.equal(pipeline.providerMatches[0].method, 'relative_path_metadata')
 })
 
 test('an explicit local choice is bound to a current server-side candidate path', () => {

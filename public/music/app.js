@@ -9849,9 +9849,9 @@ async function syncSongloftPlaylist(listId, silent = false) {
     const response = await fetch('/api/v1/integration/playlists/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...tokenHeaders },
-        // Player-side and automatic synchronization are deliberately append-only.
-        // Destructive replacement belongs exclusively to the administrator
-        // integration panel, where a fresh dry-run and explicit target are required.
+        // Automatic player synchronization remains append-only. Authenticated
+        // users may also use the full integration API; destructive replacement
+        // still requires its fresh preview token and explicit remote target.
         body: JSON.stringify({ yinyunPlaylistId: list.id, direction: 'push', mode: 'merge' }),
     });
     const payload = await response.json().catch(() => ({}));
