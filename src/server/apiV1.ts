@@ -1063,21 +1063,24 @@ const getSongloftTracksForMatching = async (deps: ApiV1Dependencies, sourceTrack
 // own scan database.  Keeping both values visible makes an index drift
 // diagnosable instead of silently treating one provider as authoritative.
 const getLibraryIndexStatus = async (deps: ApiV1Dependencies, username: string) => {
-  const [yinyunItems, scan] = await Promise.all([
-    getSharedDownloadedMusicItems(username),
-    deps.getSongloftClient?.()?.configured
-      ? deps.getSongloftClient()!.scanProgress()
-      : Promise.resolve({ status: 'unavailable' }),
-  ])
   const songloft = deps.getSongloftClient?.()
-  // The scan endpoint already reports Songloft's authoritative indexed-file
-  // count.  Do not call listAllSongs() here: that paginates the whole catalog
-  // and made a simple status refresh wait tens of seconds (or look like a
-  // no-op) on a few-thousand-track library.  Full song metadata remains
-  // available to the matching path, which is cached independently.
+  const [yinyunItems, scan, indexedSongloftTracks] = await Promise.all([
+    getSharedDownloadedMusicItems(username),
+    songloft?.configured
+      ? songloft.scanProgress()
+      : Promise.resolve({ status: 'unavailable' }),
+    songloft?.configured
+      ? songloft.countSongs()
+      : Promise.resolve<number | null>(null),
+  ])
+  // Songloft clears scan-progress counters when the service restarts, so an
+  // idle `local_song_count: 0` does not prove that its persistent index is
+  // empty. Query one indexed song page and use its `total`: unlike
+  // listAllSongs(), this is a single request and remains authoritative after a
+  // restart. The scan count is retained only for Subsonic-only deployments.
   const reportedSongloftTracks = Number((scan as any)?.local_song_count ?? (scan as any)?.song_count ?? (scan as any)?.total_files)
   const songloftTracks = songloft?.configured || deps.getSongloftSubsonicClient?.()
-    ? (Number.isFinite(reportedSongloftTracks) ? reportedSongloftTracks : 0)
+    ? (indexedSongloftTracks ?? (Number.isFinite(reportedSongloftTracks) ? reportedSongloftTracks : 0))
     : 0
   return {
     yinyunTracks: yinyunItems.length,

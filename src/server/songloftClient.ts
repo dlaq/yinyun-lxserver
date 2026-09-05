@@ -147,6 +147,14 @@ export class SongloftClient {
     return songs
   }
 
+  async countSongs() {
+    const page = await this.listSongs({ limit: 1, offset: 0 })
+    if (!Number.isFinite(page.total) || page.total < 0) {
+      throw new SongloftRequestError(502, 'Songloft song count is invalid', { total: page.total })
+    }
+    return page.total
+  }
+
   async listPlaylists() {
     const body = await this.requestJson('/playlists?limit=1000&offset=0')
     const playlists = bodyValue(body, 'playlists')

@@ -15,6 +15,7 @@ test('Songloft client logs in once and sends bearer auth to library calls', asyn
   const client = new SongloftClient({ baseUrl: 'http://songloft/api/v1', username: 'u', password: 'p', fetchImpl })
   assert.equal(client.configured, true)
   assert.equal((await client.listAllSongs())[0].relativePath, 'Artist/Song.flac')
+  assert.equal(await client.countSongs(), 1)
   assert.equal(requests.filter(item => item.url.endsWith('/auth/login')).length, 1)
   assert.equal(requests.find(item => item.url.includes('/songs?'))?.authorization, 'Bearer token-1')
 })

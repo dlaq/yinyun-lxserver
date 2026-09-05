@@ -30,6 +30,7 @@ test('account sync API supports login, large restore, and conflict protection', 
   const { releaseUserSpace } = await import('../src/user')
   const libraries: Record<'artists' | 'albums', any[]> = { artists: [], albums: [] }
   let scanStarts = 0
+  let countRequests = 0
   const handler = createApiV1Handler({
     serverVersion: 'test',
     getAuthSecret: () => 'test-secret',
@@ -60,6 +61,8 @@ test('account sync API supports login, large restore, and conflict protection', 
     getSongloftClient: () => ({
       configured: true,
       startScan: async () => { scanStarts++; return { message: 'started' } },
+      scanProgress: async () => ({ status: 'idle', local_song_count: 0 }),
+      countSongs: async () => { countRequests++; return 4225 },
     }) as any,
   })
   const server = http.createServer((req, res) => {
@@ -90,6 +93,11 @@ test('account sync API supports login, large restore, and conflict protection', 
       'Authorization': `Bearer ${login.data.accessToken}`,
       'Content-Type': 'application/json',
     }
+
+    const libraryStatusResponse = await fetch(`${origin}/api/v1/integration/library/status`, { headers })
+    assert.equal(libraryStatusResponse.status, 200)
+    assert.equal((await libraryStatusResponse.json() as any).data.songloftTracks, 4225)
+    assert.equal(countRequests, 1)
 
     const unauthorizedScan = await fetch(`${origin}/api/v1/integration/songloft/scan`, {
       method: 'POST', headers, body: '{}',
