@@ -30,6 +30,7 @@ window.SongListManager = (function () {
         limit: 30,
         returnTab: 'songlist',
         hostParentId: 'view-songlist',
+        returnScrollTop: 0,
         isLocal: false,
         playlist: null,
         historyPushed: false,
@@ -69,6 +70,23 @@ window.SongListManager = (function () {
         if (detailView && parent && detailView.parentElement !== parent) parent.appendChild(detailView);
         detailState.hostParentId = parentId;
         return detailView;
+    }
+
+    function prepareDetailHost(parentId) {
+        const parent = document.getElementById(parentId);
+        detailState.returnScrollTop = parent ? parent.scrollTop : 0;
+        // On mobile the playlist page itself is the long-scroll container. An
+        // absolutely positioned detail child otherwise inherits that scroll
+        // offset and opens with its toolbar above the viewport.
+        if (parent) parent.scrollTop = 0;
+        const detailView = ensureDetailHost(parentId);
+        if (detailView) detailView.scrollTop = 0;
+        return detailView;
+    }
+
+    function restoreReturnScroll(tabId) {
+        const view = document.getElementById(`view-${tabId}`);
+        if (view) view.scrollTop = detailState.returnScrollTop || 0;
     }
 
     function keepReturnTabVisible(tabId) {
@@ -113,6 +131,7 @@ window.SongListManager = (function () {
             detailView.style.pointerEvents = '';
             ensureDetailHost(hostParentId);
             if (!keepReturnTabVisible(returnTab)) switchTab(returnTab);
+            restoreReturnScroll(returnTab);
             detailCloseTimer = null;
             detailPhase = 'closed';
             openQueuedDetail();
@@ -368,7 +387,9 @@ window.SongListManager = (function () {
         detailState.page = page;
         if (page === 1) pushDetailHistory('network', id);
 
-        const detailView = ensureDetailHost('view-songlist');
+        const detailView = page === 1
+            ? prepareDetailHost('view-songlist')
+            : ensureDetailHost('view-songlist');
         const listContainer = document.getElementById('sl-detail-list');
 
         if (page === 1) {
@@ -537,7 +558,7 @@ window.SongListManager = (function () {
         pushDetailHistory('local', detailState.id);
         if (window.ListSearch) window.ListSearch.resetState();
         if (!keepReturnTabVisible('my-playlists')) switchTab('my-playlists');
-        const detailView = ensureDetailHost('view-my-playlists');
+        const detailView = prepareDetailHost('view-my-playlists');
         const listContainer = document.getElementById('sl-detail-list');
         if (!detailView || !listContainer) return;
         detailView.classList.remove('hidden');
