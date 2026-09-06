@@ -61,6 +61,15 @@ test('returning from a local playlist keeps the mounted playlist grid without re
   assert.match(app, /if \(grid\.dataset\.renderSignature === renderSignature\) return/)
 })
 
+test('local playlist rows enter the player with a signed cache-file URL', () => {
+  const manager = read('public/music/js/songlist_manager.js')
+
+  assert.match(manager, /function addLocalPlaybackUrl\(song\)/)
+  assert.match(manager, /cache\/file\/\$\{encodeURIComponent\(owner\)\}\/\$\{encodeURIComponent\(filename\)\}/)
+  assert.match(manager, /list\.list\.map\(\(song, index\) => addLocalPlaybackUrl/)
+  assert.match(manager, /_localStorageLocation/)
+})
+
 test('delayed playback resume restores only the queue and cannot navigate away from the active tab', () => {
   const app = read('public/music/app.js')
 

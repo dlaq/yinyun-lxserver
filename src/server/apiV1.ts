@@ -3097,7 +3097,22 @@ export const createApiV1Handler = (deps: ApiV1Dependencies) => async (
         // the shared audio file and the playlist source remain authoritative.
         let songloftTracks: IntegrationTrack[] = []
         if (deps.getSongloftClient?.()?.configured || deps.getSongloftSubsonicClient?.()) {
-          try { songloftTracks = await getSongloftTracksForMatching(deps, playlist.list.map(song => toIntegrationTrack(deps.normalizeSongInfo({ ...song })))) } catch { songloftTracks = [] }
+          // Songloft artwork is only a best-effort presentation fallback.  It
+          // must never hold the playlist response (and therefore playback)
+          // hostage when the external index is slow or unavailable.  The
+          // matching request itself is shared/cached, so abandoning this read
+          // after a short deadline is safe; the local playlist remains fully
+          // usable and its signed local stream URLs are still returned.
+          try {
+            const lookup = getSongloftTracksForMatching(
+              deps,
+              playlist.list.map(song => toIntegrationTrack(deps.normalizeSongInfo({ ...song }))),
+            )
+            const timeout = new Promise<IntegrationTrack[]>(resolve => {
+              setTimeout(() => resolve([]), 3000)
+            })
+            songloftTracks = await Promise.race([lookup, timeout])
+          } catch { songloftTracks = [] }
         }
         const items = playlist.list.map(song => {
           const normalizedSong = deps.normalizeSongInfo({ ...song })

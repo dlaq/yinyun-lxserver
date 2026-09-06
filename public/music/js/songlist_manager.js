@@ -42,6 +42,43 @@ window.SongListManager = (function () {
     let pendingDetailOpen = null;
     let detailPhase = 'closed';
 
+    /**
+     * The account playlist API intentionally stores only stable file metadata.
+     * A media element cannot send the account header, so local playlist rows
+     * must be converted to the signed cache-file URL before they enter the
+     * global player queue.  Without this, `source: local` falls through to the
+     * online resolver and every local playlist item fails with "unsupported
+     * local file" while the player keeps retrying.
+     */
+    function addLocalPlaybackUrl(song) {
+        if (!song || (!song.isLocal && !(song.folder === 'music' && (song.filename || song._localFilename)))) return song;
+        const filename = String(song.filename || song._localFilename || '').trim();
+        if (!filename) return song;
+        const owner = String(
+            song._localOwner
+            || song.libraryOwner
+            || window.currentListData?.username
+            || localStorage.getItem('lx_sync_user')
+            || '',
+        ).trim();
+        if (!owner) return song;
+        const folder = String(song.folder || song._localFolder || 'music').trim() || 'music';
+        const location = String(song.storageLocation || song._localStorageLocation || '').trim();
+        const token = (window.getUserAuthHeaders?.() || {})['x-user-token'] || localStorage.getItem('lx_user_token') || '';
+        const params = new URLSearchParams({ folder });
+        if (location) params.set('location', location);
+        if (token) params.set('token', token);
+        return {
+            ...song,
+            url: `/api/v1/player/music/cache/file/${encodeURIComponent(owner)}/${encodeURIComponent(filename)}?${params.toString()}`,
+            isLocal: true,
+            _localOwner: owner,
+            _localFilename: filename,
+            _localFolder: folder,
+            ...(location ? { _localStorageLocation: location, storageLocation: location } : {}),
+        };
+    }
+
     function pushDetailHistory(detailType, listId) {
         const current = window.history.state;
         if (current?.page === 'songlist-detail'
@@ -528,7 +565,7 @@ window.SongListManager = (function () {
             clearTimeout(detailCloseTimer);
             detailCloseTimer = null;
         }
-        const songs = Array.isArray(list.list) ? list.list.map((song, index) => ({
+        const songs = Array.isArray(list.list) ? list.list.map((song, index) => addLocalPlaybackUrl({
             ...song,
             id: song.id || song.songmid || song.songId || song.hash || `local_${list.id}_${index}`,
             name: song.name || song.title || '未知歌曲',
