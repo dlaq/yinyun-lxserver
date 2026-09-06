@@ -4192,6 +4192,11 @@ async function applyAutoProxy(url, song) {
 }
 
 async function fetchSongUrl(song, quality, isRetry = false, isSilent = false) {
+    // Local songs can also come from the default/favorites lists and persisted
+    // queues, not only from SongListManager's detail view. Normalize at the
+    // shared resolver boundary so none of those paths fall through to the
+    // online resolver with source=local (which reports "unsupported local file").
+    song = normalizeLocalPlaybackSong(song);
     const cleanedSong = cleanSongData(song);
     const cacheKey = `lx_url_${cleanedSong.id}_${quality}`;
 
@@ -4773,7 +4778,13 @@ async function runRecoveryFlow(error) {
     }
 }
 
+function normalizeLocalPlaybackSong(song) {
+    const normalizer = window.SongListManager?.addLocalPlaybackUrl;
+    return typeof normalizer === 'function' ? normalizer(song) : song;
+}
+
 async function playSong(song, index, forceQuality = null, noPlay = false, isRetry = false, shouldAddToDefault = null) {
+    song = normalizeLocalPlaybackSong(song);
     const hasDirectLocalUrl = (song.isLocal || song.url?.startsWith('/api/v1/player/music/cache/file/')) && !!song.url;
     if (!hasDirectLocalUrl && !isUserLoggedIn()) {
         showError('\u8bf7\u5148\u767b\u5f55\u540c\u6b65\u8d26\u6237');

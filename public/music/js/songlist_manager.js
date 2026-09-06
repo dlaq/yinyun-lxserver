@@ -932,6 +932,7 @@ window.SongListManager = (function () {
             if (window.ListSearch) window.ListSearch.resetState();
             loadDetail(id, source);
         },
+        addLocalPlaybackUrl,
         openLocalDetail,
         openCoverPicker: function () {
             if (!detailState.isLocal || !detailState.playlist) {
