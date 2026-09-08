@@ -31,6 +31,7 @@
     <script src="/js/notification-engine.js"></script>
     <link rel="stylesheet" href="/_player/css/app.css">
     <link rel="stylesheet" href="/_player/css/library-integration.css">
+    <link rel="stylesheet" href="/admin/integration-responsive.css">
 </head>
 
 <body class="t-bg-main h-screen flex flex-col overflow-hidden t-text-main font-sans">
@@ -556,7 +557,7 @@
                     <div id="songlist-detail-view"
                         class="absolute inset-0 t-bg-main z-20 flex flex-col overflow-y-auto custom-scrollbar hidden translate-x-full transition-transform duration-300 pb-44 md:pb-32">
                         <div class="h-16 flex-shrink-0 px-4 md:px-6 flex items-center gap-4 border-b t-border-main t-bg-panel glass">
-                            <button onclick="closeSongListDetail()"
+                            <button onclick="closeSongListDetail()" aria-label="返回歌单列表" title="返回歌单列表"
                                 class="p-2 t-text-muted hover:t-bg-track rounded-lg">
                                 <i class="fas fa-arrow-left text-xl"></i>
                             </button>
@@ -570,7 +571,7 @@
                                 <div id="sl-detail-subtitle" class="text-[10px] md:text-xs t-text-muted truncate">加载中...
                                 </div>
                             </div>
-                            <button id="sl-detail-play-all" onclick="playAllInSongList()"
+                            <button id="sl-detail-play-all" onclick="playAllInSongList()" aria-label="播放全部歌曲" title="播放全部歌曲"
                                 class="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm font-bold shadow-sm transition-all flex items-center gap-2">
                                 <i class="fas fa-play"></i>
                                 <span class="hidden sm:inline">播放全部</span>
@@ -1018,7 +1019,7 @@
                             <div class="integration-count-grid">
                                 <button class="count-card is-all active" data-integration-filter="all" onclick="LibraryIntegration.setFilter('all')"><strong id="integration-count-total">0</strong><span>歌单歌曲</span></button>
                                 <button class="count-card is-matched count-card-provider" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')"><strong id="integration-count-yinyun">0</strong><span>音云找到</span></button>
-                                <button class="count-card is-matched count-card-provider" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')"><strong id="integration-count-songloft">0</strong><span>Songloft找到</span></button>
+                                <button class="count-card is-matched count-card-provider" data-integration-filter="matched" onclick="LibraryIntegration.setFilter('matched')" title="当前映射 Songloft 歌单的实际歌曲数；索引匹配数单独统计"><strong id="integration-count-songloft">0</strong><span>Songloft歌单</span><small id="integration-count-songloft-detail" class="integration-count-detail"></small></button>
                                 <button class="count-card is-missing" data-integration-filter="missing" onclick="LibraryIntegration.setFilter('missing')"><strong id="integration-count-missing">0</strong><span>等待补齐</span></button>
                                 <button class="count-card is-ambiguous" data-integration-filter="ambiguous" onclick="LibraryIntegration.setFilter('ambiguous')"><strong id="integration-count-ambiguous">0</strong><span>需要确认</span></button>
                             </div>

@@ -7,11 +7,11 @@ export type ApiNamespace = 'native' | 'admin' | 'player' | 'legacy' | 'none'
  * read-only allowlist accepts the same credential in the query string.
  */
 export const allowsPlayerQueryToken = (pathname: string, method: string | undefined): boolean => (
-  method === 'GET' && (
+  (method === 'HEAD' && pathname.startsWith('/api/v1/player/music/cache/file/')) || (method === 'GET' && (
     pathname === '/api/v1/player/music/cache/cover' ||
     pathname.startsWith('/api/v1/player/music/cache/file/') ||
     pathname === '/api/v1/player/music/download'
-  )
+  ))
 )
 
 export const classifyApiNamespace = (pathname: string): ApiNamespace => {

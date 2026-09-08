@@ -578,6 +578,9 @@ aside {
 }
 
 #player-footer {
+    /* t-bg-panel/90 is not a generated Tailwind utility. Without an explicit
+       themed background, long-list text shows through the playback controls. */
+    background-color: var(--bg-panel, #1f2937);
     transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1) !important;
     will-change: transform;
 }

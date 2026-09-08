@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { MusicTagger } from '../src/server/musicTagger'
+import { allowsPlayerQueryToken } from '../src/server/apiNamespace'
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'yinyun-file-cache-'))
 const previousCwd = process.cwd()
@@ -31,6 +33,40 @@ test('does not create a lyric sidecar when no audio file exists', () => {
 
   assert.equal(saved, false)
   assert.equal(fs.readdirSync(cacheDir).some(file => file.endsWith('.lrc')), false)
+})
+
+test('authenticated media supports HEAD, bounded Range and invalid Range without sending the full file', async () => {
+  const filename = 'http-media-test.wav'
+  const bytes = Buffer.from('RIFF-audio-fixture')
+  fs.writeFileSync(path.join(fileCache.getCacheDir('admin', true), filename), bytes)
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url || '/', 'http://localhost')
+    if (!allowsPlayerQueryToken(url.pathname, req.method) || url.searchParams.get('token') !== 'test-only') {
+      res.writeHead(401); res.end(); return
+    }
+    fileCache.serveCacheFile(req, res, filename, 'admin', 'music')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address() as import('node:net').AddressInfo
+  const url = `http://127.0.0.1:${address.port}/api/v1/player/music/cache/file/admin/${filename}?token=test-only`
+  try {
+    const head = await fetch(url, { method: 'HEAD' })
+    assert.equal(head.status, 200)
+    assert.equal(Number(head.headers.get('content-length')), bytes.length)
+    assert.equal((await head.arrayBuffer()).byteLength, 0)
+    const range = await fetch(url, { headers: { Range: 'bytes=0-1' } })
+    assert.equal(range.status, 206)
+    assert.equal(range.headers.get('content-range'), `bytes 0-1/${bytes.length}`)
+    assert.equal(await range.text(), 'RI')
+    const invalid = await fetch(url, { headers: { Range: 'bytes=1000-2000' } })
+    assert.equal(invalid.status, 416)
+    await invalid.arrayBuffer()
+    const unauthenticated = await fetch(url.replace('?token=test-only', ''), { method: 'HEAD' })
+    assert.equal(unauthenticated.status, 401)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
 })
 
 test('batch metadata completion writes Album Artist into the audio tags', async () => {

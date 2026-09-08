@@ -22,5 +22,20 @@
         ));
     }
 
-    return { buildSingleTrackPlayback, isSongCollected };
+    function playbackCacheKey(username, song, quality) {
+        // IDs overlap between providers; local IDs can also overlap between
+        // library owners. Neither private source URLs nor prefetched media
+        // may be reused after switching accounts, platforms or quality.
+        const identity = [
+            String(username || '').trim().toLowerCase(),
+            song?.source || '', song?.id || song?.songmid || song?.songId || '',
+            song?._localOwner || song?.libraryOwner || '',
+            song?.storageLocation || song?._localStorageLocation || '',
+            song?.folder || song?._localFolder || '',
+            song?.filename || song?._localFilename || '', quality || '',
+        ];
+        return `lx_url_v2_${identity.map(value => encodeURIComponent(String(value))).join('|')}`;
+    }
+
+    return { buildSingleTrackPlayback, isSongCollected, playbackCacheKey };
 });

@@ -5,6 +5,16 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const root = process.cwd()
+
+test('player offline fetch handles the shared responsive CSS without handling admin APIs', () => {
+  const context = vm.createContext({ URL, self: { location: { origin: 'https://example.test' }, addEventListener() {} } })
+  vm.runInContext(read('public/music/sw.js'), context)
+  const bypass = (path: string) => vm.runInContext(`shouldBypass({ method: 'GET', headers: { has: () => false } }, new URL(${JSON.stringify(path)}, self.location.origin))`, context)
+  assert.equal(bypass('/admin/integration-responsive.css'), false)
+  assert.equal(bypass('/admin/js/library-integration.js'), false)
+  assert.equal(bypass('/api/v1/admin/users'), true)
+  assert.equal(bypass('/admin/'), true)
+})
 const read = (relativePath: string): string => fs.readFileSync(path.join(root, relativePath), 'utf8')
 
 const readPrecacheUrls = (relativePath: string): string[] => {

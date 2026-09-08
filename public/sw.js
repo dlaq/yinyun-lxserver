@@ -1,4 +1,4 @@
-const BUILD_HASH = '339134f';
+const BUILD_HASH = '5d35dad';
 const CACHE_PREFIX = 'yinyun-admin-';
 const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
 const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;
@@ -11,6 +11,7 @@ const PRECACHE_URLS = [
     "./index.html",
     "./app.js",
     "./icon.svg",
+    "./integration-responsive.css",
     "./js/library-integration.js",
     "./js/notification-engine.js",
     "./js/ui-utils.js",

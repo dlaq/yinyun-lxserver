@@ -26,6 +26,7 @@ const playerUrls = unique([
     .map(file => `/_player/${relativePosix(playerRoot, file)}`),
   '/js/notification-engine.js',
   '/admin/js/library-integration.js',
+  '/admin/integration-responsive.css',
 ]).filter(url => {
   const file = url === '/'
     ? path.join(playerRoot, 'index.html')

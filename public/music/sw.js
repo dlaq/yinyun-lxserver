@@ -1,4 +1,4 @@
-const BUILD_HASH = '339134f';
+const BUILD_HASH = '5d35dad';
 const CACHE_PREFIX = 'yinyun-player-';
 const PRECACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-precache`;
 const RUNTIME_CACHE_NAME = `${CACHE_PREFIX}${BUILD_HASH}-runtime`;
@@ -55,11 +55,12 @@ const PRECACHE_URLS = [
     "/_player/js/web_player_state.js",
     "/js/notification-engine.js",
     "/admin/js/library-integration.js",
+    "/admin/integration-responsive.css",
 ];
 // PRECACHE:END
 
 const PRECACHE_PATHS = new Set(PRECACHE_URLS);
-const PLAYER_SHARED_ADMIN_PATHS = new Set(['/admin/js/library-integration.js']);
+const PLAYER_SHARED_ADMIN_PATHS = new Set(['/admin/js/library-integration.js', '/admin/integration-responsive.css']);
 
 const isCacheableResponse = (response) => Boolean(
     response && response.ok && (response.type === 'basic' || response.type === 'cors')

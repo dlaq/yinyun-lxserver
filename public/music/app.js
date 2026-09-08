@@ -437,6 +437,14 @@ async function hydratePersonalPlaylistArtwork(data) {
 
 function addUserTokenToUrl(url) {
     if (!url || /(?:\?|&)token=/.test(url)) return url;
+    try {
+        const parsed = new URL(url, window.location.origin);
+        if (parsed.origin !== window.location.origin || !(
+            parsed.pathname.startsWith('/api/v1/player/music/cache/file/') ||
+            parsed.pathname === '/api/v1/player/music/download' ||
+            parsed.pathname === '/api/v1/player/music/cache/cover'
+        )) return url;
+    } catch (_) { return url; }
     const token = getUserAuthHeaders()['x-user-token'] || localStorage.getItem('lx_user_token') || '';
     if (!token) return url;
     return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
@@ -627,6 +635,10 @@ function updateLocalPlaybackToken(url) {
 
     try {
         const parsedUrl = new URL(url, window.location.origin);
+        // Imported playlist metadata is untrusted. isLocal alone must not
+        // allow an external URL (including //host) to receive an account JWT.
+        if (parsedUrl.origin !== window.location.origin ||
+            !parsedUrl.pathname.startsWith('/api/v1/player/music/cache/file/')) return url;
         parsedUrl.searchParams.set('token', token);
         return url.startsWith('/')
             ? `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`
@@ -3586,7 +3598,7 @@ function disposeActivePlaybackGuard() {
     if (activePlaybackGuard) activePlaybackGuard.dispose();
 }
 
-function createPlaybackGuard({ requestId, song, index, quality, sourceType, noPlay }) {
+function createPlaybackGuard({ requestId, song, index, quality, sourceType, noPlay, isRetry = false }) {
     let startupTimer = null;
     let stallTimer = null;
     let failed = false;
@@ -3653,9 +3665,9 @@ function createPlaybackGuard({ requestId, song, index, quality, sourceType, noPl
         failed = true;
         dispose();
 
-        const cacheKey = `lx_url_${cleanSongData(song).id}_${quality}`;
+        const cacheKey = getPlaybackCacheKey(song, quality);
         localStorage.removeItem(cacheKey);
-        prefetchManager.cache.delete(song.id);
+        prefetchManager.cache.delete(cacheKey);
         stopFailedMediaRequest();
 
         console.error(`[Player] ${sourceType} playback failed:`, error);
@@ -3667,6 +3679,17 @@ function createPlaybackGuard({ requestId, song, index, quality, sourceType, noPl
                 return;
             }
             if (sourceType === 'server_cache') {
+                if (song.isLocal || song.url?.startsWith('/api/v1/player/music/cache/file/')) {
+                    if (isRetry !== 'local_retry') {
+                        showInfo('本地播放中断，正在重新验证并重试一次...');
+                        await playSong(song, index, quality, !playRequested, 'local_retry');
+                        return;
+                    }
+                    setPlayerStatus('本地文件播放失败');
+                    showError('本地文件仍无法播放，请检查文件是否存在、媒体格式及网络连接。');
+                    updatePlayButton(false);
+                    return;
+                }
                 showInfo('本地文件无法播放，正在尝试在线解析...');
                 await playSong(song, index, quality, !playRequested, 'local_retry');
                 return;
@@ -3768,26 +3791,35 @@ function getSourceTypeText(sourceType) {
 async function probeUrl(url) {
     if (!url) return false;
     // 本地 API 或 代理路径通常被认为有效
-    if (url.startsWith('/') || url.includes(window.location.host)) return true;
-
     try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+        if (new URL(url, window.location.origin).origin === window.location.origin) return true;
+    } catch (_) { return false; }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    try {
         // 使用 Range 请求 0-1 字节，以最小代价触发 CORS 检查和链接有效性验证
         const response = await fetch(url, {
             method: 'GET',
             headers: { 'Range': 'bytes=0-1' },
             signal: controller.signal
         });
-        clearTimeout(timeoutId);
-
+        // Some CDNs ignore Range and return the entire audio file. Stop the
+        // body after reading headers rather than silently downloading it.
+        if (response.body) await response.body.cancel();
         // 返回 200 或 206 表示链接依然可用
         return response.ok;
     } catch (e) {
         console.warn(`[Probe] URL probe failed: ${url.substring(0, 40)}...`, e.message);
         return false;
+    } finally {
+        clearTimeout(timeoutId);
+        controller.abort();
     }
+}
+
+function getPlaybackCacheKey(song, quality) {
+    return window.WebPlayerState.playbackCacheKey(localStorage.getItem('lx_sync_user'), { ...song, id: cleanSongData(song)?.id }, quality);
 }
 
 const prefetchManager = {
@@ -3799,12 +3831,13 @@ const prefetchManager = {
         this.bufferer.preload = 'auto'; // 强制浏览器尽可能多地预缓冲
     },
 
-    set(songId, data) {
-        this.cache.set(songId, { ...data, timestamp: Date.now() });
+    set(song, quality, data) {
+        const cacheKey = getPlaybackCacheKey(song, quality);
+        this.cache.set(cacheKey, { ...data, timestamp: Date.now() });
 
         // 核心升级：触发数据流预加载
         if (data.url) {
-            console.log(`[Prefetch] Pre-loading data stream for ID: ${songId}`);
+            console.log(`[Prefetch] Pre-loading data stream for ID: ${song.id}`);
             this.bufferer.src = data.url;
             this.bufferer.load(); // 诱导浏览器开始填充缓冲区
         }
@@ -3814,8 +3847,8 @@ const prefetchManager = {
             this.cache.delete(oldestKey);
         }
     },
-    get(songId) {
-        const data = this.cache.get(songId);
+    get(song, quality) {
+        const data = this.cache.get(getPlaybackCacheKey(song, quality));
         if (data && (Date.now() - data.timestamp < 30 * 60 * 1000)) {
             return data;
         }
@@ -3823,7 +3856,9 @@ const prefetchManager = {
     },
     clear() {
         this.cache.clear();
-        this.bufferer.src = '';
+        this.bufferer.pause();
+        this.bufferer.removeAttribute('src');
+        this.bufferer.load();
     }
 };
 prefetchManager.init(); // 立即初始化缓冲器
@@ -4198,10 +4233,10 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false) {
     // online resolver with source=local (which reports "unsupported local file").
     song = normalizeLocalPlaybackSong(song);
     const cleanedSong = cleanSongData(song);
-    const cacheKey = `lx_url_${cleanedSong.id}_${quality}`;
+    const cacheKey = getPlaybackCacheKey(song, quality);
 
     // 0. 本地文件/带有本地播放 URL 的歌曲：直接播放本地文件，无需走在线 API 解析
-    if ((song.isLocal || song.url?.startsWith('/api/v1/player/music/cache/file/')) && song.url && !isRetry) {
+    if ((song.isLocal || song.url?.startsWith('/api/v1/player/music/cache/file/')) && song.url) {
         if (!(await ensureLocalPlaybackAuth())) {
             const authError = new Error('\u8bf7\u5148\u91cd\u65b0\u767b\u5f55\u540c\u6b65\u8d26\u6237');
             authError.code = 'AUTH_REQUIRED';
@@ -4399,10 +4434,11 @@ async function prefetchNextSong(startFromIndex = null, depth = 0) {
         const targetQual = window.QualityManager.getBestQuality(nextSong, settings.preferredQuality || 'flac');
 
         // 1. 检查内存缓存
-        let result = prefetchManager.get(nextSong.id);
+        const account = localStorage.getItem('lx_sync_user');
+        let result = prefetchManager.get(nextSong, targetQual);
         if (result) {
             if (await probeUrl(result.url)) return;
-            prefetchManager.cache.delete(nextSong.id);
+            prefetchManager.cache.delete(getPlaybackCacheKey(nextSong, targetQual));
         }
 
         // 2. 复用统一解析逻辑 (resolveSongUrl)，且开启静默模式
@@ -4410,11 +4446,12 @@ async function prefetchNextSong(startFromIndex = null, depth = 0) {
 
         // 3. 探活获取到的链接
         if (!(await probeUrl(result.url))) {
-            localStorage.removeItem(`lx_url_${cleanSongData(nextSong).id}_${targetQual}`);
+            localStorage.removeItem(getPlaybackCacheKey(nextSong, targetQual));
             result = await resolveSongUrl(nextSong, targetQual, true, true);
         }
 
-        prefetchManager.set(nextSong.id, result);
+        if (account !== localStorage.getItem('lx_sync_user')) return;
+        prefetchManager.set(nextSong, targetQual, result);
         const sourceDesc = getSourceTypeText(result.sourceType);
         console.log(`[Prefetch] Readied: ${nextSong.name} (${result.quality} / ${sourceDesc})`);
 
@@ -4909,13 +4946,15 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
 
     // 提前检查预读缓存，以便淡出逻辑使用
     if (!targetQuality && !isRetry) {
-        urlResult = prefetchManager.get(song.id);
+        urlResult = prefetchManager.get(song, window.QualityManager.getBestQuality(song, settings.preferredQuality || 'flac'));
         if (urlResult) {
             urlResult.isPrefetch = true;
             isPrefetchFound = true;
 
             // [Optimize] 既然主播放器即将接管该 URL，立即清空缓冲器 src 以停止其后台加载
-            prefetchManager.bufferer.src = '';
+            prefetchManager.bufferer.pause();
+            prefetchManager.bufferer.removeAttribute('src');
+            prefetchManager.bufferer.load();
         }
     }
 
@@ -5005,7 +5044,7 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
 
         // [Removed] 这里的代理逻辑已统一移动至 fetchSongUrl 阶段处理，确保预加载地址一致性
 
-        audio.src = finalUrl;
+        audio.src = updateLocalPlaybackToken(finalUrl);
 
         const playbackGuard = createPlaybackGuard({
             requestId: thisRequestId,
@@ -5013,7 +5052,8 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
             index,
             quality: currentQuality || targetQuality,
             sourceType: currentSourceType,
-            noPlay
+            noPlay,
+            isRetry
         });
 
         if (noPlay) {
@@ -9104,6 +9144,8 @@ async function handleSyncLogout(skipConfirm = false) {
         favoritesReloadRequestId += 1;
         stopPlaylistSharePolling();
 
+        window.LibraryIntegration?.resetSession?.();
+
         // 1. 服务端注销 Token 不应阻塞退出。旧实现等待远端响应，局域网
         // 上游超时会把“退出”卡到一分钟；keepalive 让浏览器在后台完成注销。
         const tokenToRevoke = userToken;
@@ -9123,11 +9165,14 @@ async function handleSyncLogout(skipConfirm = false) {
         }
 
         // 3. 停止音频播放及歌词，清空内存播放状态
+        disposeActivePlaybackGuard();
+        prefetchManager.clear();
         if (typeof audio !== 'undefined' && audio) {
             try {
                 audio.pause();
                 audio.currentTime = 0;
-                audio.src = '';
+                audio.removeAttribute('src');
+                audio.load();
             } catch (e) {}
         }
         if (typeof lyricPlayer !== 'undefined' && lyricPlayer && typeof lyricPlayer.stop === 'function') {

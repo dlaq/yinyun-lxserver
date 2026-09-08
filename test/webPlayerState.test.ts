@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-const { buildSingleTrackPlayback, isSongCollected } = require('../public/music/js/web_player_state.js')
+const { buildSingleTrackPlayback, isSongCollected, playbackCacheKey } = require('../public/music/js/web_player_state.js')
+
+test('URL and prefetch keys isolate users, platforms, qualities and local owners', () => {
+  const song = { id: 'same-id', source: 'tx' }
+  const keys = [
+    playbackCacheKey('alice', song, 'flac'),
+    playbackCacheKey('bob', song, 'flac'),
+    playbackCacheKey('alice', { ...song, source: 'wy' }, 'flac'),
+    playbackCacheKey('alice', song, '128k'),
+    playbackCacheKey('alice', { ...song, libraryOwner: 'bob' }, 'flac'),
+  ]
+  assert.equal(new Set(keys).size, keys.length)
+  assert.equal(playbackCacheKey(' Alice ', song, 'flac'), keys[0])
+})
 
 test('single playlist playback never falls back to an unrelated default list', () => {
   const list = [{ id: 'one' }, { id: 'two' }]

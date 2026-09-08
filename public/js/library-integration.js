@@ -9,7 +9,11 @@
         importData: null,
         importRecords: [],
         localPlaylists: [],
+        localPlaylistsLoaded: false,
         remotePlaylists: [],
+        importRequestSerial: 0,
+        playlistRequestSerial: 0,
+        activationSerial: 0,
         filter: 'all',
         selected: new Set(),
         downloadSelections: new Map(),
@@ -34,6 +38,7 @@
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[char]);
     const unwrap = payload => payload?.data ?? payload;
+    const renderedRows = new WeakMap();
 
     async function api(path, options = {}) {
         const legacyToken = localStorage.getItem('lx_user_token') || '';
@@ -44,6 +49,7 @@
         if (!nativeToken && !legacyToken && !hasAdminToken && path !== '/api/v1/auth/login') throw new Error('请先登录音云用户');
         const userToken = nativeToken || legacyToken;
         const username = state.username || legacyUser;
+        const sessionKey = `${state.username}\n${state.token}`;
         const response = await fetch(path, {
             ...options,
             // Match/index/queue responses are mutable and must not be served
@@ -59,6 +65,11 @@
             },
         });
         const payload = await response.json().catch(() => ({}));
+        if (sessionKey !== `${state.username}\n${state.token}`) {
+            const error = new Error('已忽略上一个账户的过期响应');
+            error.code = 'STALE_SESSION';
+            throw error;
+        }
         if (!response.ok) throw new Error(payload?.error?.message || `请求失败（${response.status}）`);
         return unwrap(payload);
     }
@@ -67,12 +78,14 @@
         const button = el(buttonId);
         if (!button) return;
         if (busy) {
-            button.dataset.original = button.innerHTML;
+            if (button.dataset.busy !== 'true') button.dataset.original = button.innerHTML;
             button.innerHTML = `<i class="fas fa-circle-notch fa-spin"></i> ${escapeHtml(text)}`;
         } else if (button.dataset.original) {
             button.innerHTML = button.dataset.original;
         }
         button.disabled = busy;
+        button.dataset.busy = String(busy);
+        button.setAttribute('aria-busy', String(busy));
     }
 
     function importRecordLabel(record, playlist) {
@@ -93,7 +106,8 @@
         if (!select) return
         const sorted = [...(records || [])].sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''))
         const playlists = new Map((state.localPlaylists || []).map(item => [String(item.id), item]))
-        const active = playlists.size
+        const previousSelection = select.value;
+        const active = state.localPlaylistsLoaded
             ? sorted.filter(record => playlists.has(String(record?.yinyunPlaylistId)))
             : sorted
         const seenYinyunPlaylists = new Set()
@@ -104,7 +118,7 @@
             return true
         })
         state.importRecords = visible
-        if (state.importId && !visible.some(record => record.importId === state.importId) && playlists.size) {
+        if (state.importId && !visible.some(record => record.importId === state.importId) && state.localPlaylistsLoaded) {
             state.importId = ''
             state.importData = null
             el('integration-result-panel')?.classList.add('hidden')
@@ -116,7 +130,8 @@
             }).join('')}`
             : '<option value="">暂无当前音云导入歌单</option>'
         const currentRecord = visible.find(record => record.importId === state.importId)
-        if (currentRecord) select.value = currentRecord.yinyunPlaylistId
+        if (visible.some(record => String(record.yinyunPlaylistId) === previousSelection)) select.value = previousSelection
+        else if (currentRecord) select.value = currentRecord.yinyunPlaylistId
         if (open) open.disabled = !select.value
     }
 
@@ -124,13 +139,40 @@
         const playlistId = el('integration-import-history')?.value || ''
         const record = recordForPlaylistId(playlistId)
         const open = el('integration-open-history-btn')
+        if (open?.dataset.busy === 'true') setBusy('integration-open-history-btn', false);
         if (open) open.disabled = !record
-        if (record) state.importId = String(record.importId || '')
+        // Choosing in the dropdown is not opening. Keep actions bound to the
+        // record actually displayed, and cancel any older in-flight open.
+        state.importRequestSerial++;
     }
 
     function notifyError(error) {
+        if (error?.code === 'STALE_SESSION') return;
         console.error('[LibraryIntegration]', error);
         if (typeof showError === 'function') showError(error.message || String(error));
+    }
+
+    function setSession(username, token) {
+        if (state.username !== username) {
+            state.importRequestSerial++;
+            state.playlistRequestSerial++;
+            state.importId = '';
+            state.importData = null;
+            state.importRecords = [];
+            state.localPlaylists = [];
+            state.localPlaylistsLoaded = false;
+            state.remotePlaylists = [];
+            state.selected.clear();
+            state.downloadSelections.clear();
+            state.queueSongs.clear();
+            el('integration-result-panel')?.classList.add('hidden');
+            for (const id of ['integration-import-history', 'integration-yinyun-playlist', 'integration-songloft-playlist']) {
+                if (el(id)) el(id).innerHTML = '<option value="">等待加载当前账户歌单</option>';
+            }
+            if (el('integration-queue-list')) el('integration-queue-list').textContent = '';
+        }
+        state.username = username;
+        state.token = token;
     }
 
     function updateAuth(connected) {
@@ -155,9 +197,9 @@
             const payload = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(payload?.error?.message || '用户登录失败');
             const data = unwrap(payload);
-            state.token = data.accessToken || data.access_token || '';
-            if (!state.token) throw new Error('服务器未返回用户令牌');
-            state.username = username;
+            const token = data.accessToken || data.access_token || '';
+            if (!token) throw new Error('服务器未返回用户令牌');
+            setSession(username, token);
             el('integration-password').value = '';
             state.importId = '';
             state.importData = null;
@@ -208,24 +250,37 @@
 
     async function loadImportRecords() {
         const data = await api('/api/v1/integration/playlist/imports')
-        if (Array.isArray(data.playlists)) state.localPlaylists = data.playlists
+        if (Array.isArray(data.playlists)) {
+            state.localPlaylists = data.playlists;
+            state.localPlaylistsLoaded = true;
+        }
         renderImportHistory(data.records || [])
     }
 
     async function loadPlaylists() {
+        const request = ++state.playlistRequestSerial;
         const [local, remote] = await Promise.all([
             api('/api/v1/playlists'),
             api('/api/v1/integration/songloft/playlists'),
         ]);
-        state.localPlaylists = Array.isArray(local) ? local : []
-        state.remotePlaylists = Array.isArray(remote.playlists) ? remote.playlists : []
+        if (request !== state.playlistRequestSerial) return;
+        if (!Array.isArray(local) || !Array.isArray(remote?.playlists)) throw new Error('歌单响应格式异常，保留上一次结果');
+        state.localPlaylists = local;
+        state.localPlaylistsLoaded = true;
+        state.remotePlaylists = remote.playlists;
         const localSelect = el('integration-yinyun-playlist');
         const remoteSelect = el('integration-songloft-playlist');
+        // Read the choices after await: the user may have changed them while
+        // a refresh was pending. Rebuilding options must not reset the target.
+        const localChoice = localSelect.value;
+        const remoteChoice = remoteSelect.value;
         localSelect.innerHTML = '<option value="">选择音云歌单</option>' + local.map(item =>
             `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${Number(item.trackCount || 0)} 首</option>`).join('');
         remoteSelect.innerHTML = '<option value="">按同名自动创建/匹配</option>' + (remote.playlists || []).map(item =>
-            `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${Number(item.song_count || item.songCount || 0)} 首</option>`).join('');
-        if (state.importData?.yinyunPlaylistId) localSelect.value = state.importData.yinyunPlaylistId;
+            `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${remotePlaylistCount(item) ?? 0} 首</option>`).join('');
+        if (local.some(item => String(item.id) === localChoice)) localSelect.value = localChoice;
+        else if (state.importData?.yinyunPlaylistId) localSelect.value = state.importData.yinyunPlaylistId;
+        if (remote.playlists.some(item => String(item.id) === remoteChoice)) remoteSelect.value = remoteChoice;
         localSelect.onchange = () => {
             updatePlaylistDeleteButtons();
             updateImportCounts();
@@ -434,14 +489,20 @@
     async function openImportById(importId, showMessage = true) {
         importId = String(importId || '').trim();
         if (!importId) return notifyError(new Error('请先从歌单列表选择要打开的歌单'));
+        const request = ++state.importRequestSerial;
+        if (showMessage) setBusy('integration-open-history-btn', true, '加载中…');
         try {
             const data = await api(`/api/v1/integration/playlist/import/${encodeURIComponent(importId)}`);
+            if (request !== state.importRequestSerial) return;
             state.importId = importId;
-            renderImport(data);
+            renderImport(data, { reveal: showMessage });
             await loadImportRecords();
             await loadPlaylists();
-            if (showMessage && typeof showSuccess === 'function') showSuccess(`已打开“${data.name || '导入歌单'}”，重新匹配 ${data.counts?.total || 0} 首歌曲`);
-        } catch (error) { notifyError(error); }
+            if (request === state.importRequestSerial && showMessage && typeof showSuccess === 'function') showSuccess(`已打开“${data.name || '导入歌单'}”，重新匹配 ${data.counts?.total || 0} 首歌曲`);
+        } catch (error) { if (request === state.importRequestSerial) notifyError(error); }
+        finally {
+            if (request === state.importRequestSerial && showMessage) setBusy('integration-open-history-btn', false);
+        }
     }
 
     async function openImport() {
@@ -455,10 +516,18 @@
         return openImportById(record.importId)
     }
 
-    function renderImport(data) {
+    function renderImport(data, { reveal = true } = {}) {
+        const previous = state.importData;
+        const sameImport = previous && previous.importId === data.importId;
+        const sourceKey = item => JSON.stringify(item?.source || {});
+        const previousItems = new Map((previous?.items || []).map(item => [Number(item.index), sourceKey(item)]));
+        const selectable = new Set((data.items || []).filter(item =>
+            sameImport && previousItems.get(Number(item.index)) === sourceKey(item) &&
+            item.status !== 'matched' && item.downloadable !== false && !item.localCandidate
+        ).map(item => Number(item.index)));
+        for (const index of state.selected) if (!selectable.has(index)) state.selected.delete(index);
+        for (const index of state.downloadSelections.keys()) if (!selectable.has(index)) state.downloadSelections.delete(index);
         state.importData = data;
-        state.selected.clear();
-        state.downloadSelections.clear();
         state.importId = String(data.importId || state.importId || '');
         el('integration-result-panel').classList.remove('hidden');
         el('integration-result-title').textContent = data.name || '匹配结果';
@@ -470,7 +539,7 @@
         el('integration-count-yinyun').textContent = counts.yinyunMatched ?? counts.localMatched ?? 0;
         updateImportCounts();
         renderRows();
-        el('integration-result-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (reveal) el('integration-result-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     function compactCandidate(value, fallbackSource = '') {
@@ -981,7 +1050,7 @@
             const title = match?.candidate;
             return `<div class="integration-source-cell"><span class="match-pill status-${escapeHtml(effectiveStatus)}">${label}: ${statusLabel(effectiveStatus, match)}</span>${title ? `<small>${escapeHtml(title.title || '')} · ${escapeHtml(title.artist || '')}</small><button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.previewLocalCandidate(${Number(index)}, '${provider}', 0)">试听</button>` : ''}</div>`;
         };
-        body.innerHTML = visible.length ? visible.map(item => {
+        const markup = visible.length ? visible.map(item => {
             const source = item.source || {};
             const checked = state.selected.has(Number(item.index));
             const selected = state.downloadSelections.get(Number(item.index));
@@ -991,8 +1060,12 @@
             const confirmButtons = item.status === 'ambiguous' ? `<div class="integration-confirm-actions">${item.localCandidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'local')" title="使用共享曲库中的本地文件">采用本地</button>` : ''}${item.yinyun?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'yinyun')" title="使用音云候选">采用音云</button>` : ''}${item.songloft?.candidate ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.resolveItem(${Number(item.index)}, 'songloft')" title="使用 Songloft 候选">采用 Songloft</button>` : ''}</div>` : '';
             const manualButton = item.status !== 'matched' || item.replaceable ? `<button type="button" class="btn-secondary btn-xs" onclick="LibraryIntegration.openCandidatePicker(${Number(item.index)})"><i class="fas fa-headphones"></i> ${selected ? '更换版本' : item.replaceable ? '替换版本' : '选择版本'}</button>` : '';
             const selectionText = selected ? `<small class="integration-match-source">${selected.replaceLocal ? '已选替换：' : '已选：'}${escapeHtml(selected.title)} · ${escapeHtml(selected.artist)}</small>` : '';
-            return `<tr><td><input type="checkbox" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td>${escapeHtml(source.album || '—')}</td><td>${statusCell(item.yinyun, '音云', item.index, 'yinyun')}</td><td>${statusCell(item.songloft, 'Songloft', item.index, 'songloft')}</td><td><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${item.localCandidate && item.status !== 'matched' ? '<small class="integration-match-source">共享曲库已有本地文件，可试听；索引状态可能正在刷新</small>' : ''}${selectionText}${manualButton}${confirmButtons}</td></tr>`;
+            return `<tr class="integration-track-row"><td class="integration-track-select"><input type="checkbox" aria-label="选择 ${escapeHtml(source.title || '未知歌曲')}" ${checked ? 'checked' : ''} ${canSelect ? '' : 'disabled'} onchange="LibraryIntegration.toggleItem(${Number(item.index)}, this.checked)"></td><td class="integration-track-title"><strong>${escapeHtml(source.title || '未知歌曲')}</strong><small>${escapeHtml(source.artist || '')}</small></td><td class="integration-track-album" data-label="专辑">${escapeHtml(source.album || '—')}</td><td data-label="音云索引">${statusCell(item.yinyun, '音云', item.index, 'yinyun')}</td><td data-label="Songloft 索引">${statusCell(item.songloft, 'Songloft', item.index, 'songloft')}</td><td class="integration-track-result" data-label="处理结果"><span class="match-pill status-${escapeHtml(item.status)}">${escapeHtml(decision)}</span>${item.localCandidate && item.status !== 'matched' ? '<small class="integration-match-source">共享曲库已有本地文件，可试听；索引状态可能正在刷新</small>' : ''}${selectionText}${manualButton}${confirmButtons}</td></tr>`;
         }).join('') : '<tr><td colspan="6" class="integration-empty">当前筛选没有歌曲</td></tr>';
+        if (renderedRows.get(body) !== markup) {
+            body.innerHTML = markup;
+            renderedRows.set(body, markup);
+        }
         document.querySelectorAll('[data-integration-filter]').forEach(button => button.classList.toggle('active', button.dataset.integrationFilter === state.filter));
         el('integration-selected-count').textContent = `已选 ${state.selected.size} 首`;
         const selectable = visible.filter(item => item.status === 'missing' && !item.localCandidate && item.downloadable !== false);
@@ -1194,12 +1267,20 @@
     }
 
     function setActive(active) {
-        state.panelActive = Boolean(active) || Boolean(el('view-library-integration')?.classList.contains('active'));
+        state.panelActive = Boolean(active);
         if (!state.panelActive) {
+            state.activationSerial++;
             stopPolling();
             return;
         }
         if (state.token) startPolling();
+    }
+
+    function resetSession() {
+        setActive(false);
+        setSession('', '');
+        closePreviewPlayer();
+        updateAuth(false);
     }
 
     document.addEventListener('visibilitychange', () => {
@@ -1210,19 +1291,26 @@
     });
 
     async function restoreSavedUserSession() {
-        const savedUser = String(localStorage.getItem('lx_sync_user') || sessionStorage.getItem('yinyun.integration.username') || '').trim();
+        const playerUser = String(localStorage.getItem('lx_sync_user') || '').trim();
+        const playerToken = localStorage.getItem('lx_user_token') || '';
+        // The admin can connect another user's library in this same tab.
+        // Returning to the player must use its own credential pair, never
+        // pair the player username with the admin integration tab token.
+        if (el('view-my-playlists')) {
+            setSession(playerUser, playerToken);
+            updateAuth(Boolean(playerUser && playerToken));
+            return Boolean(playerUser && playerToken);
+        }
+        const savedUser = String(sessionStorage.getItem('yinyun.integration.username') || '').trim();
         const persistedToken = String(sessionStorage.getItem('yinyun.integration.access_token') || '').trim();
-        if (persistedToken) {
-            state.token = persistedToken;
-            state.username = savedUser || String(sessionStorage.getItem('yinyun.integration.username') || '').trim();
+        if (persistedToken && savedUser) {
+            setSession(savedUser, persistedToken);
             updateAuth(Boolean(state.username));
             return Boolean(state.username);
         }
-        const savedToken = localStorage.getItem('lx_user_token') || '';
-        if (!savedUser || !savedToken) return false;
+        if (!playerUser || !playerToken) return false;
         try {
-            state.token = savedToken;
-            state.username = savedUser;
+            setSession(playerUser, playerToken);
             updateAuth(true);
             return true;
         } catch (error) {
@@ -1232,6 +1320,7 @@
     }
 
     async function activate() {
+        const activation = ++state.activationSerial;
         const savedUser = sessionStorage.getItem('yinyun.integration.username');
         const legacyUser = localStorage.getItem('lx_sync_user') || savedUser || '';
         const legacyToken = localStorage.getItem('lx_user_token') || '';
@@ -1245,11 +1334,11 @@
         // present.  Refresh to a native access token before loading playlists;
         // otherwise the badge says “已连接” but both playlist requests are
         // rejected and the selects stay empty.
-        if (!state.token || state.token === 'legacy') await restoreSavedUserSession();
+        await restoreSavedUserSession();
         if (state.token) {
             try {
                 await refreshAll();
-                setActive(true);
+                if (activation === state.activationSerial) setActive(true);
             } catch (error) {
                 const message = String(error?.message || error || '');
                 const authFailure = /401|403|登录状态无效|过期|unauthori[sz]ed|token/i.test(message);
@@ -1263,7 +1352,7 @@
                     if (await restoreSavedUserSession()) {
                         try {
                             await refreshAll();
-                            setActive(true);
+                            if (activation === state.activationSerial) setActive(true);
                             return;
                         } catch (retryError) {
                             state.token = '';
@@ -1279,7 +1368,7 @@
     }
 
     window.LibraryIntegration = {
-        activate, login, refreshAll, refreshStatus, loadQueue, clearQueueHistory, importPlaylist, openSelectedImport,
+        activate, login, resetSession, refreshAll, refreshStatus, loadQueue, clearQueueHistory, importPlaylist, openSelectedImport,
         onHistoryChange, retryQueueItem, removeQueueItem,
         setFilter, toggleItem, toggleVisible, completeSelected, completeAll,
         triggerScan, refreshBothIndexes, refreshYinyunIndex, refreshSongloftIndex, resolveItem, updateSyncMode, syncPlaylist,

@@ -21,6 +21,9 @@ test('rejects only the removed unversioned API namespace', () => {
 test('allows query credentials only on read-only player media endpoints', () => {
   assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/cover', 'GET'), true)
   assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/file/dlaq/song.flac', 'GET'), true)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/file/dlaq/song.flac', 'HEAD'), true)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/file/dlaq/song.flac', 'DELETE'), false)
+  assert.equal(allowsPlayerQueryToken('/api/v1/player/user/settings', 'HEAD'), false)
   assert.equal(allowsPlayerQueryToken('/api/v1/player/music/download', 'GET'), true)
   assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/cover', 'POST'), false)
   assert.equal(allowsPlayerQueryToken('/api/v1/player/music/cache/file', 'GET'), false)
